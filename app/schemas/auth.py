@@ -31,7 +31,7 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     is_active: bool = True
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -52,7 +52,7 @@ class APIKeyResponse(BaseModel):
     key_hash: str  # Only the hash, not the full key
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -68,7 +68,7 @@ class DeviceResponse(BaseModel):
     public_key: str
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 

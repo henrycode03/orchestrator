@@ -37,7 +37,7 @@ class ProjectResponse(ProjectBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -75,7 +75,7 @@ class TaskResponse(TaskBase):
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -108,7 +108,7 @@ class SessionResponse(SessionBase):
     resumed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -137,7 +137,7 @@ class TaskExecuteRequest(BaseModel):
     task_id: Optional[int] = None
     created_at: Optional[datetime] = None
     use_demo_mode: bool = True  # Toggle between demo and real execution
-    
+
     class Config:
         from_attributes = True
 
@@ -169,7 +169,7 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     is_active: bool = True
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -190,7 +190,7 @@ class APIKeyResponse(BaseModel):
     key_hash: str
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -206,7 +206,7 @@ class DeviceResponse(BaseModel):
     public_key: str
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 

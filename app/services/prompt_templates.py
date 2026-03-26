@@ -27,17 +27,21 @@ from enum import Enum
 
 #: Root directory where ALL OpenClaw projects live.
 #: Resolved once at import time so every part of the codebase agrees on the path.
-OPENCLAW_WORKSPACE_ROOT: Path = Path(
-    os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/projects")
-).expanduser().resolve()
+OPENCLAW_WORKSPACE_ROOT: Path = (
+    Path(os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/projects"))
+    .expanduser()
+    .resolve()
+)
 
 
 # ---------------------------------------------------------------------------
 # Orchestration State
 # ---------------------------------------------------------------------------
 
+
 class OrchestrationStatus(str, Enum):
     """Orchestration phases"""
+
     PLANNING = "planning"
     EXECUTING = "executing"
     DEBUGGING = "debugging"
@@ -50,6 +54,7 @@ class OrchestrationStatus(str, Enum):
 @dataclass
 class StepResult:
     """Result of executing a single step"""
+
     step_number: int
     status: str  # "success" | "failed"
     output: str = ""
@@ -64,7 +69,7 @@ class OrchestrationState:
     """
     Carries all context through the full plan → execute → debug → revise cycle.
     Pass this into every PromptTemplates builder so the LLM always has full history.
-    
+
     Workspace layout (always enforced):
     ~/.openclaw/workspace/projects/
       <project_name>/ ← project_dir
@@ -72,6 +77,7 @@ class OrchestrationState:
         .openclaw/
           session_<id>.json ← session manifest written on close
     """
+
     session_id: str
     task_description: str
     project_name: str = ""  # e.g. "my-api-service" (slug, no spaces)
@@ -79,7 +85,9 @@ class OrchestrationState:
     plan: List[Dict[str, Any]] = field(default_factory=list)
     current_step_index: int = 0
     execution_results: List[StepResult] = field(default_factory=list)
-    debug_attempts: List[Dict[str, Any]] = field(default_factory=list)  # per-step retry history
+    debug_attempts: List[Dict[str, Any]] = field(
+        default_factory=list
+    )  # per-step retry history
     changed_files: List[str] = field(default_factory=list)
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
@@ -120,7 +128,7 @@ class OrchestrationState:
 
     @property
     def remaining_steps(self) -> List[Dict[str, Any]]:
-        return self.plan[self.current_step_index:]
+        return self.plan[self.current_step_index :]
 
     def record_success(self, result: StepResult) -> None:
         self.execution_results.append(result)
@@ -129,11 +137,13 @@ class OrchestrationState:
         self.current_step_index += 1
 
     def record_failure(self, result: StepResult) -> None:
-        self.debug_attempts.append({
-            "attempt": result.attempt,
-            "error": result.error_message,
-            "output": result.output,
-        })
+        self.debug_attempts.append(
+            {
+                "attempt": result.attempt,
+                "error": result.error_message,
+                "output": result.output,
+            }
+        )
 
     def prior_results_summary(self) -> str:
         if not self.execution_results:
@@ -151,6 +161,7 @@ class OrchestrationState:
 # Token Estimation Helper
 # ---------------------------------------------------------------------------
 
+
 def estimate_token_count(text: str) -> int:
     """
     Rough token count estimate (1 token ≈ 4 chars for English text).
@@ -163,22 +174,23 @@ def estimate_token_count(text: str) -> int:
 # Prompt Templates
 # ---------------------------------------------------------------------------
 
+
 class PromptTemplates:
     """
     Collection of LLM prompt templates for OpenClaw orchestration.
-    
+
     Phase templates (call in order):
     1. TASK_PLANNING — one call, produces JSON step plan
     2. STEP_EXECUTION — one call per step
     3. DEBUGGING_TASK — one call per failed attempt
     4. PLAN_REVISION — one call when debugging signals fix_type=revise_plan
     5. TASK_SUMMARY — one call at the end
-    
+
     Supporting templates:
     CODE_IMPLEMENTATION, CODE_REVIEW, GIT_COMMIT, TESTING_STRATEGY,
     DEPLOYMENT_CHECKLIST, SESSION_CONTEXT, ERROR_RECOVERY,
     TOOL_USAGE_GUIDE, STATUS_REPORT
-    
+
     Note: All prompts are designed to be concise to avoid context window overflow.
     """
 
@@ -516,8 +528,15 @@ A clear status report covering current state, progress percentage, blockers, and
         template = cls.get_template(template_name)
         if not template:
             # Get available templates by trying common names
-            common_templates = ["task_execution", "task_planning", "task_debugging", 
-                              "plan_revision", "task_summary", "tool_call", "agent_response"]
+            common_templates = [
+                "task_execution",
+                "task_planning",
+                "task_debugging",
+                "plan_revision",
+                "task_summary",
+                "tool_call",
+                "agent_response",
+            ]
             raise ValueError(
                 f"Unknown template: '{template_name}'. "
                 f"Available: {common_templates}"
@@ -534,7 +553,7 @@ A clear status report covering current state, progress percentage, blockers, and
     ) -> str:
         """
         Build a prompt for task planning phase.
-        
+
         Args:
             task_description: The task to plan.
             project_context: Additional context about the project.
@@ -545,7 +564,10 @@ A clear status report covering current state, progress percentage, blockers, and
             Planning prompt string ready for LLM call.
         """
         ws_root = workspace_root or str(OPENCLAW_WORKSPACE_ROOT)
-        proj_dir = project_dir or f"{ws_root}/{project_context.split()[0] if project_context else 'project'}"
+        proj_dir = (
+            project_dir
+            or f"{ws_root}/{project_context.split()[0] if project_context else 'project'}"
+        )
 
         context = {
             "task_description": task_description,
@@ -569,7 +591,7 @@ A clear status report covering current state, progress percentage, blockers, and
     ) -> str:
         """
         Build a prompt for step execution phase.
-        
+
         Args:
             step_description: Description of the current step.
             step_commands: Commands to execute for this step.
@@ -588,7 +610,8 @@ A clear status report covering current state, progress percentage, blockers, and
             "verification_command": verification_command or "None provided",
             "rollback_command": rollback_command or "None provided",
             "expected_files": "\n".join(f"- {f}" for f in (expected_files or [])),
-            "completed_steps_summary": completed_steps_summary or "No steps completed yet.",
+            "completed_steps_summary": completed_steps_summary
+            or "No steps completed yet.",
             "project_context": project_context or "No additional context.",
         }
 
@@ -609,7 +632,7 @@ A clear status report covering current state, progress percentage, blockers, and
     ) -> str:
         """
         Build a prompt for debugging phase.
-        
+
         Args:
             step_description: Description of the failed step.
             error_message: The error that occurred.
@@ -625,10 +648,13 @@ A clear status report covering current state, progress percentage, blockers, and
             Debugging prompt string ready for LLM call.
         """
         ws_root = workspace_root or str(OPENCLAW_WORKSPACE_ROOT)
-        prior_attempts_text = "\n".join(
-            f"Attempt {a['attempt']}: {a['error']}"
-            for a in (prior_debug_attempts or [])
-        ) or "No prior attempts."
+        prior_attempts_text = (
+            "\n".join(
+                f"Attempt {a['attempt']}: {a['error']}"
+                for a in (prior_debug_attempts or [])
+            )
+            or "No prior attempts."
+        )
 
         context = {
             "step_description": step_description,
@@ -654,10 +680,10 @@ A clear status report covering current state, progress percentage, blockers, and
     ) -> str:
         """
         Build a prompt for task execution (legacy single-mode method).
-        
+
         This is kept for backward compatibility but the new orchestration
         workflow uses build_planning_prompt() + build_execution_prompt() + build_debugging_prompt().
-        
+
         Args:
             task_description: The task to execute.
             project_context: Additional context about the project.
@@ -681,14 +707,14 @@ A clear status report covering current state, progress percentage, blockers, and
             "Git operations",
             "Code execution",
             "API calls",
-            "Database queries"
+            "Database queries",
         ]
 
         context = {
             "task_description": task_description,
             "project_context": project_ctx,
             "recent_activity": logs_context,
-            "available_tools": "\n".join(f"- {tool}" for tool in tools_list)
+            "available_tools": "\n".join(f"- {tool}" for tool in tools_list),
         }
 
         return cls.render("task_execution", **context)
@@ -703,7 +729,7 @@ A clear status report covering current state, progress percentage, blockers, and
     ) -> str:
         """
         Build a prompt for plan revision phase.
-        
+
         Args:
             original_plan: The original plan before failures.
             failed_steps: Steps that failed during execution.
@@ -725,7 +751,7 @@ A clear status report covering current state, progress percentage, blockers, and
             "original_plan": original_plan_text,
             "failed_steps": failed_steps_text,
             "debug_analysis": debug_analysis,
-            "completed_steps": completed_steps_text
+            "completed_steps": completed_steps_text,
         }
 
         # Use the PLAN_REVISION template
@@ -743,7 +769,7 @@ A clear status report covering current state, progress percentage, blockers, and
     ) -> str:
         """
         Build a prompt for task summary phase.
-        
+
         Args:
             task_description: Original task description.
             plan_summary: Summary of the plan executed.
@@ -763,7 +789,7 @@ A clear status report covering current state, progress percentage, blockers, and
             "execution_results_summary": execution_results_summary,
             "changed_files": changed_files_text,
             "num_debug_attempts": num_debug_attempts,
-            "final_status": final_status
+            "final_status": final_status,
         }
 
         # Use the TASK_SUMMARY template

@@ -8,7 +8,9 @@ from app.models import Base
 # Create database engine
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+    connect_args=(
+        {"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+    ),
 )
 
 # Create session factory
@@ -30,6 +32,7 @@ def get_db():
 
 
 # ============= TEST DATABASE HELPERS =============
+
 
 def create_test_database(test_engine):
     """Create test database tables"""

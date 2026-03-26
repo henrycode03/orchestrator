@@ -10,7 +10,9 @@ from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 router = APIRouter()
 
 
-@router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED
+)
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     """Create a new project"""
     db_project = Project(**project.model_dump())
@@ -37,16 +39,18 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/projects/{project_id}", response_model=ProjectResponse)
-def update_project(project_id: int, project_update: ProjectUpdate, db: Session = Depends(get_db)):
+def update_project(
+    project_id: int, project_update: ProjectUpdate, db: Session = Depends(get_db)
+):
     """Update a project"""
     db_project = db.query(Project).filter(Project.id == project_id).first()
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
     update_data = project_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_project, field, value)
-    
+
     db.commit()
     db.refresh(db_project)
     return db_project
@@ -58,7 +62,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     db_project = db.query(Project).filter(Project.id == project_id).first()
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
     db.delete(db_project)
     db.commit()
     return None

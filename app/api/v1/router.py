@@ -25,8 +25,9 @@ async def root():
         "version": "1.0.0",
         "status": "running",
         "docs": "/docs",
-        "openapi": "/openapi.json"
+        "openapi": "/openapi.json",
     }
+
 
 # Authentication (must be included first for JWT to work)
 api_router.include_router(
