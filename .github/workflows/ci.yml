@@ -29,15 +29,15 @@ jobs:
 
     - name: Run flake8
       run: |
-        flake8 app/ --max-line-length=120 --ignore=E501,W503
+        flake8 orchestrator/ --max-line-length=120 --ignore=E501,W503
 
     - name: Run black check
       run: |
-        black --check app/
+        black --check orchestrator/
 
     - name: Run mypy
       run: |
-        mypy app/ --ignore-missing-imports
+        mypy orchestrator/ --ignore-missing-imports
 
   lint-frontend:
     runs-on: ubuntu-latest
@@ -87,7 +87,7 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest tests/ -v --cov=app --cov-report=xml || true
+        pytest orchestrator/tests/ -v --cov=orchestrator --cov-report=xml || true
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
