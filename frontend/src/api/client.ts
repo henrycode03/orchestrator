@@ -179,7 +179,7 @@ export const sessionsAPI = {
 
   // WebSocket status stream
   getStatusStream: (id: number) => {
-    const token = localStorage.getItem('access_token');
+    void localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
     const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
@@ -189,7 +189,7 @@ export const sessionsAPI = {
 
   // WebSocket logs stream
   getLogsStream: (id: number) => {
-    const token = localStorage.getItem('access_token');
+    void localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
     const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';

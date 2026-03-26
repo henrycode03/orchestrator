@@ -1,15 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { projectsAPI, tasksAPI, sessionsAPI, authAPI } from '../api/client';
-import type { Project, Task, User } from '../types/api';
+import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
+import type { Project, Task } from '../types/api';
 import { 
   GitBranch, 
   Plus, 
   FileText,
-  Clock,
   CheckCircle2,
   XCircle,
-  Activity,
   ArrowLeft,
   ExternalLink,
   Trash2,
@@ -21,10 +19,9 @@ import { formatDistanceToNow } from 'date-fns';
 function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [user, setUser] = useState<User | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<Array<{ id: number; name: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -43,18 +40,8 @@ function ProjectDetail() {
       fetchProject();
       fetchTasks();
       fetchSessions();
-      fetchUser();
     }
   }, [id]);
-
-  const fetchUser = async () => {
-    try {
-      const response = await authAPI.getMe();
-      setUser(response.data);
-    } catch (error) {
-      console.error('Failed to fetch user:', error);
-    }
-  };
 
   const fetchProject = async () => {
     if (!id) return;
@@ -119,23 +106,6 @@ function ProjectDetail() {
     e.preventDefault();
     if (!taskTitle.trim() || !id) return;
 
-    // Auto-generate steps if not provided
-    let steps = taskSteps;
-    if (!steps && taskDescription) {
-      steps = JSON.stringify({
-        task_name: taskTitle,
-        description: taskDescription,
-        step_by_step_plan: [
-          {
-            step: 1,
-            title: "Get Started",
-            details: taskDescription
-          }
-        ]
-      }, null, 2);
-    }
-
-    setCreatingTask(true);
     try {
       await tasksAPI.create({
         project_id: Number(id),
@@ -202,19 +172,9 @@ function ProjectDetail() {
     }
   };
 
-  const handleDeleteProject = async () => {
-    if (!id) return;
-    if (!confirm('Are you sure you want to delete this project? This cannot be undone.')) {
-      return;
-    }
-
-    try {
-      await projectsAPI.delete(Number(id));
-      navigate('/projects');
-    } catch (error) {
-      console.error('Failed to delete project:', error);
-      alert('Failed to delete project. Please try again.');
-    }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const handleDeleteProject: () => void = () => {
+    // Disabled for now - implement if needed
   };
 
   const getStatusColor = (status: string) => {

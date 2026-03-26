@@ -1,30 +1,21 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { sessionsAPI, projectsAPI } from '../api/client';
-import type { Session } from '../types/api';
 import { 
   ArrowLeft, 
   Plus, 
   Terminal,
-  Settings,
   X
 } from 'lucide-react';
 
 function NewSession() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [projects, setProjects] = useState<any[]>([]);
+  const [projects, setProjects] = useState<Array<{ id: number; name: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [sessionName, setSessionName] = useState('');
   const [sessionDescription, setSessionDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
-
-  // Helper function to format dates in local time
-  const formatLocalTime = (dateString: string | null) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    return date.toLocaleString();
-  };
 
   useEffect(() => {
     fetchProjects();

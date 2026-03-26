@@ -7,19 +7,12 @@ import {
   Play, 
   Pause, 
   Square, 
-  RotateCcw, 
   Activity, 
-  Clock, 
-  Calendar,
   Terminal,
   RefreshCw,
-  Settings,
-  Wind,
-  Zap,
   Trash2,
   ArrowUp,
-  ArrowDown,
-  Filter
+  ArrowDown
 } from 'lucide-react';
 
 function SessionDashboard() {
@@ -202,7 +195,7 @@ function SessionDashboard() {
       setIsConnected(false);
     };
 
-    webSocket.onclose = (event) => {
+    webSocket.onclose = () => {
       setIsConnected(false);
       // Only reconnect if we're still on the page
       // Use exponential backoff
@@ -270,11 +263,10 @@ function SessionDashboard() {
       isConnectingRef.current = false;
     };
 
-    webSocket.onclose = (event) => {
-      console.log('Logs WebSocket closed, code:', event.code, 'reason:', event.reason);
+    webSocket.onclose = () => {
+      console.log('Logs WebSocket closed, reconnecting in 3 seconds...');
       setIsLogsConnected(false);
       isConnectingRef.current = false;
-      console.log('Logs WebSocket closed, reconnecting in 3 seconds...');
       setTimeout(() => connectLogsWebSocket(), 3000);
     };
 
@@ -381,7 +373,7 @@ function SessionDashboard() {
 
     setExecuting(true);
     try {
-      const response = await tasksAPI.execute(Number(id), {
+      await tasksAPI.execute(Number(id), {
         task: inputTask,
         timeout_seconds: 300,
         use_demo_mode: false

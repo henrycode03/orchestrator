@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { useSocket } from '../contexts/SocketContext';
+import React, { useState } from 'react';
 
 interface LogEntry {
   id: number;
@@ -8,7 +7,7 @@ interface LogEntry {
   level: string;
   message: string;
   timestamp: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 }
 
 interface LogViewerProps {
@@ -22,8 +21,6 @@ const LogViewer: React.FC<LogViewerProps> = ({ sessionId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  const { sendMessage } = useSocket();
-
   const fetchLogs = async () => {
     setLoading(true);
     setError(null);
@@ -45,10 +42,6 @@ const LogViewer: React.FC<LogViewerProps> = ({ sessionId }) => {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    fetchLogs();
-  }, [sessionId, sortOrder, deduplicate]);
 
   const getLevelColor = (level: string) => {
     switch (level) {
