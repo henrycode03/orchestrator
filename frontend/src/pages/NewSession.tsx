@@ -13,7 +13,7 @@ function NewSession() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [projects, setProjects] = useState<Array<{ id: number; name: string }>>([]);
-  const [loading, setLoading] = useState(true);
+  // const [loading, setLoading] = useState(true);
   const [sessionName, setSessionName] = useState('');
   const [sessionDescription, setSessionDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);

@@ -126,7 +126,7 @@ function SessionDashboard() {
     if (session?.project_id) {
       fetchProjectTasks();
     }
-  }, [session?.project_id, fetchProjectTasks]);
+  }, [session?.project_id]);
 
   // Poll for task status updates every 5 seconds
   useEffect(() => {
@@ -249,7 +249,7 @@ function SessionDashboard() {
     } finally {
       setIsLoadingTasks(false);
     }
-  }, [session?.project_id, tasksAPI]);
+  }, [session?.project_id]);
 
   const connectStatusWebSocket = () => {
     if (!id || isConnectingRef.current) return;
@@ -361,7 +361,7 @@ function SessionDashboard() {
     };
 
     setLogsWs(webSocket);
-  }, [id, session?.status, sessionsAPI]);
+  }, [id, session?.status]);
 
   const handleRefreshLogs = () => {
     fetchSortedLogs();
