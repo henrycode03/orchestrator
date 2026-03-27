@@ -23,7 +23,7 @@ function ProjectDetail() {
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -103,15 +103,15 @@ function ProjectDetail() {
     }
   };
 
-  // const fetchSessions = async () => {
+   // const fetchSessions = async () => {
   //   if (!id) return;
   //   try {
   //     const response = await sessionsAPI.getByProject(Number(id));
   //     setSessions(response.data || []);
   //   } catch (error) {
   //     console.error('Failed to fetch sessions:', error);
-    }
-  };
+  //   }
+  // };
 
   const generateStepsFromDescription = async (description: string) => {
     setGeneratingSteps(true);

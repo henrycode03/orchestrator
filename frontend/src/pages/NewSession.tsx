@@ -20,7 +20,8 @@ function NewSession() {
 
   useEffect(() => {
     fetchProjects();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchProjects]);
 
   const fetchProjects = async () => {
     try {

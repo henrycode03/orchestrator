@@ -127,7 +127,7 @@ function SessionDashboard() {
       fetchProjectTasks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.project_id]);
+  }, [session?.project_id, fetchProjectTasks]);
 
   // Poll for task status updates every 5 seconds
   useEffect(() => {
@@ -165,7 +165,7 @@ function SessionDashboard() {
     }, 3000);
     
     return () => clearTimeout(reconnectTimer);
-  }, [isLogsConnected]);
+  }, [isLogsConnected, connectLogsWebSocket]);
 
 // Re-fetch logs when sorting/filtering changes (debounced)
   useEffect(() => {
