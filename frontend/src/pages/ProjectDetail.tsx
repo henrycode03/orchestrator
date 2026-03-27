@@ -12,7 +12,9 @@ import {
   ExternalLink,
   Trash2,
   Play,
-  Terminal
+  Terminal,
+  Activity,
+  Clock
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -21,7 +23,7 @@ function ProjectDetail() {
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [sessions, setSessions] = useState<Array<{ id: number; name: string }>>([]);
+  const [sessions, setSessions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -34,35 +36,68 @@ function ProjectDetail() {
   const [editDescription, setEditDescription] = useState('');
   const [editSteps, setEditSteps] = useState('');
   const [updatingTask, setUpdatingTask] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (id) {
-      fetchProject();
-      fetchTasks();
-      fetchSessions();
+    console.log('🔍 ProjectDetail useEffect triggered, id:', id);
+    setError(null);
+    if (!id) {
+      setError('Invalid project ID');
+      setLoading(false);
+      return;
     }
+    
+    const loadProjectData = async () => {
+      try {
+        console.log('📡 Fetching project data for ID:', id);
+        // Fetch project, tasks, and sessions in parallel
+        const [projectRes, tasksRes, sessionsRes] = await Promise.all([
+          projectsAPI.getById(Number(id)),
+          tasksAPI.getByProject(Number(id)),
+          sessionsAPI.getByProject(Number(id))
+        ]);
+        
+        console.log('✅ Data loaded successfully');
+        setProject(projectRes.data);
+        setTasks(tasksRes.data || []);
+        setSessions(sessionsRes.data || []);
+      } catch (err) {
+        console.error('❌ Failed to load project data:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load project data');
+        navigate('/projects');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadProjectData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const fetchProject = async () => {
-    if (!id) return;
-    try {
-      const response = await projectsAPI.getById(Number(id));
-      setProject(response.data);
-    } catch (error) {
-      console.error('Failed to fetch project:', error);
-      alert('Failed to load project');
-      navigate('/projects');
-    } finally {
-      setLoading(false);
-    }
-  };
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="text-center">
+          <XCircle className="h-16 w-16 text-red-500 mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-white mb-2">Error Loading Project</h2>
+          <p className="text-slate-400 mb-4">{error}</p>
+          <button
+            onClick={() => navigate('/projects')}
+            className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-2 rounded-lg transition-colors"
+          >
+            Back to Projects
+          </button>
+        </div>
+      </div>
+    );
+  }
 
+  // Refresh tasks and sessions
   const fetchTasks = async () => {
     if (!id) return;
     try {
       const response = await tasksAPI.getByProject(Number(id));
-      setTasks(response.data);
+      setTasks(response.data || []);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
     }
@@ -72,7 +107,7 @@ function ProjectDetail() {
     if (!id) return;
     try {
       const response = await sessionsAPI.getByProject(Number(id));
-      setSessions(response.data);
+      setSessions(response.data || []);
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
     }
@@ -249,9 +284,23 @@ function ProjectDetail() {
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-slate-400 hover:text-white transition-colors"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    // Open in new tab without waiting for response
+                    window.open(project.github_url, '_blank');
+                  }}
+                  title={project.github_url}
                 >
                   <ExternalLink className="h-5 w-5" />
                 </a>
+              )}
+              {!project.github_url && (
+                <div
+                  className="text-slate-500"
+                  title="No GitHub repository linked"
+                >
+                  <ExternalLink className="h-5 w-5" />
+                </div>
               )}
             </div>
           </div>

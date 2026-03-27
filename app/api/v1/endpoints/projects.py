@@ -56,7 +56,7 @@ def update_project(
     return db_project
 
 
-@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):
     """Delete a project"""
     db_project = db.query(Project).filter(Project.id == project_id).first()
@@ -65,4 +65,4 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 
     db.delete(db_project)
     db.commit()
-    return None
+    return {"message": "Project deleted successfully"}

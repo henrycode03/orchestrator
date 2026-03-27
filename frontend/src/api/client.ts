@@ -99,7 +99,7 @@ export const tasksAPI = {
   getById: (id: number) => apiClient.get<Task>(`/tasks/${id}`),
 
   update: (id: number, data: Partial<Task>) =>
-    apiClient.patch<Task>(`/tasks/${id}`, data),
+    apiClient.put<Task>(`/tasks/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/tasks/${id}`),
 

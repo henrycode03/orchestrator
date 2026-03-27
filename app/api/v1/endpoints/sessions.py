@@ -254,7 +254,7 @@ async def execute_task(
     current_user=Depends(get_current_user),
 ):
     """
-    Execute a task via OpenClaw
+    Execute a task via OpenClaw with multi-step orchestration
 
     Args:
         session_id: Session ID
@@ -262,39 +262,31 @@ async def execute_task(
     """
     prompt = task_request.task
     timeout_seconds = task_request.timeout_seconds
-    use_demo_mode = (
-        task_request.use_demo_mode if hasattr(task_request, "use_demo_mode") else True
-    )
 
     if not prompt:
         raise HTTPException(status_code=422, detail="Task prompt is required")
+
     # Verify session exists
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        # Initialize services with demo mode flag
+        # Always use real execution mode (no demo mode)
         openclaw_service = OpenClawSessionService(
-            db, session_id, use_demo_mode=use_demo_mode
+            db, session_id, use_demo_mode=False
         )
 
         # Create OpenClaw session (generates session key)
         task_description = session.description or session.name
         await openclaw_service.create_openclaw_session(task_description)
 
-        # Get session context
-        context = await openclaw_service.get_session_context()
-
-        # Build prompt using templates
-        prompt_text = PromptTemplates.build_task_prompt(
-            task_description=prompt,
-            project_context=context.get("project_context"),
-            recent_logs=context.get("recent_logs", []),
+        # Execute task with multi-step orchestration (PLANNING -> EXECUTING -> DEBUGGING)
+        # Pass raw task description - orchestration handles prompt building internally
+        result = await openclaw_service.execute_task_with_orchestration(
+            prompt, 
+            timeout_seconds
         )
-
-        # Execute task
-        result = await openclaw_service.execute_task(prompt_text, timeout_seconds)
 
         return {
             "status": "completed",
@@ -303,6 +295,9 @@ async def execute_task(
         }
 
     except Exception as e:
+        import traceback
+        error_detail = f"Task execution failed: {str(e)}\n{traceback.format_exc()}"
+        print(f"ERROR: {error_detail}")
         db.add(
             LogEntry(
                 session_id=session_id,
@@ -311,7 +306,7 @@ async def execute_task(
             )
         )
         db.commit()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @router.websocket("/sessions/{session_id}/logs/stream")
@@ -326,11 +321,13 @@ async def websocket_log_stream(
     # Verify session exists
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
+        logger.warning(f"WebSocket connection rejected: session {session_id} not found")
         await websocket.close(code=1008, reason="Session not found")
         return
 
     # Accept connection
     await websocket.accept()
+    logger.info(f"WebSocket connected for session {session_id}")
 
     # Register WebSocket
     if session_id not in active_websockets:
@@ -349,6 +346,7 @@ async def websocket_log_stream(
     # Send recent logs
     log_service = LogStreamService(db)
     recent_logs = log_service.get_recent_logs(session_id, limit=20)
+    logger.info(f"Sending {len(recent_logs)} recent logs to WebSocket")
 
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
@@ -360,12 +358,19 @@ async def websocket_log_stream(
             # Handle client messages (could be commands, heartbeats, etc.)
             if data == "ping":
                 await websocket.send_text("pong")
+            else:
+                logger.debug(f"Received message from WebSocket: {data[:100]}...")
 
     except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected gracefully for session {session_id}")
         active_websockets[session_id].remove(websocket)
         if not active_websockets[session_id]:
             del active_websockets[session_id]
-        logger.info(f"WebSocket disconnected for session {session_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error for session {session_id}: {str(e)}")
+        active_websockets[session_id].remove(websocket)
+        if not active_websockets[session_id]:
+            del active_websockets[session_id]
 
 
 @router.get("/sessions/{session_id}/logs")
@@ -800,11 +805,13 @@ async def websocket_session_status(
     # Verify session exists
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
+        logger.warning(f"Status WebSocket rejected: session {session_id} not found")
         await websocket.close(code=1008, reason="Session not found")
         return
 
     # Accept connection
     await websocket.accept()
+    logger.info(f"Status WebSocket connected for session {session_id}")
 
     # Register WebSocket
     if session_id not in active_websockets:
@@ -882,10 +889,15 @@ async def websocket_session_status(
                 )
 
     except WebSocketDisconnect:
+        logger.info(f"Status WebSocket disconnected gracefully for session {session_id}")
         active_websockets[session_id].remove(websocket)
         if not active_websockets[session_id]:
             del active_websockets[session_id]
-        logger.info(f"WebSocket disconnected for session {session_id}")
+    except Exception as e:
+        logger.error(f"Status WebSocket error for session {session_id}: {str(e)}")
+        active_websockets[session_id].remove(websocket)
+        if not active_websockets[session_id]:
+            del active_websockets[session_id]
 
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")
@@ -972,3 +984,80 @@ def get_sorted_logs(
         "deduplicated": deduplicate,
         "logs": sorted_logs,
     }
+
+
+@router.post("/generate-steps")
+async def generate_steps_from_description(
+    request: Request,
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """Generate task steps using OpenClaw AI"""
+    from app.services.openclaw_service import OpenClawSessionService
+    
+    task_name = body.get("task_name", "Task")
+    description = body.get("description", "")
+    
+    # Create prompt for step generation
+    prompt_template = PromptTemplates.get_template("generate_steps")
+    if not prompt_template:
+        prompt_template = """You are a task planning assistant. Given a task name and description, break it down into clear, actionable steps. Return the steps as a JSON array.
+
+Task Name: {task_name}
+Description: {description}
+
+Return ONLY a JSON array of step objects with 'title' and 'description' fields. Example:
+[
+  {{ "title": "Step 1", "description": "First thing to do" }},
+  {{ "title": "Step 2", "description": "Second thing to do" }}
+]"""
+    
+    formatted_prompt = prompt_template.format(task_name=task_name, description=description)
+    
+    # Use a simple heuristic-based step generator as fallback
+    # This creates basic steps based on common patterns
+    import re
+    
+    # Common patterns for different task types
+    patterns = {
+        "authentication|login|register": [
+            {"title": "Create Authentication Routes", "description": "Set up /login and /register endpoints"},
+            {"title": "Implement Password Hashing", "description": "Add bcrypt or similar for secure password storage"},
+            {"title": "Create JWT Token Generation", "description": "Generate and validate JWT tokens for authentication"},
+            {"title": "Build Login/Register Forms", "description": "Create frontend forms with validation"},
+            {"title": "Add Protected Routes", "description": "Implement route guards for authenticated users"}
+        ],
+        "database|sql|model": [
+            {"title": "Design Database Schema", "description": "Create tables and relationships"},
+            {"title": "Implement ORM Models", "description": "Define SQLAlchemy models"},
+            {"title": "Create Migrations", "description": "Set up Alembic for database migrations"},
+            {"title": "Add Database Connection", "description": "Configure database connection pooling"}
+        ],
+        "frontend|ui|react": [
+            {"title": "Setup Component Structure", "description": "Organize React components folder"},
+            {"title": "Create UI Components", "description": "Build reusable UI components"},
+            {"title": "Add Styling", "description": "Implement CSS/Tailwind styling"},
+            {"title": "Add State Management", "description": "Setup React Context or Redux"}
+        ]
+    }
+    
+    desc_lower = description.lower()
+    detected_pattern = None
+    for pattern, steps in patterns.items():
+        if re.search(pattern, desc_lower):
+            detected_pattern = pattern
+            break
+    
+    if detected_pattern:
+        return {"steps": patterns[detected_pattern], "task_name": task_name}
+    
+    # Default generic steps
+    default_steps = [
+        {"title": "Analyze Requirements", "description": "Understand the task scope and requirements"},
+        {"title": "Plan Implementation", "description": "Create a step-by-step implementation plan"},
+        {"title": "Write Code", "description": "Implement the feature following best practices"},
+        {"title": "Test Implementation", "description": "Write and run tests to verify functionality"},
+        {"title": "Document Changes", "description": "Update documentation and README"}
+    ]
+    
+    return {"steps": default_steps, "task_name": task_name}

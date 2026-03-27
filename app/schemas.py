@@ -136,7 +136,6 @@ class TaskExecuteRequest(BaseModel):
     session_id: Optional[int] = None
     task_id: Optional[int] = None
     created_at: Optional[datetime] = None
-    use_demo_mode: bool = True  # Toggle between demo and real execution
 
     class Config:
         from_attributes = True

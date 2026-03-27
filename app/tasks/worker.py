@@ -7,6 +7,7 @@ PLANNING → EXECUTING (step-by-step) → DEBUGGING (on failure) → PLAN_REVISI
 
 import logging
 import json
+import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -24,13 +25,53 @@ from app.services.prompt_templates import (
 logger = logging.getLogger(__name__)
 
 
+def slugify_project_name(name: str) -> str:
+    """
+    Convert a project name to a clean, URL-safe slug.
+    
+    Examples:
+        "Demo API Server" -> "demo-api-server"
+        "Flask API Session" -> "flask-api-session"
+        "My Project!" -> "my-project"
+    
+    Args:
+        name: Original project name
+    
+    Returns:
+        Slugified name suitable for directory names
+    """
+    if not name:
+        return "session"
+    
+    # Convert to lowercase
+    slug = name.lower()
+    
+    # Replace spaces and underscores with hyphens
+    slug = re.sub(r'[\s_]+', '-', slug)
+    
+    # Remove special characters (keep only alphanumeric, hyphens, and underscores)
+    slug = re.sub(r'[^a-z0-9-_]', '', slug)
+    
+    # Replace multiple hyphens with single hyphen
+    slug = re.sub(r'-+', '-', slug)
+    
+    # Remove leading/trailing hyphens
+    slug = slug.strip('-')
+    
+    # Ensure we have at least "session" as fallback
+    if not slug:
+        slug = "session"
+    
+    return slug
+
+
 def get_db_session():
     """Get database session for Celery tasks"""
     engine = create_engine("sqlite:///./orchestrator.db")
     return Session(bind=engine)
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60, time_limit=360, soft_time_limit=300)
 def execute_openclaw_task(
     self,
     session_id: int,
@@ -66,13 +107,28 @@ def execute_openclaw_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
+        # Get the project associated with this session
+        project = db.query(Project).filter(Project.id == session.project_id).first() if session.project_id else None
+
         # Initialize orchestration state
+        # Use project name (not session name) to ensure all sessions in the same project
+        # build in the same folder. Multiple sessions can work on the same project.
         orchestration_state = OrchestrationState(
             session_id=str(session_id),
             task_description=prompt,
-            project_name=session.name if session else "",
+            project_name=project.name if project else "",
             project_context=context.get("project_context", "") if context else "",
         )
+
+        # Check if task has been running too long (safety check)
+        if task.started_at:
+            time_since_start = datetime.utcnow() - task.started_at
+            if time_since_start.total_seconds() > 300:  # 5 minutes
+                logger.warning(f"[ORCHESTRATION] Task {task_id} already running for {time_since_start}, marking as failed")
+                task.status = TaskStatus.FAILED
+                task.error = f"Task already running for {time_since_start}, possible duplicate execution"
+                db.commit()
+                raise Exception("Task timeout - already running too long")
 
         # Update task status
         task.status = TaskStatus.RUNNING
@@ -91,9 +147,14 @@ def execute_openclaw_task(
 
         # PHASE 1: PLANNING - Generate step plan
         logger.info("[ORCHESTRATION] Phase 1: PLANNING - generating step plan")
+        
+        # Use project_name (already slugified) for the project context
+        project_name_slug = orchestration_state.project_name.strip() or f"session-{session_id}"
+        project_context = f"Build project: {project_name_slug}"
+        
         planning_prompt = PromptTemplates.build_planning_prompt(
             task_description=prompt,
-            project_context=session_context.get("project_context"),
+            project_context=project_context,
             workspace_root=str(orchestration_state.workspace_root),
             project_dir=str(orchestration_state.project_dir),
         )
@@ -104,7 +165,39 @@ def execute_openclaw_task(
 
         # Parse planning result to get steps
         try:
-            plan_data = json.loads(planning_result.get("output", "{}"))
+            output_text = planning_result.get("output", "{}")
+            
+            # Debug: Log raw output
+            logger.info(f"[ORCHESTRATION] Raw planning output type: {type(output_text)}, length: {len(str(output_text)) if output_text else 0}")
+            
+            # OpenClaw returns: { "payloads": [ { "text": "..." } ] }
+            # Extract the actual text content
+            if isinstance(output_text, str):
+                try:
+                    output_data = json.loads(output_text)
+                    if isinstance(output_data, dict) and "payloads" in output_data:
+                        payloads = output_data.get("payloads", [])
+                        if isinstance(payloads, list) and len(payloads) > 0:
+                            # Get the text from first payload
+                            first_payload = payloads[0]
+                            if isinstance(first_payload, dict):
+                                output_text = first_payload.get("text", output_text)
+                                logger.info(f"[ORCHESTRATION] Extracted text from payload, length: {len(output_text)}")
+                    else:
+                        logger.warning(f"[ORCHESTRATION] Output is not OpenClaw format: {type(output_data)}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[ORCHESTRATION] Not JSON format: {e}")
+                    pass  # Not OpenClaw format, use as-is
+            
+            # Strip Markdown code fences if present
+            import re
+            if isinstance(output_text, str):
+                # Remove ```json or ``` wrappers
+                markdown_pattern = r'^\s*```(?:json)?\s*|\s*```$'
+                output_text = re.sub(markdown_pattern, '', output_text.strip())
+                logger.info(f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}")
+            
+            plan_data = json.loads(output_text)
             if isinstance(plan_data, list):
                 orchestration_state.plan = plan_data
                 logger.info(f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan")
@@ -136,8 +229,13 @@ def execute_openclaw_task(
             logger.info(
                 f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description[:80]}..."
             )
+            
+            # Debug: Log the step data
+            logger.info(f"[ORCHESTRATION] Step data: commands={step_commands}, verification={verification_command}")
 
             # Build execution prompt
+            # Use project_name (already slugified) for consistency
+            project_name_slug = orchestration_state.project_name.strip() or f"session-{session_id}"
             execution_prompt = PromptTemplates.build_execution_prompt(
                 step_description=step_description,
                 step_commands=step_commands,
@@ -145,7 +243,7 @@ def execute_openclaw_task(
                 rollback_command=rollback_command,
                 expected_files=expected_files,
                 completed_steps_summary=orchestration_state.prior_results_summary(),
-                project_context=session_context.get("project_context"),
+                project_context=f"Build project: {project_name_slug}",
             )
 
             # Execute step
@@ -272,6 +370,13 @@ def execute_openclaw_task(
         task.status = TaskStatus.DONE
         task.completed_at = datetime.utcnow()
         task.summary = summary_result.get("output", "")[:2000]
+        
+        # Update session status to stopped when task completes
+        if session:
+            session.status = "stopped"
+            session.is_active = False
+            session.completed_at = datetime.utcnow()
+        
         db.commit()
 
         logger.info(
@@ -288,12 +393,30 @@ def execute_openclaw_task(
         }
 
     except Exception as exc:
+        # Check if this is a timeout error
+        is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
+        
         # Update task failure
         task.status = TaskStatus.FAILED
         task.error_message = str(exc)
+        
+        # Update session status to stopped when task fails
+        if session:
+            session.status = "stopped"
+            session.is_active = False
+            session.completed_at = datetime.utcnow()
+        
+        if is_timeout:
+            task.error_message += " (Task timed out after 5 minutes)"
         db.commit()
 
         logger.error(f"[ORCHESTRATION] Task {task_id} failed: {str(exc)}")
+        if is_timeout:
+            logger.warning("[ORCHESTRATION] Task exceeded time limit - this prevents hanging tasks")
+
+        # Don't retry timeout errors
+        if is_timeout:
+            raise  # Re-raise without retry
 
         # Retry if possible
         raise self.retry(exc=exc)

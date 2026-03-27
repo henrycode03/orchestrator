@@ -5,7 +5,8 @@ import {
   ArrowLeft, 
   Plus, 
   Terminal,
-  X
+  X,
+  Settings
 } from 'lucide-react';
 
 function NewSession() {
@@ -25,8 +26,26 @@ function NewSession() {
     try {
       const response = await projectsAPI.getAll();
       setProjects(response.data);
-    } catch (error) {
+      
+      // Check if we have a project_id in the URL
+      const projectId = searchParams.get('project_id');
+      if (projectId && response.data) {
+        const project = response.data.find((p: { id: number }) => p.id === Number(projectId));
+        if (!project) {
+          console.error(`Project with ID ${projectId} not found`);
+          alert(`Project with ID ${projectId} not found. Please select a valid project.`);
+        }
+      }
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: unknown } }; message?: string };
       console.error('Failed to fetch projects:', error);
+      
+      // Show user-friendly error
+      const errorMsg = err.response?.data?.detail || 
+                      err.message || 
+                      'Failed to load projects. Please check your connection.';
+      
+      alert(`Error loading projects: ${errorMsg}`);
     } finally {
       setLoading(false);
     }
@@ -68,6 +87,27 @@ function NewSession() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
         <div className="h-8 w-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // Show error if no projects loaded
+  if (projects.length === 0 && !loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="text-center">
+          <div className="h-16 w-16 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
+            <X className="h-8 w-8 text-red-500" />
+          </div>
+          <h2 className="text-xl font-semibold text-white mb-2">No Projects Found</h2>
+          <p className="text-slate-400 mb-6">Please create a project first or check your connection.</p>
+          <Link
+            to="/projects"
+            className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-2 rounded-lg transition-colors"
+          >
+            Go to Projects
+          </Link>
+        </div>
       </div>
     );
   }

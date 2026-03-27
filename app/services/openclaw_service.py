@@ -18,6 +18,7 @@ from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
     StepResult,
+    PromptTemplates,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,15 +189,17 @@ class OpenClawSessionService:
         Returns:
             Execution result with orchestration state
         """
-        if orchestration_state is None:
-            orchestration_state = OrchestrationState(
-                session_id=str(self.session_id),
-                task_description=prompt,
-                project_name=self.session_model.name if self.session_model else "",
-                project_context="",
-            )
-
         try:
+            self._log_entry("INFO", f"[ORCHESTRATION] Starting with prompt: {prompt[:100]}...")
+            
+            if orchestration_state is None:
+                orchestration_state = OrchestrationState(
+                    session_id=str(self.session_id),
+                    task_description=prompt,
+                    project_name=self.session_model.name if self.session_model else "",
+                    project_context="",
+                )
+
             # Phase 1: PLANNING
             orchestration_state.status = OrchestrationStatus.PLANNING
             self._log_entry("INFO", "[ORCHESTRATION] Starting PLANNING phase")
@@ -214,7 +217,32 @@ class OpenClawSessionService:
 
             # Parse plan from result
             try:
-                plan = json.loads(planning_result.get("output", "[]"))
+                output_text = planning_result.get("output", "[]")
+                
+                # OpenClaw returns: { "payloads": [ { "text": "..." } ] }
+                # Extract the actual text content
+                if isinstance(output_text, str):
+                    try:
+                        output_data = json.loads(output_text)
+                        if isinstance(output_data, dict) and "payloads" in output_data:
+                            payloads = output_data.get("payloads", [])
+                            if isinstance(payloads, list) and len(payloads) > 0:
+                                # Get the text from first payload
+                                first_payload = payloads[0]
+                                if isinstance(first_payload, dict):
+                                    output_text = first_payload.get("text", output_text)
+                    except json.JSONDecodeError:
+                        pass  # Not OpenClaw format, use as-is
+                
+                # Strip Markdown code fences if present
+                if isinstance(output_text, str):
+                    import re
+                    # Remove ```json or ``` wrappers
+                    markdown_pattern = r'^\s*```(?:json)?\s*|\s*```$'
+                    output_text = re.sub(markdown_pattern, '', output_text.strip())
+                
+                self._log_entry("INFO", f"[PLANNING] Output type: {type(output_text)}, content: {output_text[:200]}...")
+                plan = json.loads(output_text)
                 if isinstance(plan, list):
                     orchestration_state.plan = plan
                     self._log_entry(
@@ -274,7 +302,7 @@ class OpenClawSessionService:
                         step, step_index, orchestration_state, execution_result
                     )
 
-                    if debug_result.fix_type == "revise_plan":
+                    if debug_result.get("fix_type") == "revise_plan":
                         # Phase 4: PLAN_REVISION
                         orchestration_state.status = OrchestrationStatus.REVISING_PLAN
                         self._log_entry(
@@ -294,15 +322,24 @@ class OpenClawSessionService:
             orchestration_state.status = OrchestrationStatus.DONE
             self._log_entry("INFO", "[ORCHESTRATION] Task completed successfully")
 
-            # Generate summary
-            summary_prompt = PromptTemplates.build_task_prompt(
+            # Generate summary using the summary template
+            execution_results_summary = orchestration_state.prior_results_summary()
+            summary_prompt = PromptTemplates.build_task_summary(
                 task_description=prompt,
-                project_context=(
-                    self.session_model.description if self.session_model else ""
-                ),
+                plan_summary=json.dumps(orchestration_state.plan, indent=2)[:500],
+                execution_results_summary=execution_results_summary,
+                changed_files=orchestration_state.changed_files,
+                num_debug_attempts=len(orchestration_state.debug_attempts),
+                final_status="completed"
             )
 
+            self._log_entry("INFO", "[ORCHESTRATION] Generating summary...")
             summary_result = await self.execute_task(summary_prompt, timeout_seconds=60)
+
+            self._log_entry("INFO", f"[ORCHESTRATION] Summary result type: {type(summary_result)}")
+            if isinstance(summary_result, str):
+                self._log_entry("ERROR", f"[ORCHESTRATION] Summary result is string, not dict! Content: {summary_result[:200]}")
+                raise OpenClawSessionError(f"Summary result is not a dict: {type(summary_result)}")
 
             return {
                 "status": "completed",
@@ -445,13 +482,19 @@ class OpenClawSessionService:
         """Revise the plan based on debug analysis"""
         self._log_entry("INFO", "[PLAN_REVISION] Revising plan")
 
-        # Build revision prompt
-        revision_prompt = PromptTemplates.build_task_prompt(
-            task_description="Revise plan due to: "
-            + debug_result.get("analysis", "Unknown error"),
-            project_context=(
-                self.session_model.description if self.session_model else ""
-            ),
+        # Build revision prompt using PLAN_REVISION template
+        failed_steps = [
+            StepResult(
+                step_number=orchestration_state.current_step_index + 1,
+                status="failed",
+                error_message=debug_result.get("analysis", "Unknown error")
+            )
+        ]
+        revision_prompt = PromptTemplates.build_plan_revision_prompt(
+            original_plan=orchestration_state.plan,
+            failed_steps=failed_steps,
+            debug_analysis=debug_result.get("analysis", "Unknown error"),
+            completed_steps=orchestration_state.completed_steps
         )
 
         # Execute revision

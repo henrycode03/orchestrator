@@ -12,7 +12,10 @@ import {
   RefreshCw,
   Trash2,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Settings,
+  XCircle,
+  Zap
 } from 'lucide-react';
 
 function SessionDashboard() {
@@ -45,6 +48,9 @@ function SessionDashboard() {
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
 
   // Helper function to format dates in local time
   const formatLocalTime = (dateString: string | null) => {
@@ -124,6 +130,44 @@ function SessionDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.project_id]);
 
+  // Poll for task status updates every 5 seconds
+  useEffect(() => {
+    if (!id) return;
+    
+    setPolling(true);
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await sessionsAPI.getById(Number(id));
+        if (response.data) {
+          setSession(response.data);
+          // Also refresh tasks when session updates
+          if (response.data.project_id) {
+            await fetchProjectTasks();
+          }
+        }
+      } catch (error) {
+        console.error('Failed to poll session status:', error);
+      }
+    }, 5000); // Poll every 5 seconds
+    
+    return () => {
+      clearInterval(pollInterval);
+      setPolling(false);
+    };
+  }, [id]);
+
+  // Auto-reconnect logs WebSocket if disconnected
+  useEffect(() => {
+    if (isLogsConnected) return;
+    
+    const reconnectTimer = setTimeout(() => {
+      console.log('Auto-reconnecting logs WebSocket...');
+      connectLogsWebSocket();
+    }, 3000);
+    
+    return () => clearTimeout(reconnectTimer);
+  }, [isLogsConnected]);
+
 // Re-fetch logs when sorting/filtering changes (debounced)
   useEffect(() => {
     if (!id || isFetching) return;
@@ -147,6 +191,37 @@ function SessionDashboard() {
     return () => clearTimeout(timer);
   }, [logs]);
 
+  // Monitor for stuck tasks (no new logs for 5 minutes)
+  useEffect(() => {
+    if (!id || !isLogsConnected || session?.status !== 'running') return;
+
+    const checkStuckTask = () => {
+      if (logs.length === 0) return;
+
+      const lastLogTime = new Date(logs[logs.length - 1].created_at);
+      const now = new Date();
+      const minutesSinceLastLog = (now.getTime() - lastLogTime.getTime()) / (1000 * 60);
+
+      console.log(`Minutes since last log: ${minutesSinceLastLog.toFixed(1)}`);
+
+      // If no new logs for 5+ minutes, alert user
+      if (minutesSinceLastLog >= 5) {
+        console.warn('⚠️ Task appears stuck - no new logs for 5+ minutes');
+        
+        // Show warning
+        alert('⚠️ Warning: No new logs for 5+ minutes. The task may be stuck.');
+        
+        // Optionally stop the session
+        // handleStop();
+      }
+    };
+
+    // Check every 30 seconds
+    const interval = setInterval(checkStuckTask, 30000);
+    
+    return () => clearInterval(interval);
+  }, [logs, isLogsConnected, session?.status, id]);
+
   const fetchSession = async () => {
     if (!id) return;
     try {
@@ -154,8 +229,12 @@ function SessionDashboard() {
       console.log('Session response:', response);
       console.log('Session data:', response.data);
       setSession(response.data);
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch session:', error);
+      setError(error instanceof Error ? error.message : 'Failed to load session');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -236,7 +315,7 @@ function SessionDashboard() {
       console.log('Logs WebSocket opened!');
       setIsLogsConnected(true);
       isConnectingRef.current = false;
-      console.log('Connected to logs stream');
+      console.log('Connected to logs stream ✅');
     };
 
     webSocket.onmessage = (event) => {
@@ -266,11 +345,21 @@ function SessionDashboard() {
       isConnectingRef.current = false;
     };
 
-    webSocket.onclose = () => {
-      console.log('Logs WebSocket closed, reconnecting in 3 seconds...');
+    webSocket.onclose = (event) => {
+      console.log('Logs WebSocket closed, code:', event.code, 'reason:', event.reason);
+      console.log('Logs WebSocket readyState before close:', webSocket?.readyState);
       setIsLogsConnected(false);
       isConnectingRef.current = false;
-      setTimeout(() => connectLogsWebSocket(), 3000);
+      
+      // Don't auto-reconnect if the session is stopped/completed
+      // Let the polling handle status updates
+      if (session?.status !== 'stopped' && session?.status !== 'completed') {
+        console.log('Reconnecting logs WebSocket...');
+        setTimeout(() => connectLogsWebSocket(), 3000);
+      } else {
+        console.log('Session stopped/completed, logs stream ended (polling will continue)');
+        // Polling will continue to check for task status updates
+      }
     };
 
     setLogsWs(webSocket);
@@ -319,7 +408,11 @@ function SessionDashboard() {
 
     try {
       await sessionsAPI.delete(Number(id));
-      window.location.href = `/projects/${session.project_id}`;
+      if (session?.project_id) {
+        window.location.href = `/projects/${session.project_id}`;
+      } else {
+        window.location.href = '/projects';
+      }
     } catch (error) {
       console.error('Failed to delete session:', error);
       alert('Failed to delete session. Please try again.');
@@ -379,7 +472,8 @@ function SessionDashboard() {
       await tasksAPI.execute(Number(id), {
         task: inputTask,
         timeout_seconds: 300,
-        use_demo_mode: false
+        log_timeout_minutes: 5, // Fail if no new logs for 5 minutes
+        monitor_logs: true // Enable log monitoring
       });
 
       setInputTask('');
@@ -428,6 +522,34 @@ function SessionDashboard() {
     if (!filterLevel) return logs.length;
     return logs.filter(log => log.level === filterLevel).length;
   };
+
+  // Error boundary
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="text-center">
+          <XCircle className="h-16 w-16 text-red-500 mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-white mb-2">Error Loading Session</h2>
+          <p className="text-slate-400 mb-4">{error}</p>
+          <button
+            onClick={() => window.history.back()}
+            className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-2 rounded-lg transition-colors"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading state
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="h-8 w-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -711,9 +833,17 @@ function SessionDashboard() {
                 </span>
               </div>
               {!isConnected && (
-                <p className="text-xs text-slate-400 mt-2">
-                  Reconnecting in 3 seconds...
-                </p>
+                <div className="text-xs text-slate-400 mt-2 space-y-1">
+                  {session?.status === 'stopped' || session?.status === 'completed' ? (
+                    <p>
+                      ⚠️ Session completed - task execution finished
+                    </p>
+                  ) : (
+                    <p>
+                      🔄 Reconnecting in 3 seconds...
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -739,10 +869,21 @@ function SessionDashboard() {
 
             {/* Available Tasks */}
             <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
-              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                <Zap className="h-5 w-5" />
-                Available Tasks
-              </h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                  <Zap className="h-5 w-5" />
+                  Available Tasks
+                </h2>
+                <button
+                  onClick={fetchProjectTasks}
+                  disabled={isLoadingTasks}
+                  className="p-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+                  title="Refresh tasks"
+                >
+                  <RefreshCw className={`h-5 w-5 ${isLoadingTasks ? 'animate-spin' : ''}`} />
+                  {isLoadingTasks && <span className="ml-2 text-xs text-slate-400">(loading...)</span>}
+                </button>
+              </div>
               
               {isLoadingTasks ? (
                 <div className="text-center py-8 text-slate-400">

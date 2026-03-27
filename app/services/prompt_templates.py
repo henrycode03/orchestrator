@@ -100,13 +100,32 @@ class OrchestrationState:
         """Absolute path to ~/.openclaw/workspace/projects/ (or $OPENCLAW_WORKSPACE)."""
         return OPENCLAW_WORKSPACE_ROOT
 
+    def _slugify(self, text: str) -> str:
+        """
+        Convert text to a filesystem-safe slug.
+        - Lowercase
+        - Replace spaces and special chars with hyphens
+        - Remove consecutive hyphens
+        - Strip leading/trailing hyphens
+        """
+        import re
+        text = text.lower().strip()
+        # Replace any non-alphanumeric char (except hyphens) with hyphen
+        text = re.sub(r'[^a-z0-9-]', '-', text)
+        # Replace multiple hyphens with single hyphen
+        text = re.sub(r'-+', '-', text)
+        # Strip leading/trailing hyphens
+        text = text.strip('-')
+        return text or f"session-{self.session_id}"
+
     @property
     def project_dir(self) -> Path:
         """
         Absolute path to this project's directory.
         Falls back to workspace_root/<session_id> when project_name is not set.
+        Creates a dedicated subfolder for each project with a slugified name.
         """
-        slug = self.project_name.strip() or f"session-{self.session_id}"
+        slug = self._slugify(self.project_name.strip()) if self.project_name.strip() else f"session-{self.session_id}"
         return self.workspace_root / slug
 
     @property
@@ -233,8 +252,8 @@ class PromptTemplates:
 **Commands:**
 {step_commands}
 
-**Verify:** {verification_command or 'None'}
-**Rollback:** {rollback_command or 'None'}
+**Verify:** {verification_command}
+**Rollback:** {rollback_command}
 **Expected Files:** {', '.join(expected_files) if expected_files else 'None'}
 
 **Previous:** {completed_steps_summary}
@@ -252,9 +271,9 @@ class PromptTemplates:
 
 **Error:** {error_message}
 
-**Output:** {command_output[:500]}... (truncated)
+**Output:** {command_output}... (truncated)
 
-**Verify Output:** {verification_output[:200] if verification_output else 'None'}
+**Verify Output:** {verification_output}
 
 **Attempt:** {attempt_number}/{max_attempts}
 
@@ -275,11 +294,11 @@ class PromptTemplates:
 
     PLAN_REVISION = """Revise plan after failures.
 
-**Original Plan:** {original_plan[:500]}...
+**Original Plan:** {original_plan_truncated}...
 
 **Failed Steps:** {failed_steps}
 
-**Debug Analysis:** {debug_analysis[:300]}...
+**Debug Analysis:** {debug_analysis_truncated}...
 
 **Completed (preserve):** {completed_steps}
 
@@ -564,10 +583,18 @@ A clear status report covering current state, progress percentage, blockers, and
             Planning prompt string ready for LLM call.
         """
         ws_root = workspace_root or str(OPENCLAW_WORKSPACE_ROOT)
-        proj_dir = (
-            project_dir
-            or f"{ws_root}/{project_context.split()[0] if project_context else 'project'}"
-        )
+        
+        # Create a slug from project context (remove spaces, special chars)
+        import re
+        if project_context:
+            # Extract project name from description, convert to slug
+            project_name = project_context.split()[0]  # Get first word
+            # Create slug: lowercase, replace spaces/special chars with hyphens
+            slug = re.sub(r'[^a-zA-Z0-9]+', '-', project_name.lower()).strip('-')
+        else:
+            slug = 'project'
+        
+        proj_dir = project_dir or f"{ws_root}/{slug}"
 
         context = {
             "task_description": task_description,
@@ -656,11 +683,17 @@ A clear status report covering current state, progress percentage, blockers, and
             or "No prior attempts."
         )
 
+        # Pre-process values that need slicing or conditional logic
+        truncated_output = command_output[:2000] if command_output else "No output"
+        truncated_verification = (
+            verification_output[:200] if verification_output else "None"
+        )
+
         context = {
             "step_description": step_description,
             "error_message": error_message,
-            "command_output": command_output[:2000],  # Truncate long outputs
-            "verification_output": verification_output,
+            "command_output": truncated_output,
+            "verification_output": truncated_verification,
             "attempt_number": attempt_number,
             "max_attempts": max_attempts,
             "prior_debug_attempts": prior_attempts_text,
@@ -747,15 +780,23 @@ A clear status report covering current state, progress percentage, blockers, and
             f"Step {s['step_number']}: {s['description']}" for s in completed_steps
         )
 
+        # Truncate long strings for the template
+        truncated_original_plan = (
+            original_plan_text[:500] + "..." if len(original_plan_text) > 500 else original_plan_text
+        )
+        truncated_debug_analysis = (
+            debug_analysis[:300] + "..." if len(debug_analysis) > 300 else debug_analysis
+        )
+
         context = {
-            "original_plan": original_plan_text,
+            "original_plan_truncated": truncated_original_plan,
             "failed_steps": failed_steps_text,
-            "debug_analysis": debug_analysis,
+            "debug_analysis_truncated": truncated_debug_analysis,
             "completed_steps": completed_steps_text,
         }
 
         # Use the PLAN_REVISION template
-        return cls.PLAN_REVISION.format(**context)
+        return cls.render("plan_revision", **context)
 
     @classmethod
     def build_task_summary(

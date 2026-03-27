@@ -30,6 +30,8 @@ class Settings(BaseSettings):
             "http://localhost:8000",  # Keep for OpenClaw dashboard
             self.OPENCLAW_GATEWAY_URL,
             "http://172.17.0.1:3000",  # Gateway IP for external browser access
+            "http://172.17.0.2:3000",  # Container IP for frontend
+            "*",  # Allow all for development
         ]
 
     # Database

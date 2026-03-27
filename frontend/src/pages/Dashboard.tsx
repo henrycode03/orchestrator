@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { projectsAPI, authAPI } from '../api/client';
-import type { Project, User } from '../types/api';
+import { projectsAPI, authAPI, tasksAPI, sessionsAPI } from '../api/client';
+import type { Project, User, Task, Session } from '../types/api';
 import { 
   GitBranch, 
   LogOut, 
@@ -19,6 +19,8 @@ import { formatDistanceToNow } from 'date-fns';
 function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'tasks'>('overview');
   const [showCreateProject, setShowCreateProject] = useState(false);

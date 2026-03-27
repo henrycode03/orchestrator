@@ -37,6 +37,7 @@ env/
 .env
 .env.local
 .env.*.local
+.env.development
 
 # Logs
 *.log
@@ -68,7 +69,7 @@ htmlcov/
 # Internal notes and documentation (not for public)
 .notes/
 
-# Startup scripts (uncomment to ignore)
-# start.sh
-# start_all.sh
-# stop_all.sh
+# Startup scripts
+start.sh
+start_all.sh
+stop_all.sh
