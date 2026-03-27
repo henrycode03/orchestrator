@@ -555,11 +555,13 @@ class OpenClawSessionService:
                 f"Prompt contains: {('EXECUTE THIS TASK DIRECTLY' in prompt and 'EXECUTE' or 'Standard')}",
             )
 
+            # Escape single quotes in prompt for bash command
+            escaped_prompt = prompt.replace("'", "'\\''")
             result = subprocess.run(
                 [
                     "bash",
                     "-c",
-                    f"openclaw agent --local --session-id {new_session_id} --message '{prompt.replace("'", "'\\''")}' --json --timeout {timeout_seconds}",
+                    f"openclaw agent --local --session-id {new_session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}",
                 ],
                 capture_output=True,
                 text=True,
