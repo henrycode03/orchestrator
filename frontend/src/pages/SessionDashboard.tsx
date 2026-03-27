@@ -126,6 +126,7 @@ function SessionDashboard() {
     if (session?.project_id) {
       fetchProjectTasks();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.project_id]);
 
   // Poll for task status updates every 5 seconds
@@ -152,6 +153,7 @@ function SessionDashboard() {
       clearInterval(pollInterval);
       setPolling(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   // Auto-reconnect logs WebSocket if disconnected
