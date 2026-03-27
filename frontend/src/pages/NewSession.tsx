@@ -18,12 +18,7 @@ function NewSession() {
   const [sessionDescription, setSessionDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  useEffect(() => {
-    fetchProjects();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchProjects]);
-
-  const fetchProjects = async () => {
+  const fetchProjects = useCallback(async () => {
     try {
       const response = await projectsAPI.getAll();
       setProjects(response.data);
@@ -45,12 +40,13 @@ function NewSession() {
       const errorMsg = err.response?.data?.detail || 
                       err.message || 
                       'Failed to load projects. Please check your connection.';
-      
-      alert(`Error loading projects: ${errorMsg}`);
-    } finally {
-      setLoading(false);
+      alert(errorMsg);
     }
-  };
+  }, [searchParams]);
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

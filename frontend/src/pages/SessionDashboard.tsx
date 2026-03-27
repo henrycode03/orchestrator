@@ -126,7 +126,6 @@ function SessionDashboard() {
     if (session?.project_id) {
       fetchProjectTasks();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.project_id, fetchProjectTasks]);
 
   // Poll for task status updates every 5 seconds
@@ -237,7 +236,7 @@ function SessionDashboard() {
     }
   };
 
-  const fetchProjectTasks = async () => {
+  const fetchProjectTasks = useCallback(async () => {
     if (!session?.project_id) return;
     
     setIsLoadingTasks(true);
@@ -250,7 +249,7 @@ function SessionDashboard() {
     } finally {
       setIsLoadingTasks(false);
     }
-  };
+  }, [session?.project_id, tasksAPI]);
 
   const connectStatusWebSocket = () => {
     if (!id || isConnectingRef.current) return;
@@ -299,7 +298,7 @@ function SessionDashboard() {
     setStatusWs(webSocket);
   };
 
-  const connectLogsWebSocket = () => {
+  const connectLogsWebSocket = useCallback(() => {
     console.log('connectLogsWebSocket called, id:', id);
     if (!id || isConnectingRef.current) {
       console.log('Not connecting - missing id or already connecting');
@@ -362,7 +361,7 @@ function SessionDashboard() {
     };
 
     setLogsWs(webSocket);
-  };
+  }, [id, session?.status, sessionsAPI]);
 
   const handleRefreshLogs = () => {
     fetchSortedLogs();
