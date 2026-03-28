@@ -134,7 +134,9 @@ class OpenClawSessionService:
                 # REAL MODE: Execute task via OpenClaw HTTP API
                 # Use streaming version if log_callback is provided
                 if log_callback:
-                    result = await self.execute_task_with_streaming(prompt, timeout_seconds, log_callback)
+                    result = await self.execute_task_with_streaming(
+                        prompt, timeout_seconds, log_callback
+                    )
                 else:
                     result = await self._execute_real_mode(prompt, timeout_seconds)
 
@@ -1061,7 +1063,7 @@ class OpenClawSessionService:
                     line = await stream.readline()
                     if not line:
                         break
-                    line_text = line.decode('utf-8', errors='replace').strip()
+                    line_text = line.decode("utf-8", errors="replace").strip()
                     if line_text:
                         # Log to database
                         self._log_entry(level, line_text)
@@ -1081,8 +1083,8 @@ class OpenClawSessionService:
 
                 # Get final output
                 stdout, stderr = await process.communicate()
-                stdout_text = stdout.decode('utf-8', errors='replace')
-                stderr_text = stderr.decode('utf-8', errors='replace')
+                stdout_text = stdout.decode("utf-8", errors="replace")
+                stderr_text = stderr.decode("utf-8", errors="replace")
 
                 self._log_entry(
                     "INFO",
@@ -1132,7 +1134,9 @@ class OpenClawSessionService:
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-                self._log_entry("ERROR", f"Task execution timed out: {timeout_seconds}s")
+                self._log_entry(
+                    "ERROR", f"Task execution timed out: {timeout_seconds}s"
+                )
                 return {
                     "status": "failed",
                     "mode": "real",
