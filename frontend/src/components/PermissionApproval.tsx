@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 interface PermissionRequest {
@@ -36,11 +36,7 @@ export default function PermissionApproval({ projectId, sessionId }: PermissionA
   const [history, setHistory] = useState<PermissionRequest[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchPendingPermissions();
-  }, [projectId, sessionId]);
-
-  const fetchPendingPermissions = async () => {
+  const fetchPendingPermissions = useCallback(async () => {
     try {
       const params: Record<string, string | number> = { limit: 50 };
       if (projectId) params.project_id = projectId;
@@ -53,7 +49,11 @@ export default function PermissionApproval({ projectId, sessionId }: PermissionA
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId, sessionId]);
+
+  useEffect(() => {
+    fetchPendingPermissions();
+  }, [fetchPendingPermissions]);
 
   const fetchHistory = async () => {
     if (!projectId) return;

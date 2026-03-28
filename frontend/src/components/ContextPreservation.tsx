@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 interface SessionState {
@@ -16,7 +16,7 @@ interface ConversationMessage {
   id: number;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  metadata: Record<string, any> | null;
+  metadata: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -45,11 +45,7 @@ export function SessionStateCard({ sessionId, projectId }: SessionStateCardProps
   const [state, setState] = useState<SessionState | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchState();
-  }, [sessionId]);
-
-  const fetchState = async () => {
+  const fetchState = useCallback(async () => {
     try {
       const response = await axios.get(`/api/v1/context/state/${sessionId}`);
       setState(response.data);
@@ -58,7 +54,11 @@ export function SessionStateCard({ sessionId, projectId }: SessionStateCardProps
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId]);
+
+  useEffect(() => {
+    fetchState();
+  }, [fetchState]);
 
   const handleSnapshot = async () => {
     try {
@@ -145,11 +145,7 @@ export function ConversationPanel({ sessionId }: ConversationPanelProps) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchMessages();
-  }, [sessionId]);
-
-  const fetchMessages = async () => {
+  const fetchMessages = useCallback(async () => {
     try {
       const response = await axios.get(`/api/v1/context/conversation/${sessionId}`, {
         params: { limit: 50 },
@@ -160,7 +156,11 @@ export function ConversationPanel({ sessionId }: ConversationPanelProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId]);
+
+  useEffect(() => {
+    fetchMessages();
+  }, [fetchMessages]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -240,11 +240,7 @@ export function CheckpointList({ taskId }: CheckpointListProps) {
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchCheckpoints();
-  }, [taskId]);
-
-  const fetchCheckpoints = async () => {
+  const fetchCheckpoints = useCallback(async () => {
     try {
       const response = await axios.get(`/api/v1/context/checkpoints/${taskId}`);
       setCheckpoints(response.data.checkpoints);
@@ -253,7 +249,11 @@ export function CheckpointList({ taskId }: CheckpointListProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [taskId]);
+
+  useEffect(() => {
+    fetchCheckpoints();
+  }, [fetchCheckpoints]);
 
   const handleResume = async (checkpointId: number) => {
     try {

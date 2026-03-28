@@ -57,6 +57,8 @@ function SessionDashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [projectLoaded, setProjectLoaded] = useState(false);
+  const [tasksFetched, setTasksFetched] = useState(false);
 
   // Helper function to format dates in local time
   const formatLocalTime = (dateString: string | null) => {
@@ -68,13 +70,46 @@ function SessionDashboard() {
   };
 
   // Helper function to check if session is running (includes 'active' status)
-  const isSessionRunning = () => {
+  const isSessionRunning = useCallback(() => {
     return session?.status === 'running' || session?.status === 'active';
-  };
+  }, [session?.status]);
+
+  const fetchProjectTasks = useCallback(async () => {
+    if (!id || !projectLoaded || tasksFetched) return;
+    setIsLoadingTasks(true);
+    try {
+      const response = await tasksAPI.getTasks(Number(id));
+      setTasks(response.data || []);
+    } catch (error) {
+      console.error('Failed to fetch tasks:', error);
+    } finally {
+      setIsLoadingTasks(false);
+      setTasksFetched(true);
+    }
+  }, [id, projectLoaded, tasksFetched]);
+
+  const fetchProject = useCallback(async () => {
+    if (!id || projectLoaded) return;
+    try {
+      const sessionResponse = await sessionsAPI.getById(Number(id));
+      setSession(sessionResponse.data);
+
+      const projectResponse = await projectsAPI.getById(sessionResponse.data.project_id);
+      setProject(projectResponse.data);
+      setProjectLoaded(true);
+    } catch (error) {
+      console.error('Failed to fetch project:', error);
+    }
+  }, [id, projectLoaded]);
+
+  useEffect(() => {
+    fetchProject();
+    fetchProjectTasks();
+  }, [fetchProject, fetchProjectTasks]);
 
   // Fetch logs for the current session only (project-scoped)
-  const fetchSessionLogs = async () => {
-    console.log('fetchSessionLogs called, session id:', id, 'project:', project?.id);
+  const fetchSessionLogs = useCallback(async () => {
+    console.log('fetchSessionLogs called, session id:', id);
     
     // Only fetch if we have a session ID
     if (!id) {
@@ -124,7 +159,7 @@ function SessionDashboard() {
     } finally {
       setIsLoadingLogs(false);
     }
-  };
+  }, [id, sortOrder, deduplicate, filterLevel]);
 
   useEffect(() => {
     if (!id) return;
@@ -155,18 +190,19 @@ function SessionDashboard() {
     }, 100);
     
     return () => clearTimeout(initTimeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   // Fetch project when session is loaded (to get project_id for logs)
   useEffect(() => {
-    if (session?.project_id) {
-      // Fetch the project using project_id
+    if (session?.project_id && !projectLoaded) {
       const fetchProject = async () => {
         try {
           const projectResponse = await projectsAPI.getById(session.project_id);
           console.log('Fetched project for session:', projectResponse.data);
           if (projectResponse.data) {
             setProject(projectResponse.data);
+            setProjectLoaded(true);
           }
         } catch (error) {
           console.error('Failed to fetch project:', error);
@@ -174,15 +210,7 @@ function SessionDashboard() {
       };
       fetchProject();
     }
-  }, [session?.project_id]);
-
-  // Fetch tasks when session is loaded
-  useEffect(() => {
-    if (session?.project_id) {
-      fetchProjectTasks();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.project_id]);
+  }, [session?.project_id, projectLoaded]);
 
   // Poll for task status updates every 5 seconds
   useEffect(() => {
@@ -233,7 +261,7 @@ function SessionDashboard() {
     
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortOrder, deduplicate, filterLevel, id]);
+  }, [sortOrder, deduplicate, filterLevel, id, fetchSessionLogs]);
 
   // Debounced scroll to bottom
   useEffect(() => {
@@ -273,7 +301,7 @@ function SessionDashboard() {
     const interval = setInterval(checkStuckTask, 30000);
     
     return () => clearInterval(interval);
-  }, [logs, isLogsConnected, session?.status, id]);
+  }, [logs, isLogsConnected, session?.status, id, isSessionRunning]);
 
   const fetchSession = async () => {
     if (!id) return;
@@ -290,21 +318,6 @@ function SessionDashboard() {
       setLoading(false);
     }
   };
-
-  const fetchProjectTasks = useCallback(async () => {
-    if (!session?.project_id) return;
-    
-    setIsLoadingTasks(true);
-    try {
-      const response = await tasksAPI.getByProject(session.project_id);
-      console.log('Tasks response:', response);
-      setTasks(response.data || []);
-    } catch (error) {
-      console.error('Failed to fetch tasks:', error);
-    } finally {
-      setIsLoadingTasks(false);
-    }
-  }, [session?.project_id]);
 
   const connectStatusWebSocket = () => {
     if (!id || isConnectingRef.current) return;
@@ -421,7 +434,7 @@ function SessionDashboard() {
     };
 
     setLogsWs(webSocket);
-  }, [id, session?.status]);
+  }, [id, project?.id, session?.status]);
 
   // Assign to refs after definition for use in useEffects
   connectLogsWebSocketRef.current = connectLogsWebSocket;

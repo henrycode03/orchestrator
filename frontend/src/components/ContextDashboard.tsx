@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import SessionState from './SessionState';
 import ConversationHistory from './ConversationHistory';
 import TaskCheckpointDisplay from './TaskCheckpointDisplay';
 
 interface ContextExportResponse {
-  context: unknown;
+  context: Record<string, unknown>;
 }
 
 interface ContextDashboardProps {
@@ -21,21 +21,21 @@ export default function ContextDashboard({ sessionId, projectId, taskId }: Conte
 
   useEffect(() => {
     fetchContextSummary();
-  }, [sessionId]);
+  }, [sessionId, fetchContextSummary]);
 
-  const fetchContextSummary = async () => {
+  const fetchContextSummary = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
       const response = await axios.get(`/api/v1/context/summary/${sessionId}`);
       setContextSummary(response.data.context);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load context summary');
+    } catch (err: unknown) {
+      setError((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Failed to load context summary');
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

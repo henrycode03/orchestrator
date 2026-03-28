@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 interface ConversationHistoryProps {
@@ -21,11 +21,7 @@ export default function ConversationHistory({ sessionId, limit = 20 }: Conversat
   const [newMessage, setNewMessage] = useState('');
   const [sending, setSending] = useState(false);
 
-  useEffect(() => {
-    fetchMessages();
-  }, [sessionId, limit]);
-
-  const fetchMessages = async () => {
+  const fetchMessages = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -36,12 +32,15 @@ export default function ConversationHistory({ sessionId, limit = 20 }: Conversat
 
       setMessages(response.data.messages);
     } catch (err: unknown) {
-      const error = err as { response?: { data?: { detail?: string } } };
-      setError(error.response?.data?.detail || 'Failed to load conversation');
+      setError((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Failed to load conversation');
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId, limit]);
+
+  useEffect(() => {
+    fetchMessages();
+  }, [fetchMessages]);
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();

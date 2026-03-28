@@ -4,7 +4,7 @@
  * Displays project isolation status and safety information
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api/client';
 
 interface IsolationStatus {
@@ -32,11 +32,7 @@ export const ProjectIsolationStatus: React.FC<{ projectId: number }> = ({ projec
   const [testPath, setTestPath] = useState('src/index.ts');
   const [validationResult, setValidationResult] = useState<ValidateResponse | null>(null);
 
-  useEffect(() => {
-    loadStatus();
-  }, [projectId]);
-
-  const loadStatus = async () => {
+  const loadStatus = useCallback(async () => {
     try {
       const data = await api.get(`/isolation/projects/${projectId}/isolation/status`);
       setStatus(data);
@@ -54,25 +50,29 @@ export const ProjectIsolationStatus: React.FC<{ projectId: number }> = ({ projec
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId]);
 
-  const validatePath = async () => {
+  useEffect(() => {
+    loadStatus();
+  }, [loadStatus]);
+
+  const validatePath = useCallback(async () => {
     try {
       const data = await api.post(`/isolation/projects/${projectId}/isolation/validate`, {
         path: testPath,
       });
       setValidationResult(data);
-    } catch (error: any) {
+    } catch (error: unknown) {
       setValidationResult({
         valid: false,
         requested_path: testPath,
         resolved_path: '',
         project_root: '',
         is_within_bounds: false,
-        message: error.response?.data?.detail || 'Validation failed',
+        message: (error as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Validation failed',
       });
     }
-  };
+  }, [projectId, testPath]);
 
   if (loading) {
     return (

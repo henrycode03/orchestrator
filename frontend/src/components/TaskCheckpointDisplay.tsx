@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 interface TaskCheckpoint {
@@ -29,23 +29,23 @@ export default function TaskCheckpointDisplay({ taskId }: TaskCheckpointDisplayP
   const [error, setError] = useState<string | null>(null);
   const [resumeData, setResumeData] = useState<CheckpointResumeData | null>(null);
 
-  useEffect(() => {
-    fetchCheckpoints();
-  }, [taskId]);
-
-  const fetchCheckpoints = async () => {
+  const fetchCheckpoints = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
       const response = await axios.get(`/api/v1/context/checkpoints/${taskId}`);
       setCheckpoints(response.data.checkpoints);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load checkpoints');
+    } catch (err: unknown) {
+      setError((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Failed to load checkpoints');
     } finally {
       setLoading(false);
     }
-  };
+  }, [taskId]);
+
+  useEffect(() => {
+    fetchCheckpoints();
+  }, [fetchCheckpoints]);
 
   const handleResume = async (checkpointId?: number) => {
     try {

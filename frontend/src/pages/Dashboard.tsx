@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { projectsAPI, authAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, User, Task, Session } from '../types/api';
@@ -30,12 +30,7 @@ function Dashboard() {
   const [refresh, setRefresh] = useState(0);
   const [creatingProject, setCreatingProject] = useState(false);
 
-  useEffect(() => {
-    checkAuth();
-    fetchProjects();
-  }, [refresh]);
-
-  const checkAuth = async () => {
+  const checkAuth = useCallback(async () => {
     const token = localStorage.getItem('access_token');
     if (!token) {
       console.log('No access token, redirecting to login');
@@ -53,7 +48,12 @@ function Dashboard() {
       localStorage.removeItem('refresh_token');
       navigate('/login');
     }
-  };
+  }, [navigate]);
+
+  useEffect(() => {
+    checkAuth();
+    fetchProjects();
+  }, [refresh, checkAuth]);
 
   const fetchProjects = async () => {
     try {

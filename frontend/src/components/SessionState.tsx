@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 interface SessionState {
@@ -31,13 +31,7 @@ export default function SessionStateDisplay({ sessionId }: SessionStateProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchSessionState();
-    const interval = setInterval(fetchSessionState, 5000); // Auto-refresh every 5 seconds
-    return () => clearInterval(interval);
-  }, [sessionId]);
-
-  const fetchSessionState = async () => {
+  const fetchSessionState = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -46,12 +40,18 @@ export default function SessionStateDisplay({ sessionId }: SessionStateProps) {
       if (response.data.exists) {
         setState(response.data);
       }
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load session state');
+    } catch (err: unknown) {
+      setError((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Failed to load session state');
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId]);
+
+  useEffect(() => {
+    fetchSessionState();
+    const interval = setInterval(fetchSessionState, 5000); // Auto-refresh every 5 seconds
+    return () => clearInterval(interval);
+  }, [fetchSessionState]);
 
   if (loading) {
     return (
