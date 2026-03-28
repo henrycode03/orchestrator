@@ -184,7 +184,9 @@ export const tasksAPI = {
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
     
-    return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`);
+    return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`, {
+      timeout: 300000, // 5 minutes for fetching task logs (can be slow for large logs)
+    });
   },
 };
 
@@ -271,7 +273,9 @@ export const sessionsAPI = {
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
     
-    return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`);
+    return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`, {
+      timeout: 300000, // 5 minutes for fetching session logs (can be slow for large logs)
+    });
   },
 
   delete: (id: number) => apiClient.delete(`/sessions/${id}`),
