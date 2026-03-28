@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends
 from fastapi import HTTPException
 from app.api.v1.endpoints import tasks, github, sessions, projects
 from app.api.v1.endpoints.tasks_sorted_logs import router as tasks_sorted_logs_router
+from app.api.v1.endpoints import isolation, permissions, context
+from app.api.v1.endpoints.project_logs import router as project_logs_router
 
 # Import auth router separately
 from app.api.v1.endpoints.auth import router as auth_router
@@ -60,4 +62,32 @@ api_router.include_router(
 api_router.include_router(
     github.router,
     tags=["github"],
+)
+
+# Project Isolation
+api_router.include_router(
+    isolation.router,
+    prefix="/isolation",
+    tags=["project-isolation"],
+)
+
+# Permission Approval
+api_router.include_router(
+    permissions.router,
+    prefix="/permissions",
+    tags=["permissions"],
+)
+
+# Context Preservation
+api_router.include_router(
+    context.router,
+    prefix="/context",
+    tags=["context-preservation"],
+)
+
+# Project Logs (filter by project_id)
+api_router.include_router(
+    project_logs_router,
+    prefix="/projects/{project_id}",
+    tags=["project-logs"],
 )

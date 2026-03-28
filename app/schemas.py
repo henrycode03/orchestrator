@@ -20,6 +20,7 @@ class ProjectBase(BaseModel):
     description: Optional[str] = None
     github_url: Optional[str] = None
     branch: Optional[str] = "main"
+    workspace_path: Optional[str] = None
 
 
 class ProjectCreate(ProjectBase):
@@ -31,6 +32,7 @@ class ProjectUpdate(BaseModel):
     description: Optional[str] = None
     github_url: Optional[str] = None
     branch: Optional[str] = None
+    workspace_path: Optional[str] = None
 
 
 class ProjectResponse(ProjectBase):
@@ -69,7 +71,7 @@ class TaskResponse(TaskBase):
     project_id: int
     status: TaskStatusEnum
     steps: Optional[str] = None
-    current_step: int
+    current_step: Optional[int] = 0
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -144,6 +146,7 @@ class TaskExecuteRequest(BaseModel):
 # Auth Schemas (moved from auth.py to avoid circular imports)
 class Token(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
 
 

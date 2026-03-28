@@ -1,7 +1,18 @@
 import axios from 'axios';
-import type { Project, Task, Session, LogEntry, SessionStatistics, AuthTokens, User } from '../types/api';
+import type { 
+  Project, 
+  Task, 
+  Session, 
+  LogEntry, 
+  SessionStatistics, 
+  AuthTokens, 
+  User,
+  SortedLogsResponse,
+  TaskSortedLogsResponse,
+  ProjectLogsResponse
+} from '../types/api';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api/v1';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -28,22 +39,37 @@ apiClient.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
 
+    // Only attempt refresh on 401 errors
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
       try {
         const refreshToken = localStorage.getItem('refresh_token');
+        console.log('Attempting token refresh with refresh_token:', refreshToken ? 'exists' : 'missing');
+        
+        if (!refreshToken) {
+          console.error('No refresh token found, redirecting to login');
+          localStorage.removeItem('access_token');
+          localStorage.removeItem('refresh_token');
+          window.location.href = '/login';
+          return Promise.reject(error);
+        }
+
         const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
           refresh_token: refreshToken,
         });
 
+        console.log('Token refresh successful');
         const { access_token, refresh_token } = response.data;
         localStorage.setItem('access_token', access_token);
-        localStorage.setItem('refresh_token', refresh_token);
+        if (refresh_token) {
+          localStorage.setItem('refresh_token', refresh_token);
+        }
 
         originalRequest.headers.Authorization = `Bearer ${access_token}`;
         return apiClient(originalRequest);
       } catch (refreshError) {
+        console.error('Token refresh failed:', refreshError);
         localStorage.removeItem('access_token');
         localStorage.removeItem('refresh_token');
         window.location.href = '/login';
@@ -80,13 +106,44 @@ export const projectsAPI = {
 
   getById: (id: number) => apiClient.get<Project>(`/projects/${id}`),
 
-  create: (data: { name: string; description?: string; github_url?: string; branch?: string }) =>
+  create: (data: { name: string; description?: string; workspace_path?: string }) =>
     apiClient.post<Project>('/projects', data),
 
   update: (id: number, data: Partial<Project>) =>
-    apiClient.put<Project>(`/projects/${id}`, data),
+    apiClient.patch<Project>(`/projects/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/projects/${id}`),
+
+  getSessions: (projectId: number) => apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
+
+  // Get logs for a project (filters by project_id, not session_id)
+  getLogs: (
+    projectId: number,
+    limit?: number,
+    level?: string,
+    search?: string,
+    order: 'asc' | 'desc' = 'desc'
+  ) => {
+    const params = new URLSearchParams();
+    if (limit) params.append('limit', limit.toString());
+    if (level) params.append('level', level);
+    if (search) params.append('search', search);
+    params.append('order', order);
+    
+    return apiClient.get<ProjectLogsResponse>(`/projects/${projectId}/logs?${params.toString()}`);
+  },
+
+  // WebSocket logs stream for project (filters by project_id)
+  getLogsStream: (projectId: number) => {
+    const token = localStorage.getItem('access_token');
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
+    const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
+    const wsUrl = token 
+      ? `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream?token=${token}`
+      : `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream`;
+    return new WebSocket(wsUrl);
+  },
 };
 
 // Tasks API
@@ -124,14 +181,7 @@ export const tasksAPI = {
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
     
-    return apiClient.get<{
-      task_id: number;
-      total_logs: number;
-      returned_logs: number;
-      sort_order: string;
-      deduplicated: boolean;
-      logs: Array<unknown>;
-    }>(`/tasks/${id}/logs/sorted?${params.toString()}`);
+    return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`);
   },
 };
 
@@ -179,21 +229,25 @@ export const sessionsAPI = {
 
   // WebSocket status stream
   getStatusStream: (id: number) => {
-    void localStorage.getItem('access_token');
+    const token = localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
     const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
-    const wsUrl = `${protocol}//${apiHost}/api/v1/sessions/${id}/status`;
+    const wsUrl = token 
+      ? `${protocol}//${apiHost}/api/v1/sessions/${id}/status?token=${token}`
+      : `${protocol}//${apiHost}/api/v1/sessions/${id}/status`;
     return new WebSocket(wsUrl);
   },
 
   // WebSocket logs stream
   getLogsStream: (id: number) => {
-    void localStorage.getItem('access_token');
+    const token = localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
     const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
-    const wsUrl = `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream`;
+    const wsUrl = token 
+      ? `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream?token=${token}`
+      : `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream`;
     return new WebSocket(wsUrl);
   },
 
@@ -211,14 +265,7 @@ export const sessionsAPI = {
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
     
-    return apiClient.get<{
-      session_id: number;
-      total_logs: number;
-      returned_logs: number;
-      sort_order: string;
-      deduplicated: boolean;
-      logs: Array<unknown>;
-    }>(`/sessions/${id}/logs/sorted?${params.toString()}`);
+    return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`);
   },
 
   delete: (id: number) => apiClient.delete(`/sessions/${id}`),

@@ -5,21 +5,24 @@ Implements multi-step orchestration workflow:
 PLANNING → EXECUTING (step-by-step) → DEBUGGING (on failure) → PLAN_REVISION → DONE
 """
 
+import os
 import logging
 import json
 import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 from app.celery_app import celery_app
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
-from app.database import get_db
+from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
     StepResult,
+    OPENCLAW_WORKSPACE_ROOT,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,7 @@ def get_db_session():
     default_retry_delay=60,
     time_limit=360,
     soft_time_limit=300,
+    queue="celery",
 )
 def execute_openclaw_task(
     self,
@@ -120,15 +124,68 @@ def execute_openclaw_task(
             else None
         )
 
-        # Initialize orchestration state
-        # Use project name (not session name) to ensure all sessions in the same project
-        # build in the same folder. Multiple sessions can work on the same project.
+        # Initialize orchestration state with new workspace architecture
+        # Structure: workspace_root / project_workspace / task_subfolder
+        
         orchestration_state = OrchestrationState(
             session_id=str(session_id),
             task_description=prompt,
             project_name=project.name if project else "",
             project_context=context.get("project_context", "") if context else "",
+            task_id=task_id,  # Pass task ID for subfolder generation
         )
+        
+        # If project has workspace_path configured, use it
+        if project and project.workspace_path:
+            # workspace_path should be relative (e.g., "TalentBridge"), not absolute
+            workspace_path = project.workspace_path
+            if not workspace_path.startswith("/"):
+                # Make it absolute
+                workspace_path = str(OPENCLAW_WORKSPACE_ROOT / workspace_path)
+            
+            orchestration_state._workspace_path_override = workspace_path
+            
+            # Also set task subfolder if not already in database
+            if task.task_subfolder:
+                orchestration_state._task_subfolder_override = task.task_subfolder
+            else:
+                # Generate task subfolder from task title (slugified)
+                # Use task title if available, otherwise fall back to task_id
+                task_title_slug = slugify_project_name(task.title) if task.title else f"task_{task_id}"
+                
+                # Ensure unique subfolder name (append counter if needed)
+                counter = 1
+                subfolder_name = task_title_slug
+                while True:
+                    subfolder_path = f"{workspace_path}/{subfolder_name}"
+                    # Check if this subfolder already exists
+                    existing_tasks = db.query(Task).filter(
+                        Task.project_id == session.project_id,
+                        Task.task_subfolder == subfolder_name
+                    ).all()
+                    
+                    # If this is the first task with this name, or it's our current task
+                    if len(existing_tasks) == 1 and existing_tasks[0].id == task_id:
+                        break
+                    elif len(existing_tasks) == 0:
+                        break
+                    else:
+                        # Another task already uses this name, append counter
+                        subfolder_name = f"{task_title_slug}-{counter}"
+                        counter += 1
+                
+                task.task_subfolder = subfolder_name
+                db.commit()
+                orchestration_state._task_subfolder_override = subfolder_name
+        else:
+            # Fallback: use slugified project name
+            pass
+        
+        # Create the task workspace directory if it doesn't exist
+        task_workspace = orchestration_state.project_dir
+        if not os.path.exists(task_workspace):
+            os.makedirs(task_workspace, exist_ok=True)
+            logger.info(f"Created task workspace: {task_workspace}")
 
         # Check if task has been running too long (safety check)
         if task.started_at:
@@ -179,35 +236,54 @@ def execute_openclaw_task(
 
         # Parse planning result to get steps
         try:
-            output_text = planning_result.get("output", "{}")
-
+            output_result = planning_result.get("output", {})
+            
             # Debug: Log raw output
             logger.info(
-                f"[ORCHESTRATION] Raw planning output type: {type(output_text)}, length: {len(str(output_text)) if output_text else 0}"
+                f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
             )
 
-            # OpenClaw returns: { "payloads": [ { "text": "..." } ] }
-            # Extract the actual text content
-            if isinstance(output_text, str):
-                try:
-                    output_data = json.loads(output_text)
-                    if isinstance(output_data, dict) and "payloads" in output_data:
-                        payloads = output_data.get("payloads", [])
-                        if isinstance(payloads, list) and len(payloads) > 0:
-                            # Get the text from first payload
-                            first_payload = payloads[0]
-                            if isinstance(first_payload, dict):
-                                output_text = first_payload.get("text", output_text)
-                                logger.info(
-                                    f"[ORCHESTRATION] Extracted text from payload, length: {len(output_text)}"
-                                )
+            # Handle different output formats from OpenClaw CLI
+            if isinstance(output_result, dict):
+                # Format 1: OpenClaw CLI returns full JSON with "payloads" key
+                if "payloads" in output_result:
+                    payloads = output_result.get("payloads", [])
+                    if isinstance(payloads, list) and len(payloads) > 0:
+                        first_payload = payloads[0]
+                        if isinstance(first_payload, dict):
+                            output_text = first_payload.get("text", "")
+                            # Debug: Log the extraction
+                            logger.info(
+                                f"[ORCHESTRATION] Extracted 'text' from payload, length: {len(output_text)}, preview: {output_text[:100]}"
+                            )
+                        elif isinstance(first_payload, str):
+                            # Payload is already a string
+                            output_text = first_payload
+                            logger.info(
+                                f"[ORCHESTRATION] Payload is string, length: {len(output_text)}"
+                            )
+                        else:
+                            # Unknown type, convert to string
+                            output_text = str(first_payload)
+                            logger.info(
+                                f"[ORCHESTRATION] Payload is {type(first_payload)}, converted to string"
+                            )
                     else:
-                        logger.warning(
-                            f"[ORCHESTRATION] Output is not OpenClaw format: {type(output_data)}"
-                        )
-                except json.JSONDecodeError as e:
-                    logger.warning(f"[ORCHESTRATION] Not JSON format: {e}")
-                    pass  # Not OpenClaw format, use as-is
+                        output_text = json.dumps(output_result)
+                        logger.info(f"[ORCHESTRATION] Empty payloads, using full JSON")
+                # Format 2: Direct dict response
+                else:
+                    output_text = json.dumps(output_result)
+                    logger.info(f"[ORCHESTRATION] Direct dict response")
+            elif isinstance(output_result, str):
+                # Format 3: Raw string response
+                output_text = output_result
+                logger.info(f"[ORCHESTRATION] Raw string response")
+            else:
+                output_text = str(output_result)
+                logger.info(f"[ORCHESTRATION] Unknown type, converted to string")
+
+            logger.info(f"[ORCHESTRATION] Final extracted text length: {len(output_text)}")
 
             # Strip Markdown code fences if present
             import re
@@ -409,6 +485,27 @@ def execute_openclaw_task(
         logger.info(
             f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps"
         )
+
+        # Generate and save task report
+        try:
+            report_result = self.generate_task_report(task_id, format="markdown")
+            if report_result and "report" in report_result:
+                report_content = report_result["report"]
+                report_filename = f"task_report_{task_id}.md"
+                
+                # Save report to task subfolder
+                if task.task_subfolder:
+                    subfolder_path = os.path.join(
+                        os.path.dirname(project.workspace_path),
+                        task.task_subfolder
+                    )
+                    report_path = os.path.join(subfolder_path, report_filename)
+                    os.makedirs(subfolder_path, exist_ok=True)
+                    with open(report_path, 'w', encoding='utf-8') as f:
+                        f.write(report_content)
+                    logger.info(f"[REPORT] Task report saved to: {report_path}")
+        except Exception as report_error:
+            logger.error(f"[REPORT] Failed to generate task report: {str(report_error)}")
 
         return {
             "status": "completed",
@@ -613,13 +710,13 @@ def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
 
 
 @celery_app.task(bind=True)
-def generate_task_report(self, task_id: int, format: str = "json"):
+def generate_task_report(self, task_id: int, output_format: str = "json"):
     """
     Generate a report for a completed task
 
     Args:
         task_id: Task ID
-        format: Output format (json, markdown, html)
+        output_format: Output format (json, markdown, html)
     """
     try:
         db = get_db_session()

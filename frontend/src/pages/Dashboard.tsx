@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { projectsAPI, authAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, User, Task, Session } from '../types/api';
 import { 
@@ -17,9 +17,11 @@ import {
 import { formatDistanceToNow } from 'date-fns';
 
 function Dashboard() {
+  const navigate = useNavigate();
   const [user, setUser] = useState<User | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  // sessions state intentionally unused - kept for future implementation
   // const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'tasks'>('overview');
@@ -29,16 +31,27 @@ function Dashboard() {
   const [creatingProject, setCreatingProject] = useState(false);
 
   useEffect(() => {
-    fetchUser();
+    checkAuth();
     fetchProjects();
   }, [refresh]);
 
-  const fetchUser = async () => {
+  const checkAuth = async () => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      console.log('No access token, redirecting to login');
+      navigate('/login');
+      return;
+    }
+
     try {
       const response = await authAPI.getMe();
       setUser(response.data);
     } catch (error) {
       console.error('Failed to fetch user:', error);
+      // Token might be expired, let the interceptor handle it
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      navigate('/login');
     }
   };
 
@@ -62,7 +75,8 @@ function Dashboard() {
         const sessionsResponse = await sessionsAPI.getByProject(project.id);
         allSessions.push(...sessionsResponse.data);
       }
-      setSessions(allSessions);
+      // sessions intentionally unused - kept for future implementation
+      // setSessions(allSessions);
     } catch (error) {
       console.error('Failed to fetch projects:', error);
     } finally {

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import json
 import asyncio
 import logging
+import uuid
 
 from app.database import get_db
 
@@ -33,7 +34,8 @@ from app.services import (
     PromptTemplates,
 )
 from app.services.log_utils import sort_logs, deduplicate_logs, format_logs_batch
-from app.dependencies import get_current_user
+from app.services.log_stream_service import stream_logs, get_project_logs_summary
+from app.dependencies import get_current_active_user, get_current_user
 from app.auth import verify_token
 
 router = APIRouter()
@@ -60,11 +62,14 @@ def create_session(
         raise HTTPException(status_code=404, detail="Project not found")
 
     db_session = SessionModel(**session.model_dump())
+    db_session.is_active = True  # Session is active when created
     db.add(db_session)
+    
+    # Commit session creation
     db.commit()
     db.refresh(db_session)
 
-    # Log session creation
+    # Log session creation (single commit with session)
     db.add(
         LogEntry(
             session_id=db_session.id,
@@ -73,7 +78,8 @@ def create_session(
             metadata=json.dumps({"project_id": session.project_id}),
         )
     )
-    db.commit()
+    # Don't commit here - let the next operation handle it
+    # This prevents double-commit delays
 
     return db_session
 
@@ -165,19 +171,39 @@ def update_session(
     return db_session
 
 
-@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/sessions/{session_id}", response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_session(
     session_id: int,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_active_user),
 ):
     """Delete a session"""
+    import json
+    from app.models import Session as SessionModel, LogEntry
+    
+    logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
+    
     db_session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not db_session:
+        logger.warning(f"DELETE /sessions/{session_id} - Session not found")
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Log deletion before actually deleting
+    db.add(
+        LogEntry(
+            session_id=session_id,
+            level="INFO",
+            message=f"Session deletion requested: {db_session.name}",
+            metadata=json.dumps({"requested_by": current_user.email}),
+        )
+    )
+    db.commit()
+
+    # Delete the session
     db.delete(db_session)
     db.commit()
+    
+    logger.info(f"DELETE /sessions/{session_id} - Session deleted successfully")
     return None
 
 
@@ -325,7 +351,7 @@ async def websocket_log_stream(
 
     # Accept connection
     await websocket.accept()
-    logger.info(f"WebSocket connected for session {session_id}")
+    logger.info(f"WebSocket connected for session {session_id}, instance: {session.instance_id}")
 
     # Register WebSocket
     if session_id not in active_websockets:
@@ -337,14 +363,15 @@ async def websocket_log_stream(
         {
             "type": "connected",
             "session_id": session_id,
+            "session_instance_id": session.instance_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
     )
 
-    # Send recent logs
+    # Send recent logs filtered by instance_id
     log_service = LogStreamService(db)
-    recent_logs = log_service.get_recent_logs(session_id, limit=20)
-    logger.info(f"Sending {len(recent_logs)} recent logs to WebSocket")
+    recent_logs = log_service.get_recent_logs(session_id, instance_id=session.instance_id, limit=20)
+    logger.info(f"Sending {len(recent_logs)} recent logs to WebSocket (filtered by instance)")
 
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
@@ -379,8 +406,17 @@ def get_session_logs(
     limit: int = 100,
     offset: int = 0,
 ):
-    """Get log entries for a session"""
-    query = db.query(LogEntry).filter(LogEntry.session_id == session_id)
+    """Get log entries for a session (filtered by instance_id)"""
+    # Verify session exists to get instance_id
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Filter logs by both session_id and instance_id to prevent ID reuse issues
+    query = db.query(LogEntry).filter(
+        LogEntry.session_id == session_id,
+        LogEntry.session_instance_id == session.instance_id
+    )
 
     if level:
         query = query.filter(LogEntry.level == level.upper())
@@ -389,6 +425,7 @@ def get_session_logs(
 
     return {
         "total": query.count(),
+        "session_instance_id": session.instance_id,
         "logs": [
             {
                 "id": log.id,
@@ -461,8 +498,24 @@ def track_tool_execution(
     success: bool,
     db: Session = Depends(get_db),
     task_id: Optional[int] = None,
+    session_instance_id: Optional[str] = None,  # NEW: For log isolation
 ):
-    """Manually track a tool execution"""
+    """Manually track a tool execution with instance tracking
+    
+    Args:
+        session_id: Session ID
+        execution_id: Unique execution identifier
+        tool_name: Name of the tool
+        params: Tool parameters
+        result: Tool execution result
+        success: Whether execution was successful
+        db: Database session
+        task_id: Optional task ID
+        session_instance_id: Instance UUID for log isolation (NEW)
+    
+    Returns:
+        Tracked execution result
+    """
     tool_service = ToolTrackingService(db)
 
     execution = tool_service.track(
@@ -473,6 +526,7 @@ def track_tool_execution(
         success=success,
         session_id=session_id,
         task_id=task_id,
+        session_instance_id=session_instance_id,  # NEW: For isolation
     )
 
     return {"status": "tracked", "execution_id": execution_id, "tool": tool_name}
@@ -496,16 +550,38 @@ async def start_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check if already running
-    if session.is_active:
-        raise HTTPException(status_code=400, detail="Session is already running")
+    # Check if already running (includes 'active' as equivalent to 'running')
+    if session.status in ["running", "paused", "active"]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Session is already {session.status}. Use stop or resume instead."
+        )
+    
+    # Handle sessions stuck in "pending" or other non-running states
+    if session.status == "pending" and session.is_active:
+        logger.warning(f"Session {session_id} is stuck in pending state with is_active=True. Resetting...")
+        # Reset the session state to allow starting
+        session.is_active = False
+        session.status = "stopped"
+        db.commit()
+    
+    # Handle sessions stuck in "active" status
+    if session.status == "active":
+        logger.warning(f"Session {session_id} has 'active' status. Treating as stopped and resetting...")
+        session.is_active = False
+        session.status = "stopped"
+        db.commit()
 
     try:
+        # Generate unique instance ID for this session (prevents ID reuse issues)
+        session_instance_id = str(uuid.uuid4())
+        
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
 
         # Create OpenClaw session using session description or name
         task_description = session.description or session.name
+        logger.info(f"Starting session {session_id} with description: {task_description[:50]}, instance: {session_instance_id}")
         session_key = await openclaw_service.create_openclaw_session(task_description)
 
         # If session is linked to a project, queue all pending tasks
@@ -561,20 +637,22 @@ async def start_session(
                 else session_key
             )
 
-        # Update database
+        # Update session with instance ID for tracking
+        session.instance_id = session_instance_id
         session.is_active = True
         session.started_at = datetime.now(timezone.utc)
         session.status = "running"
         db.commit()
 
-        # Log the start
+        # Log the start with instance tracking
         db.add(
             LogEntry(
                 session_id=session_id,
+                session_instance_id=session_instance_id,
                 level="INFO",
                 message=f"Session started: {session.name}",
                 metadata=json.dumps(
-                    {"session_key": session_key, "task_description": task_description}
+                    {"session_key": session_key, "task_description": task_description, "instance_id": session_instance_id}
                 ),
             )
         )
@@ -618,8 +696,8 @@ async def stop_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check if not running
-    if not session.is_active:
+    # Check if running (includes 'active' as equivalent to 'running')
+    if session.status not in ["running", "paused", "active"]:
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
@@ -681,8 +759,8 @@ async def pause_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check if running
-    if not session.is_active:
+    # Check if running (includes 'active' as equivalent to 'running')
+    if session.status not in ["running", "paused", "active"]:
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
@@ -693,6 +771,7 @@ async def pause_session(
         await openclaw_service.pause_session()
 
         # Update database
+        session.is_active = True  # Keep session active when paused
         session.status = "paused"
         session.paused_at = datetime.now(timezone.utc)
         db.commit()
@@ -945,8 +1024,11 @@ def get_sorted_logs(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Get all logs for the session
-    logs_query = db.query(LogEntry).filter(LogEntry.session_id == session_id)
+    # Get all logs for the session, filtering by instance_id to prevent ID reuse issues
+    logs_query = db.query(LogEntry).filter(
+        LogEntry.session_id == session_id,
+        LogEntry.session_instance_id == session.instance_id
+    )
 
     # Apply level filter if specified
     if level:
@@ -978,6 +1060,7 @@ def get_sorted_logs(
 
     return {
         "session_id": session_id,
+        "session_instance_id": session.instance_id,
         "total_logs": len(logs),
         "returned_logs": len(sorted_logs),
         "sort_order": order,
@@ -1060,6 +1143,7 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
             {
                 "title": "Add Database Connection",
                 "description": "Configure database connection pooling",
+
             },
         ],
         "frontend|ui|react": [
@@ -1111,3 +1195,4 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
     ]
 
     return {"steps": default_steps, "task_name": task_name}
+

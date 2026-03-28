@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { sessionsAPI, projectsAPI } from '../api/client';
 import { 
@@ -13,13 +13,14 @@ function NewSession() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [projects, setProjects] = useState<Array<{ id: number; name: string }>>([]);
-  // const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [sessionName, setSessionName] = useState('');
   const [sessionDescription, setSessionDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const fetchProjects = useCallback(async () => {
     try {
+      setLoading(true); // Show loading while fetching
       const response = await projectsAPI.getAll();
       setProjects(response.data);
       
@@ -41,6 +42,8 @@ function NewSession() {
                       err.message || 
                       'Failed to load projects. Please check your connection.';
       alert(errorMsg);
+    } finally {
+      setLoading(false);
     }
   }, [searchParams]);
 

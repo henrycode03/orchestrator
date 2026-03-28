@@ -18,10 +18,10 @@ function ProjectsList() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateProject, setShowCreateProject] = useState(false);
-  const [newProjectName, setNewProjectName] = useState('');
-  const [creatingProject, setCreatingProject] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [newProjectName, setNewProjectName] = useState('');
+  const [creatingProject, setCreatingProject] = useState(false);
 
   useEffect(() => {
     fetchUser();

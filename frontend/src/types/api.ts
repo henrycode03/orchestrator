@@ -40,6 +40,9 @@ export interface Session {
   resumed_at: string | null;
   created_at: string;
   updated_at: string | null;
+  // Instance tracking for preventing ID reuse issues
+  instance_id?: string | null;
+  deleted_at?: string | null;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed';
@@ -52,6 +55,8 @@ export interface LogEntry {
   message: string;
   log_metadata: string | null;
   created_at: string;
+  // Instance tracking for preventing ID reuse issues
+  session_instance_id?: string | null;
 }
 
 export interface SessionStatistics {
@@ -75,4 +80,32 @@ export interface User {
   is_active: boolean;
   created_at: string;
   updated_at: string | null;
+}
+
+// API Response Types
+export interface SortedLogsResponse {
+  session_id: number;
+  total_logs: number;
+  returned_logs: number;
+  sort_order: 'asc' | 'desc';
+  deduplicated: boolean;
+  logs: LogEntry[];
+}
+
+export interface TaskSortedLogsResponse {
+  task_id: number;
+  total_logs: number;
+  returned_logs: number;
+  sort_order: 'asc' | 'desc';
+  deduplicated: boolean;
+  logs: LogEntry[];
+}
+
+export interface ProjectLogsResponse {
+  project_id: number;
+  project_name: string;
+  total_logs: number;
+  returned_logs: number;
+  by_level: Record<string, number>;
+  logs: LogEntry[];
 }

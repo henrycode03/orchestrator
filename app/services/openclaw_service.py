@@ -20,6 +20,8 @@ from app.services.prompt_templates import (
     StepResult,
     PromptTemplates,
 )
+from app.services.project_isolation_service import ProjectIsolationService
+from app.services.permission_service import PermissionApprovalService, PermissionOperationType
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +167,117 @@ class OpenClawSessionService:
 
             raise OpenClawSessionError(error_msg)
 
+    async def _check_and_request_permission(
+        self,
+        operation_type: str,
+        target_path: Optional[str] = None,
+        command: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        """
+        Check if permission is required and request if needed
+
+        Args:
+            operation_type: Type of operation
+            target_path: Target path
+            command: Shell command
+            description: User-friendly description
+
+        Returns:
+            True if permission granted or not required
+        """
+        if not self.session_model or not self.session_model.project_id:
+            return True  # No project context, skip permission check
+
+        try:
+            permission_service = PermissionApprovalService(self.db)
+
+            # Check if permission is required
+            if not permission_service.check_permission_required(operation_type, target_path):
+                self._log_entry("INFO", f"Permission not required for: {operation_type}")
+                return True
+
+            # Check if already granted
+            if permission_service.is_permission_granted(
+                self.session_model.project_id,
+                operation_type,
+                target_path or "",
+                self.session_model.id,
+            ):
+                self._log_entry("INFO", f"Permission already granted for: {operation_type}")
+                return True
+
+            # Request permission
+            self._log_entry(
+                "WARN",
+                f"Permission required for: {operation_type} on {target_path or command}",
+            )
+
+            permission = permission_service.create_permission_request(
+                project_id=self.session_model.project_id,
+                session_id=self.session_model.id,
+                task_id=self.task_model.id if self.task_model else None,
+                operation_type=operation_type,
+                target_path=target_path,
+                command=command,
+                description=description,
+                expires_in_minutes=30,
+            )
+
+            self._log_entry(
+                "INFO",
+                f"Permission request created: {permission.id}, waiting for approval",
+            )
+
+            # Return False to indicate permission is pending
+            return False
+
+        except Exception as e:
+            self._log_entry(
+                "ERROR", f"Permission check failed: {str(e)}. Allowing operation..."
+            )
+            # Fail open - allow operation if permission system fails
+            return True
+
+    async def _execute_task_with_permission_check(
+        self,
+        prompt: str,
+        operation_type: str,
+        target_path: Optional[str] = None,
+        command: Optional[str] = None,
+        timeout_seconds: int = 300,
+    ) -> Dict[str, Any]:
+        """
+        Execute task with permission check
+
+        Args:
+            prompt: Task prompt
+            operation_type: Operation type
+            target_path: Target path
+            command: Shell command
+            timeout_seconds: Timeout
+
+        Returns:
+            Execution result
+        """
+        # Check permission first
+        permission_granted = await self._check_and_request_permission(
+            operation_type=operation_type,
+            target_path=target_path,
+            command=command,
+            description=f"Execute: {prompt[:100]}...",
+        )
+
+        if not permission_granted:
+            # Permission pending - return error
+            raise OpenClawSessionError(
+                f"Permission required for {operation_type}. "
+                f"Please approve in the UI or use demo mode."
+            )
+
+        # Permission granted, execute task
+        return await self.execute_task(prompt, timeout_seconds)
+
     async def execute_task_with_orchestration(
         self,
         prompt: str,
@@ -190,6 +303,22 @@ class OpenClawSessionService:
             Execution result with orchestration state
         """
         try:
+            # Add project isolation safety prompt
+            if self.session_model and self.session_model.project_id:
+                try:
+                    isolation_service = ProjectIsolationService(self.db)
+                    safety_prompt = isolation_service.get_safety_prompt(
+                        self.session_model.project_id
+                    )
+                    prompt = f"{safety_prompt}\n\n{prompt}"
+                    self._log_entry(
+                        "INFO", "Project isolation safety prompt injected"
+                    )
+                except Exception as e:
+                    self._log_entry(
+                        "WARN", f"Failed to inject safety prompt: {str(e)}"
+                    )
+
             self._log_entry(
                 "INFO", f"[ORCHESTRATION] Starting with prompt: {prompt[:100]}..."
             )
@@ -429,15 +558,31 @@ class OpenClawSessionService:
                     )
 
             except Exception as e:
+                # Extract meaningful error message
+                error_msg = str(e)
+                
+                # If error message contains garbled output, try to extract actual error
+                if error_msg.strip() in ['"\''] or error_msg.strip().startswith('"), "') or error_msg.strip().startswith('"), "'):
+                    # Try to get error from stderr if available
+                    # This handles cases where OpenClaw CLI returned garbled error
+                    self._log_entry(
+                        "WARN", 
+                        f"[STEP] Garbled error detected: {repr(error_msg)}. Checking for better error message..."
+                    )
+                    
+                    # If we have access to the result object, check its stderr
+                    # For now, provide a more helpful error message
+                    error_msg = f"Execution failed with unclear error. See logs for details. Original error: {str(e)[:200]}"
+                
                 step_result = StepResult(
                     step_number=step_index + 1,
                     status="failed",
-                    error_message=str(e),
+                    error_message=error_msg,
                     attempt=attempt + 1,
                 )
                 orchestration_state.record_failure(step_result)
                 self._log_entry(
-                    "ERROR", f"[STEP] Step {step_index + 1} error: {str(e)}"
+                    "ERROR", f"[STEP] Step {step_index + 1} error: {error_msg}"
                 )
 
         # All retries failed
@@ -603,7 +748,17 @@ class OpenClawSessionService:
         try:
             import uuid
 
-            new_session_id = f"orchestrator-task-{self.task_id}-{uuid.uuid4().hex[:8]}"
+            # Ensure task_id is not None
+            if self.task_id is None:
+                self._log_entry(
+                    "WARN",
+                    f"task_id is None! Using session_id instead: {self.session_id}",
+                )
+                task_id_str = str(self.session_id)
+            else:
+                task_id_str = str(self.task_id)
+
+            new_session_id = f"orchestrator-task-{task_id_str}-{uuid.uuid4().hex[:8]}"
 
             # Log the full prompt structure (first 500 chars)
             self._log_entry(
@@ -625,14 +780,63 @@ class OpenClawSessionService:
                 executable="/usr/bin/bash",
             )
 
+            # Debug: Log the full result
+            self._log_entry(
+                "INFO",
+                f"[OPENCLAW] Return code: {result.returncode}, stdout_len: {len(result.stdout)}, stderr_len: {len(result.stderr)}",
+            )
+            # Always log stderr for debugging (even when returncode is 0)
+            if result.stderr:
+                self._log_entry(
+                    "INFO",
+                    f"[OPENCLAW] STDERR (length {len(result.stderr)}): {result.stderr[:500]}",
+                )
+            if result.returncode != 0:
+                self._log_entry(
+                    "ERROR",
+                    f"[OPENCLAW] STDERR: {result.stderr[:1000]}",
+                )
+
             if result.returncode == 0:
                 try:
-                    output_data = json.loads(result.stdout.strip())
-                    output_text = (
-                        output_data.get("message", "")
-                        or output_data.get("text", "")
-                        or result.stdout
+                    # Debug: Log raw stdout
+                    self._log_entry(
+                        "INFO",
+                        f"[OPENCLAW] Raw stdout: {repr(result.stdout[:500])}...",
                     )
+                    
+                    # Debug: Try parsing with debug
+                    stdout_stripped = result.stdout.strip()
+                    self._log_entry(
+                        "INFO",
+                        f"[OPENCLAW] Stripped length: {len(stdout_stripped)}, first 100 chars: {repr(stdout_stripped[:100])}",
+                    )
+                    
+                    output_data = json.loads(stdout_stripped)
+                    
+                    # Debug log
+                    self._log_entry(
+                        "INFO",
+                        f"[OPENCLAW] Full response received, type: {type(output_data)}, keys: {list(output_data.keys()) if isinstance(output_data, dict) else 'N/A'}",
+                    )
+
+                    # Extract text from payloads array
+                    output_text = ""
+                    if isinstance(output_data, dict):
+                        if "payloads" in output_data:
+                            payloads = output_data.get("payloads", [])
+                            if isinstance(payloads, list) and len(payloads) > 0:
+                                first_payload = payloads[0]
+                                if isinstance(first_payload, dict):
+                                    output_text = first_payload.get("text", "")
+                                else:
+                                    output_text = str(first_payload)
+                            else:
+                                output_text = json.dumps(output_data)
+                        else:
+                            output_text = json.dumps(output_data)
+                    else:
+                        output_text = result.stdout
 
                     self._log_entry(
                         "INFO", f"Task execution completed: {output_text[:300]}"
@@ -860,9 +1064,15 @@ class OpenClawSessionService:
     def _log_entry(
         self, level: str, message: str, metadata: Optional[str] = None
     ) -> LogEntry:
-        """Create database log entry"""
+        """Create database log entry with instance tracking"""
+        # Get instance_id from session if available
+        session_instance_id = None
+        if self.session_model:
+            session_instance_id = self.session_model.instance_id
+        
         log_entry = LogEntry(
             session_id=self.session_id,
+            session_instance_id=session_instance_id,
             task_id=self.task_id,
             level=level,
             message=message,

@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { sessionsAPI, tasksAPI } from '../api/client';
-import type { Session, LogEntry, Task } from '../types/api';
+import { sessionsAPI, tasksAPI, projectsAPI } from '../api/client';
+import type { Session, LogEntry, Task, Project } from '../types/api';
 import { 
   ArrowLeft, 
   Play, 
@@ -15,12 +15,14 @@ import {
   ArrowDown,
   Settings,
   XCircle,
-  Zap
+  Zap,
+  ShieldCheck
 } from 'lucide-react';
 
 function SessionDashboard() {
   const { id } = useParams<{ id: string }>();
   const [session, setSession] = useState<Session | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [statusWs, setStatusWs] = useState<WebSocket | null>(null);
@@ -37,6 +39,11 @@ function SessionDashboard() {
   const reconnectCountRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectingRef = useRef(false);
+  const connectedRef = useRef(false);
+  
+  // Refs for WebSocket connection functions to avoid forward reference issues
+  const connectStatusWebSocketRef = useRef<(() => void) | null>(null);
+  const connectLogsWebSocketRef = useRef<(() => void) | null>(null);
   
   // Limit logs in memory to prevent performance issues
   const MAX_LOGS_IN_MEMORY = 500;
@@ -60,29 +67,38 @@ function SessionDashboard() {
     return date.toLocaleString();
   };
 
-  // Fetch sorted logs from API
-  const fetchSortedLogs = async () => {
-    console.log('fetchSortedLogs called, id:', id);
+  // Helper function to check if session is running (includes 'active' status)
+  const isSessionRunning = () => {
+    return session?.status === 'running' || session?.status === 'active';
+  };
+
+  // Fetch logs for the current session only (project-scoped)
+  const fetchSessionLogs = async () => {
+    console.log('fetchSessionLogs called, session id:', id, 'project:', project?.id);
+    
+    // Only fetch if we have a session ID
     if (!id) {
-      console.log('No id, returning early');
+      console.log('No session ID, returning early');
       return;
     }
     
     setIsLoadingLogs(true);
     try {
+      // Fetch logs only for this specific session
       const response = await sessionsAPI.getSortedLogs(
         Number(id),
-        sortOrder,
-        deduplicate,
-        filterLevel
+        sortOrder, // sort order
+        deduplicate, // deduplicate
+        filterLevel, // level filter
+        500 // limit
       );
       
-      console.log('Sorted logs response:', response);
+      console.log('Session logs response:', response);
       console.log('Response data:', response?.data);
       
       // Axios wraps response in .data property
       const apiResponse = response?.data || response;
-      const logsArray = Array.isArray(apiResponse) ? apiResponse : (apiResponse?.logs || []);
+      const logsArray = Array.isArray(apiResponse?.logs) ? apiResponse.logs : [];
       
       console.log('logsArray:', logsArray);
       console.log('logsArray length:', logsArray.length);
@@ -90,15 +106,21 @@ function SessionDashboard() {
       // Transform logs to use created_at
       const transformedLogs = logsArray.map((log: unknown) => ({
         ...log,
-        created_at: (log as { timestamp?: string }).timestamp
+        created_at: (log as { timestamp?: string }).timestamp || log.created_at
       }));
       
       setLogs(transformedLogs);
+      console.log('Set logs:', transformedLogs.length, 'for session', id);
+      
+      // Log that we've loaded session-specific logs
+      if (transformedLogs.length > 0) {
+        console.log('✅ Session logs loaded - showing ONLY logs from Session', id);
+      }
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: unknown } } };
-      console.error('Failed to fetch sorted logs:', error);
+      console.error('Failed to fetch session logs:', error);
       console.error('Response structure:', err?.response?.data);
-      alert(`Failed to load logs: ${err.response?.data?.detail || error.message || 'Unknown error'}. Please try again.`);
+      alert(`Failed to load session logs: ${err.response?.data?.detail || error.message || 'Unknown error'}. Please try again.`);
     } finally {
       setIsLoadingLogs(false);
     }
@@ -107,9 +129,7 @@ function SessionDashboard() {
   useEffect(() => {
     if (!id) return;
     fetchSession();
-    connectStatusWebSocket();
-    connectLogsWebSocket();
-    fetchSortedLogs(); // Load sorted logs on mount
+    fetchSessionLogs(); // Load session logs on mount
     
     return () => {
       if (statusWs) statusWs.close();
@@ -120,6 +140,41 @@ function SessionDashboard() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Initialize WebSockets after functions are defined
+  useEffect(() => {
+    if (!id || connectedRef.current) return;
+    
+    // Delay WebSocket connection to ensure functions are available
+    const initTimeout = setTimeout(() => {
+      if (id) {
+        connectStatusWebSocket();
+        connectLogsWebSocket();
+        connectedRef.current = true;
+      }
+    }, 100);
+    
+    return () => clearTimeout(initTimeout);
+  }, [id]);
+
+  // Fetch project when session is loaded (to get project_id for logs)
+  useEffect(() => {
+    if (session?.project_id) {
+      // Fetch the project using project_id
+      const fetchProject = async () => {
+        try {
+          const projectResponse = await projectsAPI.getById(session.project_id);
+          console.log('Fetched project for session:', projectResponse.data);
+          if (projectResponse.data) {
+            setProject(projectResponse.data);
+          }
+        } catch (error) {
+          console.error('Failed to fetch project:', error);
+        }
+      };
+      fetchProject();
+    }
+  }, [session?.project_id]);
 
   // Fetch tasks when session is loaded
   useEffect(() => {
@@ -133,7 +188,6 @@ function SessionDashboard() {
   useEffect(() => {
     if (!id) return;
     
-    setPolling(true);
     const pollInterval = setInterval(async () => {
       try {
         const response = await sessionsAPI.getById(Number(id));
@@ -151,7 +205,6 @@ function SessionDashboard() {
     
     return () => {
       clearInterval(pollInterval);
-      setPolling(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -162,11 +215,11 @@ function SessionDashboard() {
     
     const reconnectTimer = setTimeout(() => {
       console.log('Auto-reconnecting logs WebSocket...');
-      connectLogsWebSocket();
+      connectLogsWebSocketRef.current?.();
     }, 3000);
     
     return () => clearTimeout(reconnectTimer);
-  }, [isLogsConnected, connectLogsWebSocket]);
+  }, [isLogsConnected]);
 
 // Re-fetch logs when sorting/filtering changes (debounced)
   useEffect(() => {
@@ -174,7 +227,7 @@ function SessionDashboard() {
     
     setIsFetching(true);
     const timer = setTimeout(() => {
-      fetchSortedLogs();
+      fetchSessionLogs();
       setIsFetching(false);
     }, 100); // Debounce by 100ms
     
@@ -193,7 +246,7 @@ function SessionDashboard() {
 
   // Monitor for stuck tasks (no new logs for 5 minutes)
   useEffect(() => {
-    if (!id || !isLogsConnected || session?.status !== 'running') return;
+    if (!id || !isLogsConnected || !isSessionRunning()) return;
 
     const checkStuckTask = () => {
       if (logs.length === 0) return;
@@ -268,6 +321,7 @@ function SessionDashboard() {
     webSocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'status_update') {
+
         setSession(prev => prev ? { ...prev, ...data.status } : null);
       }
     };
@@ -292,7 +346,7 @@ function SessionDashboard() {
       
       reconnectTimeoutRef.current = setTimeout(() => {
         if (document.visibilityState === 'visible') {
-          connectStatusWebSocket();
+          connectStatusWebSocketRef.current?.();
         }
       }, reconnectDelay);
     };
@@ -300,14 +354,18 @@ function SessionDashboard() {
     setStatusWs(webSocket);
   };
 
+  // Assign to refs after definition for use in useEffects
+  connectStatusWebSocketRef.current = connectStatusWebSocket;
+
   const connectLogsWebSocket = useCallback(() => {
-    console.log('connectLogsWebSocket called, id:', id);
+    console.log('connectLogsWebSocket called, session id:', id, 'project:', project?.id);
     if (!id || isConnectingRef.current) {
       console.log('Not connecting - missing id or already connecting');
       return;
     }
     
     isConnectingRef.current = true;
+    // Use session-specific WebSocket endpoint instead of project-level
     const webSocket = sessionsAPI.getLogsStream(Number(id));
     console.log('WebSocket URL:', webSocket.url);
     
@@ -355,7 +413,7 @@ function SessionDashboard() {
       // Let the polling handle status updates
       if (session?.status !== 'stopped' && session?.status !== 'completed') {
         console.log('Reconnecting logs WebSocket...');
-        setTimeout(() => connectLogsWebSocket(), 3000);
+        setTimeout(() => connectLogsWebSocketRef.current?.(), 3000);
       } else {
         console.log('Session stopped/completed, logs stream ended (polling will continue)');
         // Polling will continue to check for task status updates
@@ -365,8 +423,11 @@ function SessionDashboard() {
     setLogsWs(webSocket);
   }, [id, session?.status]);
 
+  // Assign to refs after definition for use in useEffects
+  connectLogsWebSocketRef.current = connectLogsWebSocket;
+
   const handleRefreshLogs = () => {
-    fetchSortedLogs();
+    fetchSessionLogs();
   };
 
   const handleRefreshWebSocket = async () => {
@@ -382,12 +443,12 @@ function SessionDashboard() {
       }
       
       // Reconnect WebSockets
-      connectStatusWebSocket();
-      connectLogsWebSocket();
+      connectStatusWebSocketRef.current?.();
+      connectLogsWebSocketRef.current?.();
       
       // Also fetch fresh data from API
       await fetchSession();
-      await fetchSortedLogs();
+      await fetchSessionLogs();
       
       // Show success feedback
       console.log('Session data refreshed successfully');
@@ -467,6 +528,9 @@ function SessionDashboard() {
     e.preventDefault();
     if (!id || !inputTask.trim() || executing) return;
 
+    // Show success notification IMMEDIATELY when button is clicked
+    alert('✅ Task submitted successfully! Execution has started.');
+    
     setExecuting(true);
     try {
       await tasksAPI.execute(Number(id), {
@@ -479,8 +543,8 @@ function SessionDashboard() {
       setInputTask('');
       await fetchSession();
       
-      // Show notification
-      alert('Task executed successfully!');
+      // Remove redundant notification - already shown at start
+      // alert('Task executed successfully!');
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to execute task:', error);
@@ -691,7 +755,7 @@ function SessionDashboard() {
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Status:</span>
                   <span className={`font-medium ${
-                    session?.status === 'running' ? 'text-green-400' :
+                    isSessionRunning() ? 'text-green-400' :
                     session?.status === 'paused' ? 'text-yellow-400' :
                     session?.status === 'stopped' ? 'text-red-400' :
                     'text-slate-300'
@@ -752,7 +816,7 @@ function SessionDashboard() {
                   </button>
                 )}
                 
-                {session?.status === 'running' && (
+                {isSessionRunning() && (
                   <>
                     <button
                       onClick={handlePause}
@@ -909,7 +973,7 @@ function SessionDashboard() {
                           document.querySelector('textarea')?.focus();
                         }, 100);
                       }}
-                      disabled={executing || session?.status !== 'running'}
+                      disabled={executing || !isSessionRunning()}
                       className="w-full text-left bg-slate-700/50 hover:bg-slate-700 border border-slate-600 hover:border-primary-500 rounded-lg p-4 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <div className="flex items-start justify-between">
@@ -956,11 +1020,11 @@ function SessionDashboard() {
                     placeholder="Enter a task for the AI session to execute..."
                     rows={4}
                     className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
-                    disabled={session?.status !== 'running'}
+                    disabled={!isSessionRunning()}
                   />
                   <button
                     type="submit"
-                    disabled={!inputTask.trim() || executing || session?.status !== 'running'}
+                    disabled={!inputTask.trim() || executing || !isSessionRunning()}
                     className="w-full bg-primary-500 hover:bg-primary-600 text-white px-4 py-3 rounded-lg transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {executing ? (
@@ -982,10 +1046,26 @@ function SessionDashboard() {
             {/* Live Logs */}
             <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
               <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                  <Terminal className="h-5 w-5" />
-                  Live Logs
-                </h2>
+                <div>
+                  <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                    <Terminal className="h-5 w-5" />
+                    Live Logs
+                  </h2>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-xs text-slate-400">
+                      Session #{id}
+                    </span>
+                    {project && (
+                      <span className="text-xs text-primary-400">
+                        • Project: {project.name}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
+                    <ShieldCheck className="h-3 w-3" />
+                    Showing logs from this session ONLY (isolated)
+                  </p>
+                </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-400">
                     {displayLogs.length} logs
@@ -1010,7 +1090,10 @@ function SessionDashboard() {
                 ) : displayLogs.length === 0 ? (
                   <div className="h-full flex items-center justify-center text-slate-500">
                     <Terminal className="h-12 w-12 mb-2 opacity-50" />
-                    <p>No logs yet. Start the session to see activity.</p>
+                    <p className="text-center">
+                      <span className="block mb-1">No logs yet. Start the session to see activity.</span>
+                      <span className="text-xs">Logs will only show from this session (isolated from other projects)</span>
+                    </p>
                   </div>
                 ) : (
                   <div className="space-y-1">

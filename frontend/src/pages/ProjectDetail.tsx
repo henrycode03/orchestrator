@@ -143,11 +143,23 @@ function ProjectDetail() {
     if (!taskTitle.trim() || !id) return;
 
     try {
-      await tasksAPI.create({
+      const payload: {
+        project_id: number;
+        title: string;
+        description?: string;
+        steps?: string;
+      } = {
         project_id: Number(id),
         title: taskTitle,
         description: taskDescription || undefined,
-      });
+      };
+      
+      // Include steps if provided (either auto-generated or manually entered)
+      if (taskSteps.trim()) {
+        payload.steps = taskSteps;
+      }
+
+      await tasksAPI.create(payload);
       setTaskTitle('');
       setTaskDescription('');
       setTaskSteps('');

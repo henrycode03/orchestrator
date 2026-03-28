@@ -52,11 +52,17 @@ def get_user_by_api_key(api_key: str, db: Session) -> Optional[User]:
     return db.query(User).filter(User.id == api_key_record.user_id).first()
 
 
+# Header parameter for API key
+def get_x_api_key(x_api_key: str = Header("X-API-Key", alias="X-API-Key")):
+    """Header parameter decorator for API key."""
+    return x_api_key
+
+
 def get_api_key_dependency():
     """Create a dependency that checks for API key authentication."""
 
     async def api_key_auth(
-        x_api_key: Optional[str] = Depends(header_params="X-API-Key"),
+        x_api_key: str = Depends(get_x_api_key),
         db: Session = Depends(get_db),
     ):
         if not x_api_key:
@@ -77,12 +83,6 @@ def get_api_key_dependency():
         return user
 
     return api_key_auth
-
-
-# Header parameter for API key
-def header_params(x_api_key: str = Header("X-API-Key")):
-    """Header parameter decorator for API key."""
-    return x_api_key
 
 
 @router.post(

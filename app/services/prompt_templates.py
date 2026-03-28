@@ -70,18 +70,20 @@ class OrchestrationState:
     Carries all context through the full plan → execute → debug → revise cycle.
     Pass this into every PromptTemplates builder so the LLM always has full history.
 
-    Workspace layout (always enforced):
+    Workspace layout (new architecture):
     ~/.openclaw/workspace/projects/
-      <project_name>/ ← project_dir
-        ...source files...
-        .openclaw/
-          session_<id>.json ← session manifest written on close
+      <project_name>/                    ← project workspace
+        task_{task_id}/                  ← task-specific subfolder
+          ...source files...
+          .openclaw/
+            session_<id>.json            ← session manifest
     """
 
     session_id: str
     task_description: str
-    project_name: str = ""  # e.g. "my-api-service" (slug, no spaces)
+    project_name: str = ""  # e.g. "TalentBridge" (slug, no spaces)
     project_context: str = ""
+    task_id: Optional[int] = None  # For generating task subfolder
     plan: List[Dict[str, Any]] = field(default_factory=list)
     current_step_index: int = 0
     execution_results: List[StepResult] = field(default_factory=list)
@@ -92,6 +94,11 @@ class OrchestrationState:
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    
+    # Optional: Override workspace path (for database-configured paths)
+    _workspace_path_override: Optional[str] = None
+    # Optional: Override task subfolder
+    _task_subfolder_override: Optional[str] = None
 
     # ── Workspace paths ──────────────────────────────────────────────────────
 
@@ -120,18 +127,40 @@ class OrchestrationState:
         return text or f"session-{self.session_id}"
 
     @property
+    def project_workspace_path(self) -> Path:
+        """
+        Absolute path to the project's workspace folder.
+        Uses override if set, otherwise uses slugified project name.
+        """
+        if self._workspace_path_override:
+            return Path(self._workspace_path_override)
+        
+        slug = self._slugify(self.project_name.strip()) if self.project_name.strip() else f"project-{self.session_id}"
+        return self.workspace_root / slug
+
+    @property
+    def task_subfolder(self) -> str:
+        """
+        Get the task subfolder name.
+        Format: task_{id} or task_{slugified_name}
+        """
+        if self._task_subfolder_override:
+            return self._task_subfolder_override
+        
+        if self.task_id:
+            return f"task_{self.task_id}"
+        elif self.project_name:
+            return f"task_{self._slugify(self.project_name)}"
+        else:
+            return f"task_{self.session_id}"
+
+    @property
     def project_dir(self) -> Path:
         """
-        Absolute path to this project's directory.
-        Falls back to workspace_root/<session_id> when project_name is not set.
-        Creates a dedicated subfolder for each project with a slugified name.
+        Absolute path to this task's workspace directory.
+        Structure: workspace_root / project_workspace / task_subfolder
         """
-        slug = (
-            self._slugify(self.project_name.strip())
-            if self.project_name.strip()
-            else f"session-{self.session_id}"
-        )
-        return self.workspace_root / slug
+        return self.project_workspace_path / self.task_subfolder
 
     @property
     def session_manifest_path(self) -> Path:

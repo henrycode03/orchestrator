@@ -1,5 +1,6 @@
 """Task service - Business logic for tasks"""
 
+from typing import Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 from app.models import Task, TaskStatus, Project, SessionTask
@@ -74,16 +75,29 @@ class TaskService:
         return task
 
     def log_task_event(
-        self, task_id: int, level: str, message: str, metadata: dict = None
+        self, task_id: int, session_id: int, session_instance_id: str, level: str, message: str, metadata: dict = None
     ):
-        """Log an event for a task"""
+        """Log an event for a task with proper instance isolation
+        
+        Args:
+            task_id: Task ID
+            session_id: Session ID (new parameter for proper isolation)
+            session_instance_id: Instance UUID (new parameter for proper isolation)
+            level: Log level
+            message: Log message
+            metadata: Optional metadata dict
+        """
         from app.models import LogEntry
-        from app.database import engine
-
-        from sqlalchemy import text
-
-        # Insert log entry
-        log = LogEntry(task_id=task_id, level=level, message=message, metadata=metadata)
+        
+        # Insert log entry with instance tracking
+        log = LogEntry(
+            session_id=session_id,
+            session_instance_id=session_instance_id,  # ✅ Critical for isolation
+            task_id=task_id,
+            level=level,
+            message=message,
+            metadata=metadata,
+        )
         self.db.add(log)
         self.db.commit()
         return log

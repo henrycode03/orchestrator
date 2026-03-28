@@ -31,6 +31,11 @@ def get_db():
         db.close()
 
 
+def get_db_session():
+    """Get database session for background tasks (Celery workers)"""
+    return SessionLocal()
+
+
 # ============= TEST DATABASE HELPERS =============
 
 

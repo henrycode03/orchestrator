@@ -27,6 +27,7 @@ class ToolExecution:
         execution_time_ms: float,
         session_id: int,
         task_id: Optional[int] = None,
+        session_instance_id: Optional[str] = None,  # NEW: For proper log isolation
     ):
         self.tool_name = tool_name
         self.params = params
@@ -35,6 +36,7 @@ class ToolExecution:
         self.execution_time_ms = execution_time_ms
         self.session_id = session_id
         self.task_id = task_id
+        self.session_instance_id = session_instance_id  # NEW: For isolation
         self.timestamp = datetime.utcnow()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -46,6 +48,7 @@ class ToolExecution:
             "success": self.success,
             "execution_time_ms": self.execution_time_ms,
             "session_id": self.session_id,
+            "session_instance_id": self.session_instance_id,  # NEW: For isolation
             "task_id": self.task_id,
             "timestamp": self.timestamp.isoformat(),
         }
@@ -67,6 +70,7 @@ class ToolTrackingService:
         params: Dict[str, Any],
         session_id: int,
         task_id: Optional[int] = None,
+        session_instance_id: Optional[str] = None,  # NEW: For isolation
     ) -> None:
         """
         Mark tool execution as started
@@ -77,6 +81,7 @@ class ToolTrackingService:
             params: Tool parameters
             session_id: Session ID
             task_id: Optional task ID
+            session_instance_id: Instance UUID for log isolation (NEW)
         """
         self.active_executions[execution_id] = ToolExecution(
             tool_name=tool_name,
@@ -86,6 +91,7 @@ class ToolTrackingService:
             execution_time_ms=0,
             session_id=session_id,
             task_id=task_id,
+            session_instance_id=session_instance_id,  # NEW: For isolation
         )
 
         logger.info(f"Tool execution started: {tool_name} (id={execution_id})")
@@ -138,9 +144,16 @@ class ToolTrackingService:
     def _log_execution(
         self, level: str, message: str, metadata: Dict[str, Any]
     ) -> None:
-        """Create database log entry for tool execution"""
+        """Create database log entry for tool execution with instance tracking
+        
+        Args:
+            level: Log level
+            message: Log message
+            metadata: Dict with session_id, session_instance_id, task_id, etc.
+        """
         log_entry = LogEntry(
             session_id=metadata.get("session_id"),
+            session_instance_id=metadata.get("session_instance_id"),  # ✅ Critical for isolation
             task_id=metadata.get("task_id"),
             level=level,
             message=message,
@@ -159,6 +172,7 @@ class ToolTrackingService:
         session_id: int,
         task_id: Optional[int] = None,
         error_message: Optional[str] = None,
+        session_instance_id: Optional[str] = None,  # NEW: For isolation
     ) -> ToolExecution:
         """
         Track a complete tool execution (start + complete in one call)
@@ -172,11 +186,14 @@ class ToolTrackingService:
             session_id: Session ID
             task_id: Optional task ID
             error_message: Error message if failed
+            session_instance_id: Instance UUID for log isolation (NEW)
 
         Returns:
             Completed ToolExecution object
         """
-        self.start_execution(execution_id, tool_name, params, session_id, task_id)
+        self.start_execution(
+            execution_id, tool_name, params, session_id, task_id, session_instance_id
+        )
         return self.complete_execution(execution_id, result, success, error_message)
 
     def get_execution_history(
