@@ -35,6 +35,7 @@ class Settings(BaseSettings):
         ]
 
     # Database
+    # Located in root directory (relative to where app is started)
     DATABASE_URL: str = "sqlite:///./orchestrator.db"
 
     # Auth
