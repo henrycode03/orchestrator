@@ -77,6 +77,7 @@ class OpenClawSessionService:
         self.process: Optional[subprocess.Popen] = None
         # Initialize checkpoint service
         from app.services.checkpoint_service import CheckpointService
+
         self.checkpoint_service = CheckpointService(db)
 
     async def create_openclaw_session(
@@ -608,7 +609,9 @@ class OpenClawSessionService:
                 )
 
                 # OPTIMIZATION: Enforce strict timeout per attempt (60s max)
-                result = await self.execute_task(execution_prompt, timeout_seconds=min(60, 180 // max_retries))
+                result = await self.execute_task(
+                    execution_prompt, timeout_seconds=min(60, 180 // max_retries)
+                )
 
                 # Check if successful
                 is_success = result.get("status") == "completed"
@@ -638,34 +641,42 @@ class OpenClawSessionService:
             except OpenClawSessionError as e:
                 # Handle timeout errors specifically
                 if "timed out" in str(e).lower():
-                    orchestration_state.record_failure(StepResult(
-                        step_number=step_index + 1,
-                        status="failed",
-                        error_message=f"Timeout after {60}s (attempt {attempt + 1}/{max_retries})",
-                        attempt=attempt + 1,
-                    ))
+                    orchestration_state.record_failure(
+                        StepResult(
+                            step_number=step_index + 1,
+                            status="failed",
+                            error_message=f"Timeout after {60}s (attempt {attempt + 1}/{max_retries})",
+                            attempt=attempt + 1,
+                        )
+                    )
                     self._log_entry(
                         "WARN", f"[STEP] Step {step_index + 1} timed out, retrying..."
                     )
                 else:
                     # Other errors - don't retry
-                    orchestration_state.record_failure(StepResult(
-                        step_number=step_index + 1,
-                        status="failed",
-                        error_message=str(e),
-                        attempt=attempt + 1,
-                    ))
+                    orchestration_state.record_failure(
+                        StepResult(
+                            step_number=step_index + 1,
+                            status="failed",
+                            error_message=str(e),
+                            attempt=attempt + 1,
+                        )
+                    )
                     raise
 
             except Exception as e:
                 # Handle garbled errors without retrying
-                orchestration_state.record_failure(StepResult(
-                    step_number=step_index + 1,
-                    status="failed",
-                    error_message=str(e)[:500],
-                    attempt=attempt + 1,
-                ))
-                self._log_entry("ERROR", f"[STEP] Step {step_index + 1} error: {str(e)}")
+                orchestration_state.record_failure(
+                    StepResult(
+                        step_number=step_index + 1,
+                        status="failed",
+                        error_message=str(e)[:500],
+                        attempt=attempt + 1,
+                    )
+                )
+                self._log_entry(
+                    "ERROR", f"[STEP] Step {step_index + 1} error: {str(e)}"
+                )
 
         # All retries failed - return final failure result
         return StepResult(
@@ -810,7 +821,9 @@ class OpenClawSessionService:
         except Exception as e:
             raise OpenClawSessionError(f"OpenClaw CLI execution failed: {str(e)}")
 
-    def _run_openclaw_cli(self, prompt: str, session_id: str, timeout_seconds: int) -> subprocess.CompletedProcess:
+    def _run_openclaw_cli(
+        self, prompt: str, session_id: str, timeout_seconds: int
+    ) -> subprocess.CompletedProcess:
         """Run OpenClaw CLI as a thread (non-blocking)"""
 
         # Escape single quotes for bash command
@@ -818,8 +831,9 @@ class OpenClawSessionService:
 
         return subprocess.run(
             [
-                "bash", "-c",
-                f"openclaw agent --local --session-id {session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}"
+                "bash",
+                "-c",
+                f"openclaw agent --local --session-id {session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}",
             ],
             capture_output=True,
             text=True,
@@ -858,20 +872,20 @@ class OpenClawSessionService:
         # FIX: Detect garbled error patterns (Issue #9 - Garbled Error Detection)
         # Common garbled outputs from timeout/corrupted responses
         GARBLED_PATTERNS = [
-            '"\'',  # Single quote in quotes
+            "\"'",  # Single quote in quotes
             '"), "',  # Partial JSON with quotes
             "', '",  # Comma-separated quotes (the reported error!)
             '"", "',  # Multiple empty strings
             "garbled",  # Literal garbled text
             "corrupted",  # Corrupted output marker
         ]
-        
+
         stdout_lower = stdout.lower()
         for pattern in GARBLED_PATTERNS:
             if pattern in stdout_lower or stdout.strip() == pattern.strip():
                 self._log_entry(
-                    "ERROR", 
-                    f"[OPENCLAW] DETECTED GARBLDED ERROR PATTERN: '{stdout[:200]}'"
+                    "ERROR",
+                    f"[OPENCLAW] DETECTED GARBLDED ERROR PATTERN: '{stdout[:200]}'",
                 )
                 return {
                     "status": "failed",
@@ -1001,7 +1015,10 @@ class OpenClawSessionService:
             raise
 
     async def execute_task_with_streaming(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: Optional[Callable] = None
+        self,
+        prompt: str,
+        timeout_seconds: int = 300,
+        log_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI with real-time log streaming (optimized)"""
 
@@ -1021,7 +1038,9 @@ class OpenClawSessionService:
             log_count = 0
             while True:
                 try:
-                    line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(), timeout=1.0
+                    )
                     if not line:
                         break
 
@@ -1078,7 +1097,8 @@ class OpenClawSessionService:
                 f"Prompt too long ({len(prompt)} chars), truncating to {self.MAX_PROMPT_LENGTH}",
             )
             prompt = (
-                prompt[: self.MAX_PROMPT_LENGTH] + "\n\n[TRUNCATED - prompt was too long]"
+                prompt[: self.MAX_PROMPT_LENGTH]
+                + "\n\n[TRUNCATED - prompt was too long]"
             )
 
         self._log_entry("INFO", "Running in REAL MODE - executing via OpenClaw CLI")
@@ -1416,7 +1436,7 @@ class OpenClawSessionService:
 
             # Save orchestration state if available
             orchestration_state = {}
-            if hasattr(self, '_orchestration_state'):
+            if hasattr(self, "_orchestration_state"):
                 orchestration_state = self._orchestration_state
 
             # Get step results from execution history
@@ -1428,14 +1448,24 @@ class OpenClawSessionService:
                 )
 
                 for exec_item in executions:
-                    step_results.append({
-                        "step_type": "tool_execution",
-                        "tool_name": exec_item.tool_name,
-                        "parameters": json.loads(exec_item.parameters) if isinstance(exec_item.parameters, str) else exec_item.parameters,
-                        "result": exec_item.result,
-                        "success": exec_item.success,
-                        "executed_at": exec_item.executed_at.isoformat() if exec_item.executed_at else None,
-                    })
+                    step_results.append(
+                        {
+                            "step_type": "tool_execution",
+                            "tool_name": exec_item.tool_name,
+                            "parameters": (
+                                json.loads(exec_item.parameters)
+                                if isinstance(exec_item.parameters, str)
+                                else exec_item.parameters
+                            ),
+                            "result": exec_item.result,
+                            "success": exec_item.success,
+                            "executed_at": (
+                                exec_item.executed_at.isoformat()
+                                if exec_item.executed_at
+                                else None
+                            ),
+                        }
+                    )
             except Exception:
                 pass  # Ignore tool tracking errors
 
@@ -1451,19 +1481,21 @@ class OpenClawSessionService:
                 context_data=context_data,
                 orchestration_state=orchestration_state,
                 current_step_index=current_step_index,
-                step_results=step_results
+                step_results=step_results,
             )
 
             # Log checkpoint details
             self._log_entry(
                 "INFO",
-                f"Checkpoint saved: {checkpoint_result['path']} (name: {checkpoint_name})"
+                f"Checkpoint saved: {checkpoint_result['path']} (name: {checkpoint_name})",
             )
 
             # Terminate the OpenClaw process gracefully
             await self.cleanup()
 
-            self._log_entry("INFO", f"OpenClaw session paused - Checkpoint saved: {checkpoint_name}")
+            self._log_entry(
+                "INFO", f"OpenClaw session paused - Checkpoint saved: {checkpoint_name}"
+            )
 
         except Exception as e:
             error_msg = f"Failed to pause session: {str(e)}"
@@ -1491,8 +1523,7 @@ class OpenClawSessionService:
 
             # Load checkpoint data
             checkpoint_data = checkpoint_service.load_checkpoint(
-                session_id=self.session_id,
-                checkpoint_name=checkpoint_name
+                session_id=self.session_id, checkpoint_name=checkpoint_name
             )
 
             # Restore context
@@ -1502,7 +1533,11 @@ class OpenClawSessionService:
             current_step_index = checkpoint_data.get("current_step_index", 0)
 
             # Reconstruct task description from context (if available)
-            task_description = context_data.get("task_description") or context_data.get("description") or "Resumed session"
+            task_description = (
+                context_data.get("task_description")
+                or context_data.get("description")
+                or "Resumed session"
+            )
 
             # Create new OpenClaw session with restored context
             # Include information about resumed execution in the prompt
@@ -1513,23 +1548,26 @@ class OpenClawSessionService:
                 "completed_steps_count": len(step_results),
                 "last_step_index": current_step_index,
                 "previous_orchestration_state": orchestration_state.get("status", ""),
-                "previous_plan_summary": json.dumps(orchestration_state.get("plan", []))[:500] if orchestration_state.get("plan") else None,
+                "previous_plan_summary": (
+                    json.dumps(orchestration_state.get("plan", []))[:500]
+                    if orchestration_state.get("plan")
+                    else None
+                ),
             }
 
             # Create OpenClaw session
             session_key = await self.create_openclaw_session(
-                task_description=task_description,
-                context=resume_context
+                task_description=task_description, context=resume_context
             )
 
             # Log successful resume with checkpoint info
             self._log_entry(
                 "INFO",
-                f"OpenClaw session resumed from checkpoint: {checkpoint_data.get('checkpoint_name')}"
+                f"OpenClaw session resumed from checkpoint: {checkpoint_data.get('checkpoint_name')}",
             )
             self._log_entry(
                 "INFO",
-                f"Restored state - Completed steps: {len(step_results)}, Current step index: {current_step_index}, Previous status: {orchestration_state.get('status', 'unknown')}"
+                f"Restored state - Completed steps: {len(step_results)}, Current step index: {current_step_index}, Previous status: {orchestration_state.get('status', 'unknown')}",
             )
 
             return session_key

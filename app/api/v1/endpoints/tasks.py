@@ -14,9 +14,11 @@ from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs, deduplicate_logs
 
+
 # Pydantic models for overwrite protection
 class OverwriteCheckRequest(BaseModel):
     """Request model for overwrite check"""
+
     project_id: int
     task_subfolder: str
     planned_files: Optional[List[str]] = []
@@ -24,10 +26,12 @@ class OverwriteCheckRequest(BaseModel):
 
 class BackupResponse(BaseModel):
     """Response model for backup creation"""
+
     success: bool
     backup_path: Optional[str] = None
     files_backed_up: Optional[int] = None
     error: Optional[str] = None
+
 
 router = APIRouter()
 
@@ -103,26 +107,28 @@ async def execute_task_with_openclaw(
         # NEW: Check for potential overwrites BEFORE executing task
         from app.services.overwrite_protection_service import (
             OverwriteProtectionService,
-            OverwriteProtectionError
+            OverwriteProtectionError,
         )
 
         protection = OverwriteProtectionService(db)
-        
+
         # Get project info to check workspace
         if not task.project:
             raise HTTPException(status_code=404, detail="Project not found")
-        
+
         try:
             overwrite_result = protection.check_and_warn(
                 project_id=task.project.id,
                 task_subfolder=f"task_{task_id}",  # Task subfolder format
                 planned_files=[],  # We don't know planned files yet
-                action="warn"  # Show warning but allow proceed
+                action="warn",  # Show warning but allow proceed
             )
 
             if not overwrite_result["safe_to_proceed"]:
                 # Log the warning for audit trail
-                print(f"⚠️  Overwrite detected: {overwrite_result.get('warning_message', '')[:200]}")
+                print(
+                    f"⚠️  Overwrite detected: {overwrite_result.get('warning_message', '')[:200]}"
+                )
         except Exception as e:
             # If check fails, log warning but don't block execution
             print(f"⚠️  Overwrite check failed (continuing anyway): {str(e)[:100]}")
@@ -141,9 +147,9 @@ async def execute_task_with_openclaw(
             result = protection.check_and_warn(
                 project_id=task.project.id,
                 task_subfolder=f"task_{task_id}",
-                action="warn"
+                action="warn",
             )
-            
+
             if not result["safe_to_proceed"] and result.get("warning_message"):
                 overwrite_warning = f"\n\n### ⚠️  EXISTING WORKSPACE WARNING:\n{result['warning_message']}"
         except:
@@ -303,13 +309,14 @@ def get_sorted_task_logs(
 # OVERWRITE PROTECTION ENDPOINTS
 # ============================================================================
 
+
 @router.post("/tasks/{task_id}/check-overwrites")
 async def check_task_overwrites(
     task_id: int, request: OverwriteCheckRequest, db: Session = Depends(get_db)
 ):
     """
     Check for potential overwrites before executing a task
-    
+
     Args:
         task_id: Task ID to check
         request: Overwrite check request with project info and planned files
@@ -326,7 +333,7 @@ async def check_task_overwrites(
     try:
         from app.services.overwrite_protection_service import (
             OverwriteProtectionService,
-            OverwriteProtectionError
+            OverwriteProtectionError,
         )
 
         protection = OverwriteProtectionService(db)
@@ -335,7 +342,7 @@ async def check_task_overwrites(
             project_id=request.project_id,
             task_subfolder=request.task_subfolder,
             planned_files=request.planned_files,
-            action="warn"  # Show warning but allow proceed
+            action="warn",  # Show warning but allow proceed
         )
 
         return {
@@ -344,7 +351,9 @@ async def check_task_overwrites(
             "file_count": result.get("file_count", 0),
             "would_overwrite": result.get("has_conflicts", False),
             "warning_message": result.get("warning_message"),
-            "conflicting_files": result.get("conflict_info", {}).get("conflicting_files", []),
+            "conflicting_files": result.get("conflict_info", {}).get(
+                "conflicting_files", []
+            ),
         }
 
     except OverwriteProtectionError as e:
@@ -352,12 +361,10 @@ async def check_task_overwrites(
 
 
 @router.post("/tasks/{task_id}/create-backup")
-async def create_task_backup(
-    task_id: int, db: Session = Depends(get_db)
-):
+async def create_task_backup(task_id: int, db: Session = Depends(get_db)):
     """
     Create a backup of existing workspace before proceeding
-    
+
     Args:
         task_id: Task ID to backup
         db: Database session
@@ -387,12 +394,10 @@ async def create_task_backup(
 
 
 @router.get("/tasks/{task_id}/workspace-info")
-async def get_workspace_info(
-    task_id: int, db: Session = Depends(get_db)
-):
+async def get_workspace_info(task_id: int, db: Session = Depends(get_db)):
     """
     Get workspace information for a task
-    
+
     Args:
         task_id: Task ID to check
         db: Database session

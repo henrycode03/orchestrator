@@ -22,9 +22,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Version: {settings.VERSION}")
     logger.info(f"Port: {settings.PORT}")
     logger.info("=" * 50)
-    
+
     yield
-    
+
     # Shutdown
     logger.info("=" * 50)
     logger.info("🛑 Orchestrator API shutting down...")
@@ -152,11 +152,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 # Include routers (API_V1_STR = "/api/v1")
-app.include_router(
-    api_router,
-    prefix=settings.API_V1_STR,
-    tags=["API"]
-)
+app.include_router(api_router, prefix=settings.API_V1_STR, tags=["API"])
 
 
 # Initialize Celery Beat periodic tasks

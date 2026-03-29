@@ -73,7 +73,7 @@ class OpenClawSessionService:
         self.use_demo_mode = (
             use_demo_mode if use_demo_mode is not None else settings.DEMO_MODE
         )
-        
+
         # Load session and task models
         self.session_model = (
             db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -81,10 +81,10 @@ class OpenClawSessionService:
         self.task_model = (
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
-        
+
         # Session state
         self.openclaw_session_key: Optional[str] = None
-        
+
         # Initialize checkpoint service
         self.checkpoint_service = CheckpointService(db)
 
@@ -101,11 +101,13 @@ class OpenClawSessionService:
                 "context": context or {},
             }
 
-            self._log_entry("INFO", f"Creating OpenClaw session for: {task_description[:100]}")
-            
+            self._log_entry(
+                "INFO", f"Creating OpenClaw session for: {task_description[:100]}"
+            )
+
             # Use existing main OpenClaw session
             self.openclaw_session_key = "agent:main:main"
-            
+
             self._log_entry("INFO", f"✅ Session set to: {self.openclaw_session_key}")
             return self.openclaw_session_key
 
@@ -115,10 +117,13 @@ class OpenClawSessionService:
             raise OpenClawSessionError(error_msg)
 
     async def execute_task(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: Optional[Callable] = None
+        self,
+        prompt: str,
+        timeout_seconds: int = 300,
+        log_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """Execute a task via OpenClaw session with optimizations"""
-        
+
         # Track performance
         perf_tracker.start("execute_task")
         start_time = time.time()
@@ -133,15 +138,21 @@ class OpenClawSessionService:
                 result["status"] = "completed"
             elif log_callback:
                 # Streaming mode for real-time updates
-                result = await self._execute_real_streaming(optimized_prompt, timeout_seconds, log_callback)
+                result = await self._execute_real_streaming(
+                    optimized_prompt, timeout_seconds, log_callback
+                )
             else:
                 # Standard execution
-                result = await self._execute_real_batch(optimized_prompt, timeout_seconds)
+                result = await self._execute_real_batch(
+                    optimized_prompt, timeout_seconds
+                )
 
             # OPTIMIZATION 3: Log performance metrics (conditional)
             duration = time.time() - start_time
             if duration > 60:  # Only log slow executions
-                self._log_entry("INFO", f"[PERFORMANCE] Task executed in {duration:.2f}s")
+                self._log_entry(
+                    "INFO", f"[PERFORMANCE] Task executed in {duration:.2f}s"
+                )
 
             # Update task status
             self._update_task_status(result, duration)
@@ -151,17 +162,19 @@ class OpenClawSessionService:
         except Exception as e:
             error_msg = f"Task execution failed: {str(e)}"
             self._log_entry("ERROR", error_msg)
-            
+
             # Save checkpoint on failure for recovery
             try:
                 context_data = await self.get_session_context()
                 self.checkpoint_service.save_checkpoint(
                     session_id=self.session_id,
                     checkpoint_name=f"error_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
-                    context_data=context_data
+                    context_data=context_data,
                 )
             except Exception as checkpoint_error:
-                self._log_entry("ERROR", f"Failed to save recovery checkpoint: {checkpoint_error}")
+                self._log_entry(
+                    "ERROR", f"Failed to save recovery checkpoint: {checkpoint_error}"
+                )
 
             # Update task status on error
             if self.task_model:
@@ -175,7 +188,7 @@ class OpenClawSessionService:
         self, prompt: str, timeout_seconds: int
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI (batch mode - no streaming)"""
-        
+
         # OPTIMIZATION 4: Single session ID generation
         task_id_str = str(self.task_id or self.session_id)
         new_session_id = f"orchestrator-task-{task_id_str}-{int(time.time())}"
@@ -184,7 +197,7 @@ class OpenClawSessionService:
             result = await asyncio.to_thread(
                 self._run_openclaw_cli, prompt, new_session_id, timeout_seconds
             )
-            
+
             # Parse response with error handling
             return self._parse_openclaw_response(result)
 
@@ -195,7 +208,7 @@ class OpenClawSessionService:
         self, prompt: str, timeout_seconds: int, log_callback: Callable
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI with real-time streaming"""
-        
+
         # OPTIMIZATION 5: Single session ID generation (same as batch)
         task_id_str = str(self.task_id or self.session_id)
         new_session_id = f"orchestrator-task-{task_id_str}-{int(time.time())}"
@@ -212,26 +225,28 @@ class OpenClawSessionService:
             log_count = 0
             while True:
                 try:
-                    line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(), timeout=1.0
+                    )
                     if not line:
                         break
-                    
+
                     line_text = line.decode("utf-8", errors="replace").strip()
                     if line_text:
                         log_count += 1
-                        
+
                         # Batch database commits every 10 logs
                         if (log_count % 10) == 0:
                             self.db.commit()
-                        
+
                         self._log_entry("INFO", line_text, commit=False)
-                        
+
                         # Call callback for real-time UI updates
                         await log_callback("INFO", line_text)
 
                 except asyncio.TimeoutError:
                     continue  # Continue waiting for output
-            
+
             # Wait for process completion with timeout
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=timeout_seconds + 30
@@ -245,19 +260,22 @@ class OpenClawSessionService:
                 await process.wait()
             except Exception:
                 pass
-            
+
             raise OpenClawSessionError(f"Task timed out after {timeout_seconds}s")
 
-    def _run_openclaw_cli(self, prompt: str, session_id: str, timeout_seconds: int) -> subprocess.CompletedProcess:
+    def _run_openclaw_cli(
+        self, prompt: str, session_id: str, timeout_seconds: int
+    ) -> subprocess.CompletedProcess:
         """Run OpenClaw CLI as a thread (non-blocking)"""
-        
+
         # Escape single quotes for bash command
         escaped_prompt = prompt.replace("'", "'\\''")
-        
+
         return subprocess.run(
             [
-                "bash", "-c",
-                f"openclaw agent --local --session-id {session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}"
+                "bash",
+                "-c",
+                f"openclaw agent --local --session-id {session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}",
             ],
             capture_output=True,
             text=True,
@@ -267,13 +285,13 @@ class OpenClawSessionService:
 
     def _parse_openclaw_response(self, result: Any) -> Dict[str, Any]:
         """Parse OpenClaw CLI response with unified error handling"""
-        
+
         # Handle subprocess.CompletedProcess object
         if isinstance(result, subprocess.CompletedProcess):
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
             return_code = result.returncode
-            
+
             if return_code != 0 and stderr:
                 self._log_entry("ERROR", f"OpenClaw CLI error: {stderr[:500]}")
         else:
@@ -295,7 +313,7 @@ class OpenClawSessionService:
         # Parse JSON with error recovery
         try:
             output_data = json.loads(stdout)
-            
+
             # Extract text from payloads if present
             if isinstance(output_data, dict) and "payloads" in output_data:
                 payloads = output_data.get("payloads", [])
@@ -325,16 +343,18 @@ class OpenClawSessionService:
 
     def _update_task_status(self, result: Dict[str, Any], duration: float):
         """Update task status in database (consolidated method)"""
-        
+
         if not self.task_model:
             return
 
         try:
             status = result.get("status", "unknown")
-            
+
             if status == "completed":
                 self.task_model.status = TaskStatus.DONE
-                self._log_entry("INFO", f"Task completed successfully in {duration:.2f}s")
+                self._log_entry(
+                    "INFO", f"Task completed successfully in {duration:.2f}s"
+                )
             elif status == "failed":
                 error_msg = result.get("error", "Execution failed")
                 self.task_model.status = TaskStatus.FAILED
@@ -353,9 +373,9 @@ class OpenClawSessionService:
 
     async def _execute_demo_mode(self, prompt: str) -> Dict[str, Any]:
         """Demo mode: Return mock logs for UI testing"""
-        
+
         await asyncio.sleep(2)  # Simulate processing time
-        
+
         return {
             "status": "completed",
             "mode": "demo",
@@ -365,13 +385,15 @@ class OpenClawSessionService:
 
     async def pause_session(self, checkpoint_name: str = "paused") -> Dict[str, Any]:
         """Pause the OpenClaw session and save state to checkpoint"""
-        
+
         try:
-            self._log_entry("INFO", f"Pausing session with checkpoint: {checkpoint_name}")
+            self._log_entry(
+                "INFO", f"Pausing session with checkpoint: {checkpoint_name}"
+            )
 
             # Get current context
             context = await self.get_session_context()
-            
+
             # Save checkpoint before stopping
             checkpoint_result = self.checkpoint_service.save_checkpoint(
                 session_id=self.session_id,
@@ -379,7 +401,7 @@ class OpenClawSessionService:
                 context_data=context,
                 orchestration_state={},  # TODO: Track actual state
                 current_step_index=0,  # TODO: Track step index
-                step_results=[]  # TODO: Save completed steps
+                step_results=[],  # TODO: Save completed steps
             )
 
             # Cleanup session resources
@@ -392,39 +414,47 @@ class OpenClawSessionService:
             self._log_entry("ERROR", error_msg)
             raise OpenClawSessionError(error_msg)
 
-    async def resume_session(self, checkpoint_name: Optional[str] = None) -> Dict[str, Any]:
+    async def resume_session(
+        self, checkpoint_name: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Resume a paused session from checkpoint"""
-        
+
         try:
-            self._log_entry("INFO", f"Resuming session from checkpoint: {checkpoint_name or 'latest'}")
+            self._log_entry(
+                "INFO",
+                f"Resuming session from checkpoint: {checkpoint_name or 'latest'}",
+            )
 
             # Load checkpoint
             checkpoint_data = self.checkpoint_service.load_checkpoint(
-                session_id=self.session_id,
-                checkpoint_name=checkpoint_name
+                session_id=self.session_id, checkpoint_name=checkpoint_name
             )
 
             # Restore context
             context = checkpoint_data.get("context", {})
-            
+
             # Get task description from context
             task_description = (
-                context.get("task_description") or 
-                self.session_model.name if self.session_model else "Resumed session"
+                context.get("task_description") or self.session_model.name
+                if self.session_model
+                else "Resumed session"
             )
-            
+
             # Create new OpenClaw session with restored context
-            await self.create_openclaw_session(task_description, {
-                **context,
-                "resumed_from_checkpoint": True,
-                "checkpoint_name": checkpoint_data.get("checkpoint_name"),
-            })
+            await self.create_openclaw_session(
+                task_description,
+                {
+                    **context,
+                    "resumed_from_checkpoint": True,
+                    "checkpoint_name": checkpoint_data.get("checkpoint_name"),
+                },
+            )
 
             return {
                 "success": True,
                 "session_key": self.openclaw_session_key,
                 "checkpoint_loaded": checkpoint_data.get("checkpoint_name"),
-                "message": f"Session resumed from checkpoint '{checkpoint_data.get('checkpoint_name')}'"
+                "message": f"Session resumed from checkpoint '{checkpoint_data.get('checkpoint_name')}'",
             }
 
         except CheckpointError as e:
@@ -439,32 +469,35 @@ class OpenClawSessionService:
 
     async def get_session_context(self) -> Dict[str, Any]:
         """Get current session context for checkpointing"""
-        
+
         return {
             "session_id": self.session_id,
             "task_description": self.session_model.name if self.session_model else "",
-            "description": self.session_model.description if self.session_model and hasattr(self.session_model, 'description') else "",
+            "description": (
+                self.session_model.description
+                if self.session_model and hasattr(self.session_model, "description")
+                else ""
+            ),
             "project_id": self.session_model.project_id if self.session_model else None,
-            "created_at": self.session_model.created_at.isoformat() if self.session_model and hasattr(self.session_model, 'created_at') else None,
+            "created_at": (
+                self.session_model.created_at.isoformat()
+                if self.session_model and hasattr(self.session_model, "created_at")
+                else None
+            ),
         }
 
-    def _log_entry(
-        self, 
-        level: str, 
-        message: str, 
-        commit: bool = False
-    ):
+    def _log_entry(self, level: str, message: str, commit: bool = False):
         """Log entry to database (optimized with batch commits)"""
-        
+
         try:
             log_entry = LogEntry(
                 session_id=self.session_id,
                 level=level,
                 message=message,
-                metadata=json.dumps({})
+                metadata=json.dumps({}),
             )
             self.db.add(log_entry)
-            
+
             if commit:
                 self.db.commit()
 

@@ -25,7 +25,7 @@ router = APIRouter()
 
 class CheckpointRequest:
     """Pydantic model for checkpoint save request"""
-    
+
     @staticmethod
     def create(
         session_id: int,
@@ -33,7 +33,7 @@ class CheckpointRequest:
         context_data: dict = None,
         orchestration_state: dict = None,
         current_step_index: int = 0,
-        step_results: list = None
+        step_results: list = None,
     ) -> dict:
         """Create checkpoint save request"""
         return {
@@ -42,7 +42,7 @@ class CheckpointRequest:
             "context_data": context_data or {},
             "orchestration_state": orchestration_state or {},
             "current_step_index": current_step_index,
-            "step_results": step_results or []
+            "step_results": step_results or [],
         }
 
 
@@ -55,9 +55,9 @@ async def save_checkpoint(
 ):
     """
     Save current session state to a checkpoint
-    
+
     This allows you to manually create checkpoints during execution.
-    
+
     Args:
         session_id: Session ID to checkpoint
         checkpoint_name: Custom name for this checkpoint (e.g., 'before_debug', 'after_planning')
@@ -67,9 +67,10 @@ async def save_checkpoint(
     """
     try:
         from app.services.checkpoint_service import CheckpointService, CheckpointError
-        
+
         # Verify session exists
         from app.models import Session as SessionModel
+
         session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -78,10 +79,10 @@ async def save_checkpoint(
 
         # Get current context
         from app.services.openclaw_service import OpenClawSessionService
-        
+
         openclaw_service = OpenClawSessionService(db, session_id)
         context_data = await openclaw_service.get_session_context()
-        
+
         # Save checkpoint with minimal orchestration state (will be populated later)
         checkpoint_result = checkpoint_service.save_checkpoint(
             session_id=session_id,
@@ -89,14 +90,14 @@ async def save_checkpoint(
             context_data=context_data,
             orchestration_state={},  # TODO: Track actual orchestration state
             current_step_index=0,  # TODO: Track actual step index
-            step_results=[]  # TODO: Save completed steps
+            step_results=[],  # TODO: Save completed steps
         )
 
         return {
             "success": True,
             "checkpoint_name": checkpoint_result["checkpoint_name"],
             "path": checkpoint_result["path"],
-            "created_at": checkpoint_result["created_at"]
+            "created_at": checkpoint_result["created_at"],
         }
 
     except CheckpointError as e:
@@ -111,7 +112,7 @@ async def list_checkpoints(
 ):
     """
     List all available checkpoints for a session
-    
+
     Returns checkpoint metadata including creation time and step information.
 
     Returns:
@@ -119,22 +120,25 @@ async def list_checkpoints(
     """
     try:
         from app.services.checkpoint_service import CheckpointService
-        
+
         # Verify session exists
         from app.models import Session as SessionModel
+
         session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
         checkpoint_service = CheckpointService(db)
-        
+
         checkpoints = checkpoint_service.list_checkpoints(session_id)
-        
+
         return checkpoints
 
     except Exception as e:
         logger.error(f"Failed to list checkpoints for session {session_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list checkpoints: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to list checkpoints: {str(e)}"
+        )
 
 
 @router.post("/sessions/{session_id}/checkpoints/load", response_model=dict)
@@ -146,7 +150,7 @@ async def load_checkpoint(
 ):
     """
     Load a specific checkpoint (without resuming execution)
-    
+
     This is useful to inspect what state was saved at a particular point.
 
     Args:
@@ -158,20 +162,20 @@ async def load_checkpoint(
     """
     try:
         from app.services.checkpoint_service import CheckpointService, CheckpointError
-        
+
         # Verify session exists
         from app.models import Session as SessionModel
+
         session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
         checkpoint_service = CheckpointService(db)
-        
+
         checkpoint_data = checkpoint_service.load_checkpoint(
-            session_id=session_id,
-            checkpoint_name=checkpoint_name
+            session_id=session_id, checkpoint_name=checkpoint_name
         )
-        
+
         return {
             "success": True,
             "checkpoint_name": checkpoint_data.get("checkpoint_name"),
@@ -179,7 +183,7 @@ async def load_checkpoint(
             "orchestration_state": checkpoint_data.get("orchestration_state", {}),
             "current_step_index": checkpoint_data.get("current_step_index"),
             "step_results_count": len(checkpoint_data.get("step_results", [])),
-            "created_at": checkpoint_data.get("created_at")
+            "created_at": checkpoint_data.get("created_at"),
         }
 
     except CheckpointError as e:
@@ -195,7 +199,7 @@ async def delete_checkpoint(
 ):
     """
     Delete a specific checkpoint
-    
+
     Args:
         session_id: Session ID
         checkpoint_name: Checkpoint name to delete
@@ -205,31 +209,33 @@ async def delete_checkpoint(
     """
     try:
         from app.services.checkpoint_service import CheckpointService
-        
+
         # Verify session exists
         from app.models import Session as SessionModel
+
         session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
         checkpoint_service = CheckpointService(db)
-        
+
         deleted = checkpoint_service.delete_checkpoint(
-            session_id=session_id,
-            checkpoint_name=checkpoint_name
+            session_id=session_id, checkpoint_name=checkpoint_name
         )
-        
+
         if not deleted:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
-        
+
         return {
             "success": True,
-            "message": f"Checkpoint '{checkpoint_name}' deleted successfully"
+            "message": f"Checkpoint '{checkpoint_name}' deleted successfully",
         }
 
     except Exception as e:
         logger.error(f"Failed to delete checkpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete checkpoint: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete checkpoint: {str(e)}"
+        )
 
 
 @router.post("/sessions/{session_id}/checkpoints/cleanup", response_model=dict)
@@ -242,7 +248,7 @@ async def cleanup_old_checkpoints(
 ):
     """
     Clean up old checkpoints, keeping only the most recent N
-    
+
     Args:
         session_id: Session ID
         keep_latest: Number of most recent checkpoints to keep (default: 3)
@@ -253,30 +259,31 @@ async def cleanup_old_checkpoints(
     """
     try:
         from app.services.checkpoint_service import CheckpointService
-        
+
         # Verify session exists
         from app.models import Session as SessionModel
+
         session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
         checkpoint_service = CheckpointService(db)
-        
+
         result = checkpoint_service.cleanup_old_checkpoints(
-            session_id=session_id,
-            keep_latest=keep_latest,
-            max_age_hours=max_age_hours
+            session_id=session_id, keep_latest=keep_latest, max_age_hours=max_age_hours
         )
-        
+
         return {
             "success": True,
             "deleted_count": result.get("deleted", 0),
-            "kept_count": result.get("kept", 0)
+            "kept_count": result.get("kept", 0),
         }
 
     except Exception as e:
         logger.error(f"Failed to cleanup checkpoints: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to cleanup checkpoints: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to cleanup checkpoints: {str(e)}"
+        )
 
 
 @router.post("/sessions/{session_id}/checkpoints/auto-save", response_model=dict)
@@ -288,7 +295,7 @@ async def auto_save_checkpoint(
 ):
     """
     Automatically save checkpoint based on an event
-    
+
     This is used by the backend when:
     - User clicks Pause → saves 'paused' checkpoint
     - Error detected → saves 'error_recovery' checkpoint
@@ -304,23 +311,25 @@ async def auto_save_checkpoint(
     try:
         from app.services.checkpoint_service import CheckpointService
         from app.services.openclaw_service import OpenClawSessionService
-        
+
         # Verify session exists
         from app.models import Session as SessionModel
+
         session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
         checkpoint_service = CheckpointService(db)
-        
+
         # Generate checkpoint name based on event type and timestamp
         from datetime import datetime
+
         checkpoint_name = f"{event_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-        
+
         # Get current context
         openclaw_service = OpenClawSessionService(db, session_id)
         context_data = await openclaw_service.get_session_context()
-        
+
         # Save checkpoint
         checkpoint_result = checkpoint_service.save_checkpoint(
             session_id=session_id,
@@ -328,7 +337,7 @@ async def auto_save_checkpoint(
             context_data=context_data,
             orchestration_state={},  # TODO: Track actual orchestration state
             current_step_index=0,  # TODO: Track actual step index
-            step_results=[]  # TODO: Save completed steps
+            step_results=[],  # TODO: Save completed steps
         )
 
         return {
@@ -336,9 +345,11 @@ async def auto_save_checkpoint(
             "checkpoint_name": checkpoint_result["checkpoint_name"],
             "event_type": event_type,
             "path": checkpoint_result["path"],
-            "created_at": checkpoint_result["created_at"]
+            "created_at": checkpoint_result["created_at"],
         }
 
     except Exception as e:
         logger.error(f"Failed to auto-save checkpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to save checkpoint: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to save checkpoint: {str(e)}"
+        )

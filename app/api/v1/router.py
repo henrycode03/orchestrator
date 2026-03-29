@@ -2,7 +2,15 @@
 
 from fastapi import APIRouter, Depends
 from fastapi import HTTPException
-from app.api.v1.endpoints import tasks, github, sessions, projects, users, mobile, resume
+from app.api.v1.endpoints import (
+    tasks,
+    github,
+    sessions,
+    projects,
+    users,
+    mobile,
+    resume,
+)
 from app.api.v1.endpoints.tasks_sorted_logs import router as tasks_sorted_logs_router
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.project_logs import router as project_logs_router
@@ -99,10 +107,7 @@ api_router.include_router(
 )
 
 # Mobile API — clawmobile integration via OpenClaw Gateway
-api_router.include_router(
-    mobile.router,
-    tags=["mobile"]
-)
+api_router.include_router(mobile.router, tags=["mobile"])
 
 # Resume Operations (pause, resume, retry steps)
 api_router.include_router(
@@ -110,4 +115,3 @@ api_router.include_router(
     prefix="/sessions/{session_id}/resume",
     tags=["resume-operations"],
 )
-

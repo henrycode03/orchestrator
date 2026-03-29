@@ -10,13 +10,17 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any
 from sqlalchemy.orm import Session
 from app.models import Project
-from app.services.project_isolation_service import ProjectIsolationService, ProjectIsolationError
+from app.services.project_isolation_service import (
+    ProjectIsolationService,
+    ProjectIsolationError,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class OverwriteProtectionError(Exception):
     """Custom exception for overwrite protection violations"""
+
     pass
 
 
@@ -70,13 +74,15 @@ class OverwriteProtectionService:
                     if len(recent_files) < max_recent_files:
                         filepath = Path(root) / filename
                         stat = filepath.stat()
-                        recent_files.append({
-                            "path": str(filepath.relative_to(project_root)),
-                            "size": stat.st_size,
-                            "modified": datetime.fromtimestamp(
-                                stat.st_mtime
-                            ).isoformat(),
-                        })
+                        recent_files.append(
+                            {
+                                "path": str(filepath.relative_to(project_root)),
+                                "size": stat.st_size,
+                                "modified": datetime.fromtimestamp(
+                                    stat.st_mtime
+                                ).isoformat(),
+                            }
+                        )
                         if not last_modified or stat.st_mtime > (
                             last_modified.timestamp()
                             if isinstance(last_modified, datetime)
@@ -130,11 +136,13 @@ class OverwriteProtectionService:
 
                 # Check if file exists
                 if resolved_path.exists() and resolved_path.is_file():
-                    conflicts.append({
-                        "file": str(resolved_path.relative_to(project_root)),
-                        "type": "existing_file",
-                        "would_modify": True,
-                    })
+                    conflicts.append(
+                        {
+                            "file": str(resolved_path.relative_to(project_root)),
+                            "type": "existing_file",
+                            "would_modify": True,
+                        }
+                    )
 
             return {
                 "has_conflicts": len(conflicts) > 0,
@@ -190,7 +198,9 @@ class OverwriteProtectionService:
         if conflict_info.get("has_conflicts"):
             lines.append("\n\n⚠️  **POTENTIAL FILE CONFLICTS:**")
             for file in conflict_info["conflicting_files"]:
-                lines.append(f"- `{file}` - This file already exists and may be modified!")
+                lines.append(
+                    f"- `{file}` - This file already exists and may be modified!"
+                )
 
             lines.append(
                 "\n**Recommendation:** Review existing files before proceeding. "
@@ -240,7 +250,9 @@ class OverwriteProtectionService:
             "safe_to_proceed": not workspace_info.get("would_overwrite", False),
             "workspace_exists": workspace_info.get("exists", False),
             "file_count": workspace_info.get("file_count", 0),
-            "warning_message": warning_message if workspace_info.get("would_overwrite") else None,
+            "warning_message": (
+                warning_message if workspace_info.get("would_overwrite") else None
+            ),
             "has_conflicts": conflict_info.get("has_conflicts", False),
             "workspace_info": workspace_info,
             "conflict_info": conflict_info,
@@ -290,15 +302,15 @@ class OverwriteProtectionService:
             # Create backup directory
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             backup_name = backup_name or f"backup_{timestamp}"
-            backup_path = (project_root / f"{task_subfolder}_backup_{backup_name}").resolve()
+            backup_path = (
+                project_root / f"{task_subfolder}_backup_{backup_name}"
+            ).resolve()
 
             # Copy workspace to backup location
             shutil.copytree(workspace_path, backup_path)
 
             # Count files backed up
-            file_count = sum(
-                len(files) for _, _, files in os.walk(backup_path)
-            )
+            file_count = sum(len(files) for _, _, files in os.walk(backup_path))
 
             logger.info(f"Created backup of {task_subfolder} at {backup_path}")
 

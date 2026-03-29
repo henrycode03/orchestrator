@@ -14,15 +14,13 @@ from datetime import datetime
 import json
 
 from app.database import get_db
-from app.models import (
-    Project, Session as SessionModel,
-    Task, TaskStatus, LogEntry
-)
+from app.models import Project, Session as SessionModel, Task, TaskStatus, LogEntry
 
 router = APIRouter()
 
 
 # ── Projects ─────────────────────────────────────────────────
+
 
 @router.get("/mobile/projects")
 def list_projects(db: Session = Depends(get_db)):
@@ -38,7 +36,7 @@ def list_projects(db: Session = Depends(get_db)):
             }
             for p in projects
         ],
-        "total": len(projects)
+        "total": len(projects),
     }
 
 
@@ -52,10 +50,7 @@ def get_project_status(project_id: int, db: Session = Depends(get_db)):
     # Get active sessions
     active_sessions = (
         db.query(SessionModel)
-        .filter(
-            SessionModel.project_id == project_id,
-            SessionModel.is_active == True
-        )
+        .filter(SessionModel.project_id == project_id, SessionModel.is_active)
         .all()
     )
 
@@ -83,17 +78,18 @@ def get_project_status(project_id: int, db: Session = Depends(get_db)):
                 "started_at": s.started_at.isoformat() if s.started_at else None,
             }
             for s in active_sessions
-        ]
+        ],
     }
 
 
 # ── Sessions ─────────────────────────────────────────────────
 
+
 @router.get("/mobile/sessions")
 def list_sessions(
     project_id: Optional[int] = None,
     status: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """List sessions, optionally filtered by project or status"""
     query = db.query(SessionModel)
@@ -159,17 +155,16 @@ def get_session_summary(session_id: int, db: Session = Depends(get_db)):
                 "timestamp": log.created_at.isoformat(),
             }
             for log in reversed(recent_logs)
-        ]
+        ],
     }
 
 
 # ── Tasks ─────────────────────────────────────────────────────
 
+
 @router.get("/mobile/projects/{project_id}/tasks")
 def list_project_tasks(
-    project_id: int,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db)
+    project_id: int, status: Optional[str] = None, db: Session = Depends(get_db)
 ):
     """List tasks for a project"""
     query = db.query(Task).filter(Task.project_id == project_id)
@@ -190,17 +185,24 @@ def list_project_tasks(
                 "id": t.id,
                 "title": t.title,
                 "description": t.description,
-                "status": t.status.value if hasattr(t.status, 'value') else str(t.status),
-                "priority": getattr(t, 'priority', None),
-                "created_at": t.created_at.isoformat() if hasattr(t, 'created_at') and t.created_at else None,
+                "status": (
+                    t.status.value if hasattr(t.status, "value") else str(t.status)
+                ),
+                "priority": getattr(t, "priority", None),
+                "created_at": (
+                    t.created_at.isoformat()
+                    if hasattr(t, "created_at") and t.created_at
+                    else None
+                ),
             }
             for t in tasks
         ],
-        "total": len(tasks)
+        "total": len(tasks),
     }
 
 
 # ── Quick actions ─────────────────────────────────────────────
+
 
 @router.get("/mobile/dashboard")
 def get_dashboard(db: Session = Depends(get_db)):
@@ -211,12 +213,10 @@ def get_dashboard(db: Session = Depends(get_db)):
     # Count all entities
     total_projects = db.query(Project).count()
     total_sessions = db.query(SessionModel).count()
-    active_sessions = db.query(SessionModel).filter(
-        SessionModel.is_active == True
-    ).count()
-    running_sessions = db.query(SessionModel).filter(
-        SessionModel.status == "running"
-    ).count()
+    active_sessions = db.query(SessionModel).filter(SessionModel.is_active).count()
+    running_sessions = (
+        db.query(SessionModel).filter(SessionModel.status == "running").count()
+    )
 
     # Task stats across all projects
     total_tasks = db.query(Task).count()
@@ -225,12 +225,7 @@ def get_dashboard(db: Session = Depends(get_db)):
     running_tasks = db.query(Task).filter(Task.status == TaskStatus.RUNNING).count()
 
     # Recent activity (last 5 log entries)
-    recent_logs = (
-        db.query(LogEntry)
-        .order_by(LogEntry.created_at.desc())
-        .limit(5)
-        .all()
-    )
+    recent_logs = db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(5).all()
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
@@ -246,8 +241,10 @@ def get_dashboard(db: Session = Depends(get_db)):
                 "done": done_tasks,
                 "running": running_tasks,
                 "failed": failed_tasks,
-                "completion_rate": f"{(done_tasks/total_tasks*100):.1f}%" if total_tasks > 0 else "N/A"
-            }
+                "completion_rate": (
+                    f"{(done_tasks/total_tasks*100):.1f}%" if total_tasks > 0 else "N/A"
+                ),
+            },
         },
         "recent_activity": [
             {
@@ -257,5 +254,5 @@ def get_dashboard(db: Session = Depends(get_db)):
                 "session_id": log.session_id,
             }
             for log in recent_logs
-        ]
+        ],
     }
