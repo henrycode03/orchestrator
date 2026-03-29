@@ -54,13 +54,7 @@ coverage/
 
 # Development files (NEVER COMMIT)
 .notes/
-!notes/DEBUG_HISTORY.md
-!notes/PHASES_PROGRESS.md
-!notes/CORS_FIXES.md
-!notes/TASK_TIMEOUT_FIX.md
-!notes/HISTORICAL_DOCS_CLEANUP_SUMMARY.md
-!tests/ERROR_HANDLER_FIX_SUMMARY.md
-!tests/*.md
+.tests/
 *.note
 *.test
 
