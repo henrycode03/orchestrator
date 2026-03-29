@@ -240,6 +240,14 @@ def execute_openclaw_task(
         try:
             output_result = planning_result.get("output", {})
 
+            # Debug: Log raw result to diagnose JSON parsing issues
+            logger.info(
+                f"[ORCHESTRATION] Planning result keys: {list(planning_result.keys()) if isinstance(planning_result, dict) else 'Not a dict'}"
+            )
+            logger.info(
+                f"[ORCHESTRATION] Planning output type: {type(output_result)}, preview: {str(output_result)[:300]}"
+            )
+
             # Debug: Log raw output
             logger.info(
                 f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
@@ -306,6 +314,15 @@ def execute_openclaw_task(
                 logger.info(f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan")
             else:
                 raise ValueError("Planning result is not a list of steps")
+        except json.JSONDecodeError as e:
+            logger.error(f"[ORCHESTRATION] JSON decode error in planning: {e}")
+            logger.error(f"[ORCHESTRATION] Raw output that failed: {output_text[:500]}")
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = f"Planning JSON parse failed: {e}"
+            task.status = TaskStatus.FAILED
+            task.error_message = f"Planning JSON parse failed: {e}. Raw output: {output_text[:200]}"
+            db.commit()
+            return {"status": "failed", "reason": "planning_json_error"}
         except Exception as e:
             logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
             orchestration_state.status = OrchestrationStatus.ABORTED

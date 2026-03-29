@@ -902,6 +902,33 @@ class OpenClawSessionService:
                         f"[OPENCLAW] Stripped length: {len(stdout_stripped)}, first 100 chars: {repr(stdout_stripped[:100])}",
                     )
 
+                    # CRITICAL FIX: Check for empty or invalid responses BEFORE parsing
+                    if not stdout_stripped or stdout_stripped in ['""', "''", '"', "'"]:
+                        self._log_entry(
+                            "ERROR",
+                            f"[OPENCLAW] CRITICAL: Empty or invalid response detected!",
+                        )
+                        self._log_entry(
+                            "ERROR",
+                            f"[OPENCLAW] Raw output: {repr(result.stdout[:500])}",
+                        )
+                        return {
+                            "status": "failed",
+                            "mode": "real",
+                            "output": result.stdout,
+                            "error": "Empty or invalid response from OpenClaw CLI. The CLI returned no valid JSON output.",
+                            "logs": [
+                                {
+                                    "level": "ERROR",
+                                    "message": f"OpenClaw returned empty/invalid response",
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                }
+                            ],
+                            "execution_time": 0.0,
+                            "session_key": "orchestrator-session",
+                            "note": "Real execution failed - empty response",
+                        }
+
                     output_data = json.loads(stdout_stripped)
 
                     # Debug log
@@ -928,6 +955,33 @@ class OpenClawSessionService:
                     else:
                         output_text = result.stdout
 
+                    # CRITICAL FIX: Check if output_text is empty after extraction
+                    if not output_text or output_text.strip() in ['""', "''", '"', "'"]:
+                        self._log_entry(
+                            "ERROR",
+                            f"[OPENCLAW] CRITICAL: Output text is empty after extraction!",
+                        )
+                        self._log_entry(
+                            "ERROR",
+                            f"[OPENCLAW] Raw output: {repr(output_text[:500])}",
+                        )
+                        return {
+                            "status": "failed",
+                            "mode": "real",
+                            "output": result.stdout,
+                            "error": "Empty output text after parsing. The OpenClaw CLI returned JSON but with no valid content.",
+                            "logs": [
+                                {
+                                    "level": "ERROR",
+                                    "message": f"OpenClaw returned empty output text",
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                }
+                            ],
+                            "execution_time": 0.0,
+                            "session_key": "orchestrator-session",
+                            "note": "Real execution failed - empty output text",
+                        }
+
                     self._log_entry(
                         "INFO", f"Task execution completed: {output_text[:300]}"
                     )
@@ -953,22 +1007,24 @@ class OpenClawSessionService:
                         "note": "Real execution completed via OpenClaw CLI",
                     }
                 except json.JSONDecodeError:
-                    # Non-JSON response
-                    self._log_entry("INFO", f"OpenClaw output: {result.stdout[:500]}")
+                    # Non-JSON response - this is a critical error
+                    self._log_entry("ERROR", f"Non-JSON response from OpenClaw CLI!")
+                    self._log_entry("ERROR", f"Raw stdout: {result.stdout[:1000]}")
                     return {
-                        "status": "completed",
+                        "status": "failed",
                         "mode": "real",
                         "output": result.stdout,
+                        "error": f"Non-JSON response from OpenClaw CLI. Expected JSON but got: {result.stdout[:200]}",
                         "logs": [
                             {
-                                "level": "INFO",
-                                "message": f"Task executed via OpenClaw CLI",
+                                "level": "ERROR",
+                                "message": f"OpenClaw returned non-JSON response",
                                 "timestamp": datetime.utcnow().isoformat(),
                             }
                         ],
                         "execution_time": 0.0,
                         "session_key": "orchestrator-session",
-                        "note": "Real execution completed via OpenClaw CLI",
+                        "note": "Real execution failed - invalid response format",
                     }
             else:
                 raise Exception(f"OpenClaw CLI failed: {result.stderr}")
