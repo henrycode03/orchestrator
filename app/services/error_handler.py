@@ -65,10 +65,19 @@ class EnhancedErrorHandler:
         # Strategy 5: Try to find JSON array/object in text
         found = self._find_json_in_text(text)
         if found:
+            # Try direct parsing first
             try:
                 return True, json.loads(found), "Found JSON in text"
             except json.JSONDecodeError as e:
-                logger.debug(f"[JSON-PARSE] Strategy 5 failed: {e}")
+                logger.debug(f"[JSON-PARSE] Strategy 5 direct failed: {e}")
+            
+            # If failed, try fixing errors in found JSON
+            fixed = self._fix_common_json_errors(found)
+            if fixed != found:
+                try:
+                    return True, json.loads(fixed), "Found and fixed JSON in text"
+                except json.JSONDecodeError as e:
+                    logger.debug(f"[JSON-PARSE] Strategy 5 fixed failed: {e}")
 
         # All strategies failed
         error_msg = f"Failed to parse {context} after {self.max_retries} attempts"
@@ -110,9 +119,6 @@ class EnhancedErrorHandler:
             return text
 
         fixed = text
-
-        # Fix unescaped quotes in strings
-        fixed = re.sub(r'(?<!\\)"(?=\s*:)', r'\\"', fixed)
 
         # Fix missing commas between array/object elements
         fixed = re.sub(r"\}\s*\{", "},{", fixed)
