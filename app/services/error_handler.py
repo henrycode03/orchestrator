@@ -76,191 +76,151 @@ class EnhancedErrorHandler:
         return False, None, error_msg
 
     def _clean_markdown_fences(self, text: str) -> str:
-        """Remove Markdown code fences (```json, ```)"""
+        """Remove markdown code fences and extract JSON."""
+        if not text:
+            return text
+
+        # Remove ```json or ``` wrappers
         pattern = r"^\s*```(?:json)?\s*|\s*```$"
-        return re.sub(pattern, "", text.strip())
+        cleaned = re.sub(pattern, "", text.strip())
+        return cleaned
 
     def _extract_json_from_text(self, text: str) -> Optional[str]:
-        """Extract JSON from mixed content (markdown, explanations, etc.)"""
-        # Try to find JSON array
-        array_match = re.search(r"\[\s*\{.*?\}\s*\]", text, re.DOTALL)
-        if array_match:
-            return array_match.group(0)
-
-        # Try to find JSON object
-        obj_match = re.search(r'\{\s*"[^"]+"\s*:', text, re.DOTALL)
-        if obj_match:
-            # Find matching closing brace
-            brace_count = 0
-            start = obj_match.start()
-            for i, char in enumerate(text[start:], start):
-                if char == "{":
-                    brace_count += 1
-                elif char == "}":
-                    brace_count -= 1
-                    if brace_count == 0:
-                        return text[start : i + 1]
+        """Extract JSON from mixed content using regex."""
+        if not text:
             return None
+
+        # Try to find JSON array or object
+        json_patterns = [
+            r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}",  # Match nested objects
+            r"\[(?:[^\[\]]|(?:\[[^\[\]]*\]))*\]",  # Match nested arrays
+        ]
+
+        for pattern in json_patterns:
+            matches = re.findall(pattern, text, re.DOTALL)
+            if matches:
+                # Return the longest match (most likely to be complete)
+                return max(matches, key=len)
+
         return None
 
     def _fix_common_json_errors(self, text: str) -> str:
-        """Fix common JSON formatting errors"""
+        """Fix common JSON formatting errors."""
+        if not text:
+            return text
+
         fixed = text
 
         # Fix unescaped quotes in strings
-        # Pattern: "key": "value with "unescaped" quotes"
-        fixed = re.sub(
-            r'":\s*"([^"]*(?:"[^"]*)*)"',
-            lambda m: self._fix_unescaped_quotes(m.group(0)),
-            fixed,
-        )
+        fixed = re.sub(r'(?<!\\)"(?=\s*:)', r'\\"', fixed)
 
-        # Fix trailing commas
-        fixed = re.sub(r",\s*([\]}])", r"\1", fixed)
+        # Fix missing commas between array/object elements
+        fixed = re.sub(r"\}\s*\{", "},{", fixed)
+        fixed = re.sub(r"\}\s*,?\s*\[", "},[", fixed)
+        fixed = re.sub(r"\]\s*,?\s*\{", "},{", fixed)
 
-        # Fix single quotes to double quotes (for keys)
-        fixed = re.sub(r"'([^']*)':", r'"\1":', fixed)
+        # Fix trailing commas (remove them)
+        fixed = re.sub(r",(\s*[}\]])", r"\1", fixed)
 
-        # Fix unquoted keys
-        fixed = re.sub(r"(\w+):", r'"\1":', fixed)
+        # Fix single quotes to double quotes (carefully)
+        fixed = re.sub(r"'([^']*)'", r'"\1"', fixed)
 
-        # Remove text before JSON starts
-        if "{" in fixed:
-            fixed = fixed[fixed.index("{") :]
-        if "[" in fixed:
-            fixed = fixed[fixed.index("[") :]
+        if fixed != text:
+            logger.debug(f"[JSON-FIX] Applied {len(text) - len(fixed)} fixes")
 
         return fixed
 
-    def _fix_unescaped_quotes(self, match: str) -> str:
-        """Fix unescaped quotes within JSON string values"""
-        # This is a simplified fix - in production, you'd want more robust handling
-        return match.replace('""', '\\"')
-
     def _find_json_in_text(self, text: str) -> Optional[str]:
-        """Find and return JSON object/array from text"""
-        # Look for balanced braces
-        for i, char in enumerate(text):
-            if char in "{[":
-                # Try to parse from this position
-                for j in range(len(text), i, -1):
-                    candidate = text[i:j]
-                    try:
-                        json.loads(candidate)
-                        return candidate
-                    except json.JSONDecodeError:
-                        continue
+        """Find complete JSON array or object in text."""
+        if not text:
+            return None
+
+        # Try to find start of JSON
+        json_start = text.find("{")
+        if json_start == -1:
+            json_start = text.find("[")
+
+        if json_start == -1:
+            return None
+
+        # Try to find matching end
+        brace_count = 0
+        bracket_count = 0
+        in_string = False
+        escape_next = False
+
+        for i, char in enumerate(text[json_start:], json_start):
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == "\\" and in_string:
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == "{":
+                brace_count += 1
+            elif char == "}":
+                brace_count -= 1
+            elif char == "[":
+                bracket_count += 1
+            elif char == "]":
+                bracket_count -= 1
+
+            # Check if we've found a complete JSON structure
+            if brace_count == 0 and bracket_count == 0 and i > json_start:
+                return text[json_start : i + 1]
+
         return None
 
     def should_retry(self, error: Exception, step_name: str = "step") -> bool:
-        """
-        Determine if an error should be retried.
+        """Determine if an error should be retried."""
+        error_str = str(error).lower()
 
-        Returns:
-            True if retry is recommended, False otherwise
-        """
-        error_msg = str(error).lower()
-
-        # Never retry these errors
+        # Don't retry certain errors
         no_retry_errors = [
-            "json decode error",
-            "key error",
-            "attribute error",
-            "type error",
-            "value error",
+            "timeout",
             "permission denied",
             "not found",
-            "invalid",
+            "invalid json",
+            "empty response",
+            "connection refused",
         ]
 
         for pattern in no_retry_errors:
-            if pattern in error_msg:
-                logger.info(
-                    f"[RETRY] Skipping retry for {pattern} error in {step_name}"
-                )
+            if pattern in error_str:
+                logger.warning(f"[RETRY] Skipping retry for: {pattern}")
                 return False
 
-        # Retry network/transient errors
-        retry_errors = [
-            "timeout",
-            "connection",
-            "network",
-            "temporarily",
-            "rate limit",
-            "busy",
-        ]
-
-        for pattern in retry_errors:
-            if pattern in error_msg:
-                if self.retry_count < self.max_retries:
-                    logger.info(
-                        f"[RETRY] Will retry {step_name} (attempt {self.retry_count + 1}/{self.max_retries})"
-                    )
-                    return True
-                else:
-                    logger.warning(f"[RETRY] Max retries exceeded for {step_name}")
-                    return False
-
-        # Default: retry on first 2 attempts, then give up
-        if self.retry_count < 2:
+        # Retry transient errors
+        if self.retry_count < self.max_retries:
+            logger.info(
+                f"[RETRY] Attempt {self.retry_count + 1}/{self.max_retries} for {step_name}"
+            )
             return True
 
         logger.warning(
-            f"[RETRY] Unrecognized error, giving up after {self.retry_count} attempts"
+            f"[RETRY] Max retries ({self.max_retries}) exceeded for {step_name}"
         )
         return False
 
-    def create_error_recovery_plan(
-        self, error: Exception, context: str
-    ) -> Dict[str, Any]:
-        """
-        Create a recovery plan based on the error type.
+    def create_retry_error(
+        self, original_error: Exception, step_name: str = "step"
+    ) -> Exception:
+        """Create a retry error with context."""
+        self.retry_count += 1
+        return RuntimeError(
+            f"{step_name} failed: {str(original_error)}. "
+            f"Retry {self.retry_count}/{self.max_retries} in {self.retry_delay}s"
+        )
 
-        Returns:
-            Dictionary with recovery strategy and steps
-        """
-        error_msg = str(error)
-        error_type = type(error).__name__
 
-        recovery_plan = {
-            "error_type": error_type,
-            "error_message": error_msg,
-            "context": context,
-            "recommended_action": "manual_intervention",
-            "steps": [],
-        }
-
-        if "JSON" in error_type or "json" in error_msg.lower():
-            recovery_plan["recommended_action"] = "retry_with_parsing"
-            recovery_plan["steps"] = [
-                "Attempt to clean and parse JSON",
-                "Use alternative parsing strategies",
-                "Extract JSON from mixed content if needed",
-                "Log raw output for debugging",
-            ]
-
-        elif "timeout" in error_msg.lower():
-            recovery_plan["recommended_action"] = "increase_timeout"
-            recovery_plan["steps"] = [
-                "Increase timeout limit",
-                "Check if task is still running",
-                "Consider breaking task into smaller steps",
-            ]
-
-        elif "network" in error_msg.lower() or "connection" in error_msg.lower():
-            recovery_plan["recommended_action"] = "retry_with_delay"
-            recovery_plan["steps"] = [
-                "Wait for network to stabilize",
-                "Retry with exponential backoff",
-                "Check network connectivity",
-            ]
-
-        elif "permission" in error_msg.lower() or "access" in error_msg.lower():
-            recovery_plan["recommended_action"] = "permission_check"
-            recovery_plan["steps"] = [
-                "Verify file permissions",
-                "Check workspace access",
-                "Ensure proper authentication",
-            ]
-
-        return recovery_plan
+# Singleton instance for reuse
+error_handler = EnhancedErrorHandler()

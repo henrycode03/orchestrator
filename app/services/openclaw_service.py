@@ -24,6 +24,7 @@ from app.services.error_handler import EnhancedErrorHandler
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry
 from app.config import settings
+from app.services.error_handler import error_handler
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,

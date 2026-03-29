@@ -18,7 +18,7 @@ from app.celery_app import celery_app
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
 from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
-from app.services.error_handler import EnhancedErrorHandler
+from app.services.error_handler import error_handler
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
@@ -436,10 +436,22 @@ def execute_openclaw_task(
                     openclaw_service.execute_task(debug_prompt, timeout_seconds=120)
                 )
 
-                # Parse debug result
+                # Parse debug result with enhanced error handling
                 try:
-                    debug_data = json.loads(debug_result.get("output", "{}"))
+                    debug_output = debug_result.get("output", "{}")
+                    success, debug_data, strategy_info = (
+                        error_handler.attempt_json_parsing(
+                            debug_output, context="debug"
+                        )
+                    )
+
+                    if not success:
+                        raise ValueError(
+                            f"Failed to parse debug result: {strategy_info}"
+                        )
+
                     fix_type = debug_data.get("fix_type", "code_fix")
+                    logger.info(f"[DEBUG-PARSE] Using strategy: {strategy_info}")
 
                     if fix_type == "revise_plan":
                         # PHASE 4: PLAN_REVISION
@@ -460,10 +472,22 @@ def execute_openclaw_task(
                         )
 
                         # Update plan with revised version
-                        revise_data = json.loads(revise_result.get("output", "{}"))
+                        revise_output = revise_result.get("output", "{}")
+                        success, revise_data, strategy_info = (
+                            error_handler.attempt_json_parsing(
+                                revise_output, context="revision"
+                            )
+                        )
+
+                        if not success:
+                            raise ValueError(
+                                f"Failed to parse revision: {strategy_info}"
+                            )
+
                         orchestration_state.plan = revise_data.get(
                             "revised_plan", orchestration_state.plan
                         )
+                        logger.info(f"[REVISION-PARSE] Using strategy: {strategy_info}")
                         logger.info(
                             f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps"
                         )
@@ -553,9 +577,7 @@ def execute_openclaw_task(
 
     except Exception as exc:
         # Use enhanced error handler to determine retry behavior
-        error_handler = EnhancedErrorHandler(max_retries=3)
         should_retry = error_handler.should_retry(exc, "task_execution")
-        recovery_plan = error_handler.create_error_recovery_plan(exc, "task_execution")
 
         # Check if this is a timeout error
         is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
@@ -564,11 +586,14 @@ def execute_openclaw_task(
         task.status = TaskStatus.FAILED
         task.error_message = str(exc)
 
-        # Add recovery plan to error message if available
-        if recovery_plan.get("recommended_action"):
-            task.error_message += (
-                f"\nRecommended action: {recovery_plan['recommended_action']}"
-            )
+        # Add diagnostic information
+        error_str = str(exc).lower()
+        if "json" in error_str or "parse" in error_str:
+            task.error_message += "\nDiagnosis: JSON parsing error detected"
+            task.error_message += "\nSuggested fix: Check AI agent response format"
+        elif "empty" in error_str:
+            task.error_message += "\nDiagnosis: Empty response from AI agent"
+            task.error_message += "\nSuggested fix: Retry with more specific prompt"
 
         # Update session status to stopped when task fails
         if session:
