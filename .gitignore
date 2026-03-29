@@ -87,3 +87,6 @@ config/README.md
 stop_all.sh
 start_all.sh
 restart_all.sh
+
+# Development notes and documentation (local only)
+.notes/
