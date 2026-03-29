@@ -320,7 +320,9 @@ def execute_openclaw_task(
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = f"Planning JSON parse failed: {e}"
             task.status = TaskStatus.FAILED
-            task.error_message = f"Planning JSON parse failed: {e}. Raw output: {output_text[:200]}"
+            task.error_message = (
+                f"Planning JSON parse failed: {e}. Raw output: {output_text[:200]}"
+            )
             db.commit()
             return {"status": "failed", "reason": "planning_json_error"}
         except Exception as e:
