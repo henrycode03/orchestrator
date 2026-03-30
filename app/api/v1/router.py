@@ -81,7 +81,7 @@ api_router.include_router(
 # Project Isolation
 api_router.include_router(
     isolation.router,
-    prefix="/isolation",
+    # No prefix needed - endpoints already have /projects/{project_id}/isolation/...
     tags=["project-isolation"],
 )
 

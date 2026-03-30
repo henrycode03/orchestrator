@@ -16,8 +16,10 @@ import json
 import asyncio
 import logging
 import uuid
+import re
+from pathlib import Path
 
-from app.database import get_db
+from app.database import get_db, get_db_session as create_db_session
 
 logger = logging.getLogger(__name__)
 from app.models import Session as SessionModel, SessionTask, TaskStatus, LogEntry
@@ -43,6 +45,124 @@ router = APIRouter()
 
 # In-memory WebSocket connections for log streaming
 active_websockets: dict = {}
+
+
+def _slugify_task_name(name: str) -> str:
+    """Convert task titles into stable folder names."""
+    if not name:
+        return "task"
+
+    slug = name.lower()
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"[^a-z0-9-]", "", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "task"
+
+
+def _ensure_task_workspace(
+    db: Session, session: SessionModel, task_id: int
+) -> Dict[str, str]:
+    """Ensure a selected task has a subfolder and workspace on disk."""
+    from app.models import Project, Task
+    from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
+
+    task = (
+        db.query(Task)
+        .filter(Task.id == task_id, Task.project_id == session.project_id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found for this session")
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    orchestration_state = OrchestrationState(
+        session_id=str(session.id),
+        task_description=task.description or task.title,
+        project_name=project.name or "",
+        task_id=task.id,
+    )
+
+    if project.workspace_path:
+        workspace_path = project.workspace_path
+        if not workspace_path.startswith("/"):
+            workspace_path = str(OPENCLAW_WORKSPACE_ROOT / workspace_path)
+        orchestration_state._workspace_path_override = workspace_path
+
+    if task.task_subfolder:
+        orchestration_state._task_subfolder_override = task.task_subfolder
+    else:
+        base_subfolder = _slugify_task_name(task.title) or f"task-{task.id}"
+        candidate = base_subfolder
+        suffix = 2
+
+        while True:
+            existing = (
+                db.query(Task)
+                .filter(
+                    Task.project_id == session.project_id,
+                    Task.task_subfolder == candidate,
+                    Task.id != task.id,
+                )
+                .first()
+            )
+            if not existing:
+                break
+            candidate = f"{base_subfolder}-{suffix}"
+            suffix += 1
+
+        task.task_subfolder = candidate
+        orchestration_state._task_subfolder_override = candidate
+        db.flush()
+
+    workspace_path = Path(orchestration_state.project_dir)
+    workspace_path.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "task_subfolder": task.task_subfolder,
+        "workspace_path": str(workspace_path),
+    }
+
+
+def _get_session_celery_task_ids(db: Session, session_id: int) -> List[str]:
+    """Collect queued/running Celery task ids recorded for a session."""
+    task_ids: List[str] = []
+    log_entries = (
+        db.query(LogEntry)
+        .filter(LogEntry.session_id == session_id)
+        .order_by(LogEntry.created_at.desc())
+        .all()
+    )
+    for log in log_entries:
+        if not log.log_metadata:
+            continue
+        try:
+            metadata = json.loads(log.log_metadata)
+        except Exception:
+            continue
+        celery_task_id = metadata.get("celery_task_id")
+        if celery_task_id and celery_task_id not in task_ids:
+            task_ids.append(celery_task_id)
+    return task_ids
+
+
+def _revoke_session_celery_tasks(
+    db: Session, session_id: int, terminate: bool = True
+) -> List[str]:
+    """Revoke all known Celery tasks for a session."""
+    from app.celery_app import celery_app
+
+    revoked_ids: List[str] = []
+    for celery_task_id in _get_session_celery_task_ids(db, session_id):
+        celery_app.control.revoke(
+            celery_task_id,
+            terminate=terminate,
+            signal="SIGTERM",
+        )
+        revoked_ids.append(celery_task_id)
+    return revoked_ids
 
 
 @router.post(
@@ -302,11 +422,73 @@ async def execute_task(
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
+        selected_task = None
+        task_workspace = None
+
+        if task_request.task_id:
+            from app.models import Task, SessionTask
+
+            selected_task = (
+                db.query(Task)
+                .filter(
+                    Task.id == task_request.task_id,
+                    Task.project_id == session.project_id,
+                )
+                .first()
+            )
+            if not selected_task:
+                raise HTTPException(
+                    status_code=404, detail="Selected task not found for this session"
+                )
+
+            task_workspace = _ensure_task_workspace(db, session, selected_task.id)
+
+            existing_link = (
+                db.query(SessionTask)
+                .filter(
+                    SessionTask.session_id == session_id,
+                    SessionTask.task_id == selected_task.id,
+                )
+                .first()
+            )
+            if not existing_link:
+                db.add(
+                    SessionTask(
+                        session_id=session_id,
+                        task_id=selected_task.id,
+                        status=TaskStatus.RUNNING,
+                        started_at=datetime.utcnow(),
+                    )
+                )
+
+            selected_task.status = TaskStatus.RUNNING
+            selected_task.started_at = datetime.utcnow()
+            db.add(
+                LogEntry(
+                    session_id=session_id,
+                    session_instance_id=session.instance_id,
+                    task_id=selected_task.id,
+                    level="INFO",
+                    message=f"Prepared task workspace: {task_workspace['workspace_path']}",
+                    log_metadata=json.dumps(task_workspace),
+                )
+            )
+            db.commit()
+
         # Always use real execution mode (no demo mode)
-        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
+        openclaw_service = OpenClawSessionService(
+            db,
+            session_id,
+            task_id=selected_task.id if selected_task else None,
+            use_demo_mode=False,
+        )
 
         # Create OpenClaw session (generates session key)
-        task_description = session.description or session.name
+        task_description = (
+            selected_task.description
+            if selected_task and selected_task.description
+            else session.description or session.name
+        )
         await openclaw_service.create_openclaw_session(task_description)
 
         # Execute task with multi-step orchestration (PLANNING -> EXECUTING -> DEBUGGING)
@@ -319,6 +501,13 @@ async def execute_task(
             "status": "completed",
             "result": result,
             "execution_id": f"exec_{session_id}_{datetime.utcnow().timestamp()}",
+            "task_id": selected_task.id if selected_task else None,
+            "task_subfolder": (
+                task_workspace["task_subfolder"] if task_workspace else None
+            ),
+            "workspace_path": (
+                task_workspace["workspace_path"] if task_workspace else None
+            ),
         }
 
     except Exception as e:
@@ -403,13 +592,67 @@ async def websocket_log_stream(
         except Exception as e:
             logger.error(f"Heartbeat sender error for session {session_id}: {str(e)}")
 
+    last_log_id = recent_logs[-1]["id"] if recent_logs else 0
+
     try:
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(heartbeat_sender())
 
         # Keep connection alive and handle client messages
         while True:
-            data = await websocket.receive_text()
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                data = None
+
+            poll_db = create_db_session()
+            try:
+                current_session = (
+                    poll_db.query(SessionModel)
+                    .filter(SessionModel.id == session_id)
+                    .first()
+                )
+                if current_session:
+                    query = poll_db.query(LogEntry).filter(
+                        LogEntry.session_id == session_id,
+                        LogEntry.id > last_log_id,
+                    )
+                    if current_session.instance_id:
+                        query = query.filter(
+                            LogEntry.session_instance_id == current_session.instance_id
+                        )
+                    else:
+                        query = query.filter(LogEntry.session_instance_id.is_(None))
+
+                    new_logs = query.order_by(LogEntry.created_at.asc()).limit(100).all()
+                    for log in new_logs:
+                        last_log_id = max(last_log_id, log.id)
+                        await websocket.send_json(
+                            {
+                                "type": "log",
+                                "id": log.id,
+                                "session_id": log.session_id,
+                                "task_id": log.task_id,
+                                "message": log.message,
+                                "level": log.level,
+                                "timestamp": (
+                                    log.created_at.isoformat()
+                                    if log.created_at
+                                    else None
+                                ),
+                                "metadata": (
+                                    json.loads(log.log_metadata)
+                                    if log.log_metadata
+                                    else {}
+                                ),
+                                "session_instance_id": log.session_instance_id,
+                            }
+                        )
+            finally:
+                poll_db.close()
+
+            if data is None:
+                continue
 
             # Update last activity timestamp
             for ws_info in active_websockets.get(session_id, []):
@@ -699,7 +942,7 @@ async def start_session(
                             task_id=task.id,
                             level="INFO",
                             message=f"Task queued: {task.title}",
-                            metadata=json.dumps({"celery_task_id": result.id}),
+                            log_metadata=json.dumps({"celery_task_id": result.id}),
                         )
                     )
 
@@ -778,6 +1021,8 @@ async def stop_session(
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
+        revoked_ids = _revoke_session_celery_tasks(db, session_id, terminate=True)
+
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
 
@@ -797,7 +1042,7 @@ async def stop_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session stopped: {session.name}",
-                metadata=json.dumps({"force": force}),
+                log_metadata=json.dumps({"force": force, "revoked_task_ids": revoked_ids}),
             )
         )
         db.commit()
@@ -841,6 +1086,8 @@ async def pause_session(
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
+        revoked_ids = _revoke_session_celery_tasks(db, session_id, terminate=True)
+
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
 
@@ -859,7 +1106,7 @@ async def pause_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session paused: {session.name}",
-                metadata={},
+                log_metadata=json.dumps({"revoked_task_ids": revoked_ids}),
             )
         )
         db.commit()

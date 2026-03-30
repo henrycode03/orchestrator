@@ -165,7 +165,17 @@ export const tasksAPI = {
 
   complete: (id: number) => apiClient.post(`/tasks/${id}/complete`),
 
-  execute: (sessionId: number, data: { task: string; timeout_seconds?: number; use_demo_mode?: boolean }) =>
+  execute: (
+    sessionId: number,
+    data: {
+      task: string;
+      timeout_seconds?: number;
+      use_demo_mode?: boolean;
+      task_id?: number;
+      log_timeout_minutes?: number;
+      monitor_logs?: boolean;
+    }
+  ) =>
     apiClient.post(`/sessions/${sessionId}/execute`, data, {
       timeout: 600000, // 10 minutes for task execution (OpenClaw CLI can take a while for complex tasks)
     }),
@@ -322,7 +332,7 @@ export const sessionsAPI = {
   startOpenClaw: (id: number, taskDescription: string) =>
   apiClient.post(`/sessions/${id}/start-openclaw`, { task_description: taskDescription }),
 
-  execute: (id: number, data: { task: string; timeout_seconds?: number }) =>
+  execute: (id: number, data: { task: string; timeout_seconds?: number; task_id?: number }) =>
     apiClient.post(`/sessions/${id}/execute`, data),
 
   getLogs: (id: number) => apiClient.get<LogEntry[]>(`/sessions/${id}/logs`),

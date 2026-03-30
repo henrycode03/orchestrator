@@ -350,6 +350,21 @@ def execute_openclaw_task(
         )
 
         for step_index, step in enumerate(orchestration_state.plan):
+            db.refresh(session)
+            if session.status in ["stopped", "paused"] or not session.is_active:
+                logger.info(
+                    f"[ORCHESTRATION] Session {session_id} marked {session.status}; stopping task execution before step {step_index + 1}"
+                )
+                task.status = TaskStatus.CANCELLED
+                task.completed_at = datetime.utcnow()
+                db.commit()
+                return {
+                    "status": "cancelled",
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "reason": f"session_{session.status}",
+                }
+
             orchestration_state.current_step_index = step_index
 
             step_description = step.get("description", f"Step {step_index + 1}")

@@ -22,6 +22,7 @@ export interface Task {
   updated_at: string | null;
   started_at: string | null;
   completed_at: string | null;
+  task_subfolder?: string | null;
 }
 
 export type TaskStatus = 'pending' | 'running' | 'failed' | 'done' | 'cancelled';

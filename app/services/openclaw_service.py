@@ -154,15 +154,9 @@ class OpenClawSessionService:
                 result["status"] = "completed"
             else:
                 # REAL MODE: Execute task via OpenClaw HTTP API
-                # Use streaming version if log_callback is provided
-                if log_callback:
-                    result = await self.execute_task_with_streaming(
-                        optimized_prompt, timeout_seconds, log_callback
-                    )
-                else:
-                    result = await self._execute_real_mode(
-                        optimized_prompt, timeout_seconds
-                    )
+                result = await self.execute_task_with_streaming(
+                    optimized_prompt, timeout_seconds, log_callback
+                )
 
             # OPTIMIZATION: Log performance metrics
             duration = time.time() - start_time
@@ -533,7 +527,7 @@ class OpenClawSessionService:
 
             # Phase 5: DONE
             orchestration_state.status = OrchestrationStatus.DONE
-            self._log_entry("INFO", "[ORCHESTRATION] Task completed successfully")
+            self._log_entry("INFO", "[ORCHESTRATION] Execution steps completed")
 
             # Generate summary using the summary template
             execution_results_summary = orchestration_state.prior_results_summary()
@@ -593,6 +587,12 @@ class OpenClawSessionService:
 
         self._log_entry("INFO", f"[STEP] Executing: {step_description[:100]}...")
 
+        # Determine appropriate timeout based on step type
+        # File operations (like .gitignore) typically need more time for AI to generate content
+        is_file_operation = any(keyword in step_description.lower() for keyword in 
+                                ['gitignore', 'package.json', 'create file', 'add file'])
+        base_timeout = 120 if is_file_operation else 60  # 2 minutes for file operations
+        
         for attempt in range(max_retries):
             try:
                 # Build execution prompt (optimized - no redundant context)
@@ -608,9 +608,10 @@ class OpenClawSessionService:
                     ),
                 )
 
-                # OPTIMIZATION: Enforce strict timeout per attempt (60s max)
+                # OPTIMIZATION: Enforce strict timeout per attempt (60s max for most steps, 120s for file operations)
+                timeout = min(base_timeout, 180 // max_retries + 60)  # Ensure minimum reasonable timeout
                 result = await self.execute_task(
-                    execution_prompt, timeout_seconds=min(60, 180 // max_retries)
+                    execution_prompt, timeout_seconds=timeout
                 )
 
                 # Check if successful
@@ -633,10 +634,19 @@ class OpenClawSessionService:
                     return step_result
                 else:
                     orchestration_state.record_failure(step_result)
-                    self._log_entry(
-                        "WARN",
-                        f"[STEP] Step {step_index + 1} failed (attempt {attempt + 1}/{max_retries})",
-                    )
+                    error_detail = result.get("error", "Execution failed")
+                    
+                    # Check if this is a timeout or garbled output - these shouldn't be retried aggressively
+                    if "timeout" in error_detail.lower() or "garbled" in error_detail.lower():
+                        self._log_entry(
+                            "WARN",
+                            f"[STEP] Step {step_index + 1} failed with {error_detail[:100]} (attempt {attempt + 1}/{max_retries}) - non-recoverable error",
+                        )
+                    else:
+                        self._log_entry(
+                            "WARN",
+                            f"[STEP] Step {step_index + 1} failed (attempt {attempt + 1}/{max_retries})",
+                        )
 
             except OpenClawSessionError as e:
                 # Handle timeout errors specifically
@@ -645,12 +655,12 @@ class OpenClawSessionService:
                         StepResult(
                             step_number=step_index + 1,
                             status="failed",
-                            error_message=f"Timeout after {60}s (attempt {attempt + 1}/{max_retries})",
+                            error_message=f"Timeout after {timeout}s (attempt {attempt + 1}/{max_retries})",
                             attempt=attempt + 1,
                         )
                     )
                     self._log_entry(
-                        "WARN", f"[STEP] Step {step_index + 1} timed out, retrying..."
+                        "WARN", f"[STEP] Step {step_index + 1} timed out after {timeout}s, retrying..."
                     )
                 else:
                     # Other errors - don't retry
@@ -859,7 +869,7 @@ class OpenClawSessionService:
             stderr = ""
 
         # CRITICAL FIX: Validate response before parsing
-        if not stdout or stdout in ['""', "''", '"', "'"]:
+        if not stdout or stdout in ['""', "''", '"', "'", '","', '", "', "'\"'"]:
             self._log_entry("ERROR", "[OPENCLAW] CRITICAL: Empty or invalid response")
             return {
                 "status": "failed",
@@ -869,38 +879,32 @@ class OpenClawSessionService:
                 "logs": [],
             }
 
-        # FIX: Detect garbled error patterns (Issue #9 - Garbled Error Detection)
-        # Common garbled outputs from timeout/corrupted responses
-        GARBLED_PATTERNS = [
-            "\"'",  # Single quote in quotes
-            '"), "',  # Partial JSON with quotes
-            "', '",  # Comma-separated quotes (the reported error!)
-            '"", "',  # Multiple empty strings
-            "garbled",  # Literal garbled text
-            "corrupted",  # Corrupted output marker
-        ]
-
-        stdout_lower = stdout.lower()
-        for pattern in GARBLED_PATTERNS:
-            if pattern in stdout_lower or stdout.strip() == pattern.strip():
-                self._log_entry(
-                    "ERROR",
-                    f"[OPENCLAW] DETECTED GARBLDED ERROR PATTERN: '{stdout[:200]}'",
-                )
-                return {
-                    "status": "failed",
-                    "mode": "real",
-                    "output": "",
-                    "error": f"Execution failed with unclear error (garbled output detected). See logs for details.",
-                    "logs": [
-                        {
-                            "level": "ERROR",
-                            "message": f"Garbled output detected: '{stdout[:500]}'",
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
-                    ],
-                    "execution_time": 0.0,
-                }
+        # Additional check for garbled error patterns BEFORE JSON parsing attempt
+        # These patterns indicate timeout/corruption issues
+        garbled_patterns = ['"', "', '", "'\"'", '","', '"\'']
+        stdout_clean = stdout.strip().strip('"').strip("'")
+        
+        if stdout_clean in ["", ",", "'", "\"", "garbled", "corrupted"] or any(
+            pattern in stdout for pattern in garbled_patterns
+        ):
+            self._log_entry(
+                "ERROR", 
+                f"[OPENCLAW] DETECTED GARBLED OUTPUT BEFORE JSON PARSE: '{stdout[:200]}'",
+            )
+            return {
+                "status": "failed",
+                "mode": "real",
+                "output": "",
+                "error": "Execution failed with unclear error (garbled output detected). See logs for details.",
+                "logs": [
+                    {
+                        "level": "ERROR",
+                        "message": f"Garbled output detected: '{stdout[:500]}'",
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                ],
+                "execution_time": 0.0,
+            }
 
         # Parse JSON with error recovery
         try:
@@ -924,10 +928,40 @@ class OpenClawSessionService:
             }
 
         except json.JSONDecodeError:
-            # Fallback to raw text
+            # Only apply garbled detection after JSON parsing actually fails.
+            garbled_patterns = [
+                "\"'",
+                '"", "',
+                "garbled",
+                "corrupted",
+            ]
+            stdout_lower = stdout.lower()
+            if stdout.strip() in {"\"'", "'"} or any(
+                pattern in stdout_lower for pattern in garbled_patterns
+            ):
+                self._log_entry(
+                    "ERROR",
+                    f"[OPENCLAW] DETECTED GARBLED OUTPUT AFTER JSON PARSE FAILURE: '{stdout[:200]}'",
+                )
+                return {
+                    "status": "failed",
+                    "mode": "real",
+                    "output": "",
+                    "error": "Execution failed with unclear error (garbled output detected). See logs for details.",
+                    "logs": [
+                        {
+                            "level": "ERROR",
+                            "message": f"Garbled output detected: '{stdout[:500]}'",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    ],
+                    "execution_time": 0.0,
+                }
+
+            # Fallback to raw text if it isn't valid JSON but still looks coherent.
             self._log_entry("WARN", "Failed to parse JSON, using raw output")
             return {
-                "status": "completed",
+                "status": "completed" if return_code == 0 else "failed",
                 "mode": "real",
                 "output": stdout,
                 "logs": [],
@@ -1027,46 +1061,90 @@ class OpenClawSessionService:
         new_session_id = f"orchestrator-task-{task_id_str}-{int(time.time())}"
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                f"openclaw agent --local --session-id {new_session_id} --message '{prompt}' --json --timeout {timeout_seconds}",
+            process = await asyncio.create_subprocess_exec(
+                "openclaw",
+                "agent",
+                "--local",
+                "--session-id",
+                new_session_id,
+                "--message",
+                prompt,
+                "--json",
+                "--timeout",
+                str(timeout_seconds),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=8192,
             )
 
-            # Stream output with batch commits (every 10 lines)
+            stdout_chunks: List[str] = []
+            stderr_chunks: List[str] = []
             log_count = 0
-            while True:
-                try:
-                    line = await asyncio.wait_for(
-                        process.stdout.readline(), timeout=1.0
-                    )
+
+            async def stream_output(
+                stream,
+                level: str,
+                chunks: List[str],
+                emit_live_logs: bool = True,
+            ) -> None:
+                nonlocal log_count
+                while True:
+                    line = await stream.readline()
                     if not line:
                         break
 
                     line_text = line.decode("utf-8", errors="replace").strip()
+                    chunks.append(line_text)
+
                     if line_text:
-                        log_count += 1
+                        if emit_live_logs:
+                            log_count += 1
+                            if (log_count % 10) == 0:
+                                self.db.commit()
 
-                        # Batch database commits every 10 logs for performance
-                        if (log_count % 10) == 0:
-                            self.db.commit()
+                            self._log_entry(level, line_text, commit=False)
 
-                        self._log_entry("INFO", line_text, commit=False)
+                            if log_callback:
+                                await log_callback(level, line_text)
 
-                        # Call callback for real-time UI updates
-                        if log_callback:
-                            await log_callback("INFO", line_text)
-
-                except asyncio.TimeoutError:
-                    continue  # Continue waiting for output
-
-            # Wait for process completion with timeout
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout_seconds + 30
+            await asyncio.wait_for(
+                asyncio.gather(
+                    # OpenClaw emits its final machine-readable JSON on stdout.
+                    # Buffer it for parsing, but don't flood Live Logs with raw JSON lines.
+                    stream_output(
+                        process.stdout, "INFO", stdout_chunks, emit_live_logs=False
+                    ),
+                    # Keep stderr visible because it contains actionable warnings/errors.
+                    stream_output(process.stderr, "WARN", stderr_chunks, emit_live_logs=True),
+                ),
+                timeout=timeout_seconds + 30,
             )
 
-            return self._parse_openclaw_response(stdout.decode("utf-8"))
+            return_code = await asyncio.wait_for(
+                process.wait(), timeout=timeout_seconds + 30
+            )
+            stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+            stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+
+            self._log_entry(
+                "INFO",
+                f"[OPENCLAW] Return code: {return_code}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
+                commit=True,
+            )
+
+            completed = subprocess.CompletedProcess(
+                args=[
+                    "openclaw",
+                    "agent",
+                    "--local",
+                    "--session-id",
+                    new_session_id,
+                ],
+                returncode=return_code,
+                stdout=stdout_text,
+                stderr=stderr_text,
+            )
+            return self._parse_openclaw_response(completed)
 
         except asyncio.TimeoutError:
             try:

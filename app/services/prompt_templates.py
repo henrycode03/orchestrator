@@ -292,7 +292,8 @@ class PromptTemplates:
 
 **Verify:** {verification_command}
 **Rollback:** {rollback_command}
-**Expected Files:** {', '.join(expected_files) if expected_files else 'None'}
+**Expected Files:**
+{expected_files}
 
 **Previous:** {completed_steps_summary}
 
@@ -696,7 +697,8 @@ A clear status report covering current state, progress percentage, blockers, and
             "step_commands": "\n".join(f"- {cmd}" for cmd in step_commands),
             "verification_command": verification_command or "None provided",
             "rollback_command": rollback_command or "None provided",
-            "expected_files": "\n".join(f"- {f}" for f in (expected_files or [])),
+            "expected_files": "\n".join(f"- {f}" for f in (expected_files or []))
+            or "None",
             "completed_steps_summary": completed_steps_summary
             or "No steps completed yet.",
             "project_context": project_context or "No additional context.",

@@ -32,6 +32,7 @@ function SessionDashboard() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLogsConnected, setIsLogsConnected] = useState(false);
   const [inputTask, setInputTask] = useState('');
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
   const [executing, setExecuting] = useState(false);
   const [isLoadingTasks, setIsLoadingTasks] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -753,11 +754,13 @@ function SessionDashboard() {
       await tasksAPI.execute(Number(id), {
         task: inputTask,
         timeout_seconds: 300,
+        task_id: selectedTaskId || undefined,
         log_timeout_minutes: 5, // Fail if no new logs for 5 minutes
         monitor_logs: true // Enable log monitoring
       });
 
       setInputTask('');
+      setSelectedTaskId(null);
       await fetchSession();
       
       // Remove redundant notification - already shown at start
@@ -1242,6 +1245,7 @@ function SessionDashboard() {
                       key={task.id}
                       onClick={() => {
                         setInputTask(`${task.title}\n\n${task.description || ''}`);
+                        setSelectedTaskId(task.id);
                         // Scroll to execution box
                         setTimeout(() => {
                           document.querySelector('textarea')?.focus();
@@ -1288,6 +1292,21 @@ function SessionDashboard() {
               
               <form onSubmit={handleExecute}>
                 <div className="space-y-3">
+                  {selectedTaskId && (
+                    <div className="flex items-center justify-between rounded-lg border border-primary-500/40 bg-primary-500/10 px-4 py-3 text-sm text-primary-100">
+                      <span>
+                        Selected task workspace:{' '}
+                        {tasks.find((task) => task.id === selectedTaskId)?.title || `Task #${selectedTaskId}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTaskId(null)}
+                        className="text-primary-200 transition-colors hover:text-white"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
                   <textarea
                     value={inputTask}
                     onChange={(e) => setInputTask(e.target.value)}
@@ -1488,3 +1507,4 @@ function SessionDashboard() {
 }
 
 export default SessionDashboard;
+
