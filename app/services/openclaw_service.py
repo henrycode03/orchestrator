@@ -611,7 +611,9 @@ class OpenClawSessionService:
                 )
 
                 # OPTIMIZATION: Enforce strict timeout per attempt (60s max for most steps, 120s for file operations)
-                timeout = min(base_timeout, 180 // max_retries + 60)  # Ensure minimum reasonable timeout
+                timeout = min(
+                    base_timeout, 180 // max_retries + 60
+                )  # Ensure minimum reasonable timeout
                 result = await self.execute_task(
                     execution_prompt, timeout_seconds=timeout
                 )
@@ -639,7 +641,10 @@ class OpenClawSessionService:
                     error_detail = result.get("error", "Execution failed")
 
                     # Check if this is a timeout or garbled output - these shouldn't be retried aggressively
-                    if "timeout" in error_detail.lower() or "garbled" in error_detail.lower():
+                    if (
+                        "timeout" in error_detail.lower()
+                        or "garbled" in error_detail.lower()
+                    ):
                         self._log_entry(
                             "WARN",
                             f"[STEP] Step {step_index + 1} failed with {error_detail[:100]} (attempt {attempt + 1}/{max_retries}) - non-recoverable error",
@@ -662,7 +667,8 @@ class OpenClawSessionService:
                         )
                     )
                     self._log_entry(
-                        "WARN", f"[STEP] Step {step_index + 1} timed out after {timeout}s, retrying..."
+                        "WARN",
+                        f"[STEP] Step {step_index + 1} timed out after {timeout}s, retrying...",
                     )
                 else:
                     # Other errors - don't retry
@@ -883,10 +889,10 @@ class OpenClawSessionService:
 
         # Additional check for garbled error patterns BEFORE JSON parsing attempt
         # These patterns indicate timeout/corruption issues
-        garbled_patterns = ['"', "', '", "'\"'", '","', '"\'']
+        garbled_patterns = ['"', "', '", "'\"'", '","', "\"'"]
         stdout_clean = stdout.strip().strip('"').strip("'")
 
-        if stdout_clean in ["", ",", "'", "\"", "garbled", "corrupted"] or any(
+        if stdout_clean in ["", ",", "'", '"', "garbled", "corrupted"] or any(
             pattern in stdout for pattern in garbled_patterns
         ):
             self._log_entry(
@@ -1117,7 +1123,9 @@ class OpenClawSessionService:
                         process.stdout, "INFO", stdout_chunks, emit_live_logs=False
                     ),
                     # Keep stderr visible because it contains actionable warnings/errors.
-                    stream_output(process.stderr, "WARN", stderr_chunks, emit_live_logs=True),
+                    stream_output(
+                        process.stderr, "WARN", stderr_chunks, emit_live_logs=True
+                    ),
                 ),
                 timeout=timeout_seconds + 30,
             )
