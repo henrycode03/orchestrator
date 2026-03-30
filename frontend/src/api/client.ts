@@ -229,25 +229,6 @@ export const sessionsAPI = {
 
   resume: (id: number) => apiClient.post(`/sessions/${id}/resume`),
 
-  // Checkpoint management endpoints
-  saveCheckpoint: (sessionId: number) =>
-    apiClient.post<{ success: boolean; message: string }>(`/sessions/${sessionId}/checkpoint/save`),
-
-  listCheckpoints: (sessionId: number) =>
-    apiClient.get<{ session_id: number; total_count: number; checkpoints: Array<{ name: string; created_at: string; step_index?: number; completed_steps?: number }> }>(`/sessions/${sessionId}/checkpoints`),
-
-  loadCheckpoint: (sessionId: number, checkpointName: string) =>
-    apiClient.post<{ success: boolean; session_key: string; message: string }>(`/sessions/${sessionId}/checkpoint/load?checkpoint_name=${encodeURIComponent(checkpointName)}`),
-
-  deleteCheckpoint: (sessionId: number, checkpointName: string) =>
-    apiClient.delete<{ success: boolean; message: string }>(`/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`),
-
-  cleanupCheckpoints: (sessionId: number, keepLatest?: number, maxAgeHours?: number) =>
-    apiClient.post<{ success: boolean; deleted_count: number; kept_count: number }>(`/sessions/${sessionId}/checkpoint/cleanup`, {
-      keep_latest: keepLatest || 3,
-      max_age_hours: maxAgeHours || 24,
-    }),
-
   // Overwrite protection endpoints
   checkOverwrites: (sessionId: number, data: { project_id: number; task_subfolder: string; planned_files?: string[] }) =>
     apiClient.post<{ 

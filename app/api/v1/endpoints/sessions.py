@@ -64,10 +64,7 @@ def _ensure_task_workspace(
 ) -> Dict[str, str]:
     """Ensure a selected task has a subfolder and workspace on disk."""
     from app.models import Project, Task
-    from app.services.prompt_templates import (
-        OrchestrationState,
-        OPENCLAW_WORKSPACE_ROOT,
-    )
+    from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
 
     task = (
         db.query(Task)
@@ -198,7 +195,7 @@ def create_session(
             session_id=db_session.id,
             level="INFO",
             message=f"Session created: {db_session.name}",
-            metadata=json.dumps({"project_id": session.project_id}),
+            log_metadata=json.dumps({"project_id": session.project_id}),
         )
     )
     # Don't commit here - let the next operation handle it
@@ -286,7 +283,7 @@ def update_session(
             session_id=session_id,
             level="INFO",
             message=f"Session updated: {session_id}",
-            metadata=json.dumps({"updates": update_data}),
+            log_metadata=json.dumps({"updates": update_data}),
         )
     )
     db.commit()
@@ -321,7 +318,7 @@ def delete_session(
             session_id=session_id,
             level="INFO",
             message=f"Session deletion requested: {db_session.name}",
-            metadata=json.dumps({"requested_by": current_user.email}),
+            log_metadata=json.dumps({"requested_by": current_user.email}),
         )
     )
     db.commit()
@@ -373,7 +370,7 @@ async def start_openclaw_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"OpenClaw session started: {task_description[:100]}",
-                metadata=json.dumps(
+                log_metadata=json.dumps(
                     {"session_key": session_key, "task_description": task_description}
                 ),
             )
@@ -429,7 +426,7 @@ async def execute_task(
         task_workspace = None
 
         if task_request.task_id:
-            from app.models import Task
+            from app.models import Task, SessionTask
 
             selected_task = (
                 db.query(Task)
@@ -627,9 +624,7 @@ async def websocket_log_stream(
                     else:
                         query = query.filter(LogEntry.session_instance_id.is_(None))
 
-                    new_logs = (
-                        query.order_by(LogEntry.created_at.asc()).limit(100).all()
-                    )
+                    new_logs = query.order_by(LogEntry.created_at.asc()).limit(100).all()
                     for log in new_logs:
                         last_log_id = max(last_log_id, log.id)
                         await websocket.send_json(
@@ -972,7 +967,7 @@ async def start_session(
                 session_instance_id=session_instance_id,
                 level="INFO",
                 message=f"Session started: {session.name}",
-                metadata=json.dumps(
+                log_metadata=json.dumps(
                     {
                         "session_key": session_key,
                         "task_description": task_description,
@@ -1047,9 +1042,7 @@ async def stop_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session stopped: {session.name}",
-                log_metadata=json.dumps(
-                    {"force": force, "revoked_task_ids": revoked_ids}
-                ),
+                log_metadata=json.dumps({"force": force, "revoked_task_ids": revoked_ids}),
             )
         )
         db.commit()
@@ -1175,7 +1168,7 @@ async def resume_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session resumed: {session.name}",
-                metadata={},
+                log_metadata=json.dumps({}),
             )
         )
         db.commit()

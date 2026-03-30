@@ -680,7 +680,7 @@ function SessionDashboard() {
     try {
       const response = await sessionsAPI.listCheckpoints(Number(id));
       // Ensure we always set an array, even if API returns undefined/null
-      setCheckpoints(response?.checkpoints || []);
+      setCheckpoints(response?.data?.checkpoints || []);
     } catch (error) {
       console.error('Failed to load checkpoints:', error);
       // On error, keep existing checkpoints or reset to empty array
@@ -1507,4 +1507,3 @@ function SessionDashboard() {
 }
 
 export default SessionDashboard;
-

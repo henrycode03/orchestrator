@@ -52,7 +52,7 @@ class CheckpointService:
                 session_id=session_id,
                 level=level,
                 message=f"[CHECKPOINT] {message}",
-                metadata=json.dumps({}),
+                log_metadata=json.dumps({}),
             )
             self.db.add(log_entry)
             # Don't commit here - let caller handle it for performance
