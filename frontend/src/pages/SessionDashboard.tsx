@@ -681,7 +681,7 @@ function SessionDashboard() {
   };
 
   // Checkpoint management functions
-  const loadCheckpoints = async () => {
+  const loadCheckpoints = useCallback(async () => {
     if (!id) return;
     
     try {
@@ -693,7 +693,7 @@ function SessionDashboard() {
       // On error, keep existing checkpoints or reset to empty array
       setCheckpoints([]);
     }
-  };
+  }, [id]);
 
   const handleDeleteCheckpoint = async (checkpointName: string) => {
     if (!id) return;

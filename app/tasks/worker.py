@@ -993,4 +993,3 @@ def generate_task_report(self, task_id: int, output_format: str = "json"):
     except Exception as exc:
         logger.error(f"Report generation failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
-
