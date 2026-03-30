@@ -19,6 +19,7 @@ from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Proj
 from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
 from app.services.error_handler import error_handler
+from app.services.checkpoint_service import CheckpointService
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
@@ -27,6 +28,67 @@ from app.services.prompt_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_step_result(step_result: StepResult) -> Dict[str, Any]:
+    return {
+        "step_number": step_result.step_number,
+        "status": step_result.status,
+        "output": step_result.output,
+        "verification_output": step_result.verification_output,
+        "files_changed": step_result.files_changed,
+        "error_message": step_result.error_message,
+        "attempt": step_result.attempt,
+    }
+
+
+def _restore_step_result(data: Dict[str, Any]) -> StepResult:
+    return StepResult(
+        step_number=data.get("step_number", 0),
+        status=data.get("status", "failed"),
+        output=data.get("output", ""),
+        verification_output=data.get("verification_output", ""),
+        files_changed=data.get("files_changed", []) or [],
+        error_message=data.get("error_message", ""),
+        attempt=data.get("attempt", 1),
+    )
+
+
+def _save_orchestration_checkpoint(
+    db: Session,
+    session_id: int,
+    task_id: int,
+    prompt: str,
+    orchestration_state: OrchestrationState,
+    checkpoint_name: str = "autosave_latest",
+) -> None:
+    checkpoint_service = CheckpointService(db)
+    checkpoint_service.save_checkpoint(
+        session_id=session_id,
+        checkpoint_name=checkpoint_name,
+        context_data={
+            "task_id": task_id,
+            "task_description": prompt,
+            "project_name": orchestration_state.project_name,
+            "project_context": orchestration_state.project_context,
+            "task_subfolder": orchestration_state.task_subfolder,
+        },
+        orchestration_state={
+            "status": orchestration_state.status.value,
+            "plan": orchestration_state.plan,
+            "current_step_index": orchestration_state.current_step_index,
+            "debug_attempts": orchestration_state.debug_attempts,
+            "changed_files": orchestration_state.changed_files,
+            "execution_results": [
+                _serialize_step_result(r)
+                for r in orchestration_state.execution_results
+            ],
+        },
+        current_step_index=orchestration_state.current_step_index,
+        step_results=[
+            _serialize_step_result(r) for r in orchestration_state.execution_results
+        ],
+    )
 
 
 def slugify_project_name(name: str) -> str:
@@ -84,6 +146,7 @@ def execute_openclaw_task(
     prompt: str,
     timeout_seconds: int = 300,
     context: Optional[Dict[str, Any]] = None,
+    resume_checkpoint_name: Optional[str] = None,
 ):
     """
     Execute an OpenClaw task with multi-step orchestration
@@ -217,143 +280,205 @@ def execute_openclaw_task(
 
         session_context = asyncio.run(openclaw_service.get_session_context())
 
-        # PHASE 1: PLANNING - Generate step plan
-        logger.info("[ORCHESTRATION] Phase 1: PLANNING - generating step plan")
+        checkpoint_service = CheckpointService(db)
+        resumed_from_checkpoint = False
 
-        # Use project_name (already slugified) for the project context
-        project_name_slug = (
-            orchestration_state.project_name.strip() or f"session-{session_id}"
-        )
-        project_context = f"Build project: {project_name_slug}"
-
-        planning_prompt = PromptTemplates.build_planning_prompt(
-            task_description=prompt,
-            project_context=project_context,
-            workspace_root=str(orchestration_state.workspace_root),
-            project_dir=str(orchestration_state.project_dir),
-        )
-
-        planning_result = asyncio.run(
-            openclaw_service.execute_task(planning_prompt, timeout_seconds=120)
-        )
-
-        # Parse planning result to get steps
-        try:
-            output_result = planning_result.get("output", {})
-
-            # Debug: Log raw result to diagnose JSON parsing issues
-            logger.info(
-                f"[ORCHESTRATION] Planning result keys: {list(planning_result.keys()) if isinstance(planning_result, dict) else 'Not a dict'}"
+        if resume_checkpoint_name:
+            checkpoint_data = checkpoint_service.load_checkpoint(
+                session_id=session_id, checkpoint_name=resume_checkpoint_name
             )
-            logger.info(
-                f"[ORCHESTRATION] Planning output type: {type(output_result)}, preview: {str(output_result)[:300]}"
+            checkpoint_context = checkpoint_data.get("context", {})
+            checkpoint_state = checkpoint_data.get("orchestration_state", {})
+
+            prompt = checkpoint_context.get("task_description", prompt) or prompt
+            orchestration_state.project_name = checkpoint_context.get(
+                "project_name", orchestration_state.project_name
+            )
+            orchestration_state.project_context = checkpoint_context.get(
+                "project_context", orchestration_state.project_context
+            )
+            if checkpoint_context.get("task_subfolder"):
+                orchestration_state._task_subfolder_override = checkpoint_context.get(
+                    "task_subfolder"
+                )
+
+            orchestration_state.plan = checkpoint_state.get("plan", []) or []
+            orchestration_state.current_step_index = (
+                checkpoint_state.get(
+                    "current_step_index",
+                    checkpoint_data.get("current_step_index", 0) or 0,
+                )
+                or 0
+            )
+            orchestration_state.debug_attempts = checkpoint_state.get(
+                "debug_attempts", []
+            ) or []
+            orchestration_state.changed_files = checkpoint_state.get(
+                "changed_files", []
+            ) or []
+            orchestration_state.execution_results = [
+                _restore_step_result(item)
+                for item in checkpoint_state.get(
+                    "execution_results", checkpoint_data.get("step_results", [])
+                )
+            ]
+
+            resumed_from_checkpoint = bool(orchestration_state.plan)
+            if resumed_from_checkpoint:
+                logger.info(
+                    f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}"
+                )
+
+        if not resumed_from_checkpoint:
+            # PHASE 1: PLANNING - Generate step plan
+            logger.info("[ORCHESTRATION] Phase 1: PLANNING - generating step plan")
+
+            # Use project_name (already slugified) for the project context
+            project_name_slug = (
+                orchestration_state.project_name.strip() or f"session-{session_id}"
+            )
+            project_context = f"Build project: {project_name_slug}"
+
+            planning_prompt = PromptTemplates.build_planning_prompt(
+                task_description=prompt,
+                project_context=project_context,
+                workspace_root=str(orchestration_state.workspace_root),
+                project_dir=str(orchestration_state.project_dir),
             )
 
-            # Debug: Log raw output
-            logger.info(
-                f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
+            planning_result = asyncio.run(
+                openclaw_service.execute_task(planning_prompt, timeout_seconds=120)
             )
 
-            # Handle different output formats from OpenClaw CLI
-            if isinstance(output_result, dict):
-                # Format 1: OpenClaw CLI returns full JSON with "payloads" key
-                if "payloads" in output_result:
-                    payloads = output_result.get("payloads", [])
-                    if isinstance(payloads, list) and len(payloads) > 0:
-                        first_payload = payloads[0]
-                        if isinstance(first_payload, dict):
-                            output_text = first_payload.get("text", "")
-                            # Debug: Log the extraction
-                            logger.info(
-                                f"[ORCHESTRATION] Extracted 'text' from payload, length: {len(output_text)}, preview: {output_text[:100]}"
-                            )
-                        elif isinstance(first_payload, str):
-                            # Payload is already a string
-                            output_text = first_payload
-                            logger.info(
-                                f"[ORCHESTRATION] Payload is string, length: {len(output_text)}"
-                            )
+            # Parse planning result to get steps
+            try:
+                output_result = planning_result.get("output", {})
+
+                # Debug: Log raw result to diagnose JSON parsing issues
+                logger.info(
+                    f"[ORCHESTRATION] Planning result keys: {list(planning_result.keys()) if isinstance(planning_result, dict) else 'Not a dict'}"
+                )
+                logger.info(
+                    f"[ORCHESTRATION] Planning output type: {type(output_result)}, preview: {str(output_result)[:300]}"
+                )
+
+                # Debug: Log raw output
+                logger.info(
+                    f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
+                )
+
+                # Handle different output formats from OpenClaw CLI
+                if isinstance(output_result, dict):
+                    # Format 1: OpenClaw CLI returns full JSON with "payloads" key
+                    if "payloads" in output_result:
+                        payloads = output_result.get("payloads", [])
+                        if isinstance(payloads, list) and len(payloads) > 0:
+                            first_payload = payloads[0]
+                            if isinstance(first_payload, dict):
+                                output_text = first_payload.get("text", "")
+                                # Debug: Log the extraction
+                                logger.info(
+                                    f"[ORCHESTRATION] Extracted 'text' from payload, length: {len(output_text)}, preview: {output_text[:100]}"
+                                )
+                            elif isinstance(first_payload, str):
+                                # Payload is already a string
+                                output_text = first_payload
+                                logger.info(
+                                    f"[ORCHESTRATION] Payload is string, length: {len(output_text)}"
+                                )
+                            else:
+                                # Unknown type, convert to string
+                                output_text = str(first_payload)
+                                logger.info(
+                                    f"[ORCHESTRATION] Payload is {type(first_payload)}, converted to string"
+                                )
                         else:
-                            # Unknown type, convert to string
-                            output_text = str(first_payload)
+                            output_text = json.dumps(output_result)
                             logger.info(
-                                f"[ORCHESTRATION] Payload is {type(first_payload)}, converted to string"
+                                "[ORCHESTRATION] Empty payloads, using full JSON"
                             )
+                    # Format 2: Direct dict response
                     else:
                         output_text = json.dumps(output_result)
-                        logger.info(f"[ORCHESTRATION] Empty payloads, using full JSON")
-                # Format 2: Direct dict response
+                        logger.info("[ORCHESTRATION] Direct dict response")
+                elif isinstance(output_result, str):
+                    # Format 3: Raw string response
+                    output_text = output_result
+                    logger.info("[ORCHESTRATION] Raw string response")
                 else:
-                    output_text = json.dumps(output_result)
-                    logger.info(f"[ORCHESTRATION] Direct dict response")
-            elif isinstance(output_result, str):
-                # Format 3: Raw string response
-                output_text = output_result
-                logger.info(f"[ORCHESTRATION] Raw string response")
-            else:
-                output_text = str(output_result)
-                logger.info(f"[ORCHESTRATION] Unknown type, converted to string")
+                    output_text = str(output_result)
+                    logger.info(f"[ORCHESTRATION] Unknown type, converted to string")
 
-            logger.info(
-                f"[ORCHESTRATION] Final extracted text length: {len(output_text)}"
-            )
-
-            # Strip Markdown code fences if present
-            import re
-
-            if isinstance(output_text, str):
-                # Remove ```json or ``` wrappers
-                markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
-                output_text = re.sub(markdown_pattern, "", output_text.strip())
                 logger.info(
-                    f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}"
+                    f"[ORCHESTRATION] Final extracted text length: {len(output_text)}"
                 )
 
-            # Use enhanced JSON parsing with multiple recovery strategies
-            success, plan_data, strategy_info = error_handler.attempt_json_parsing(
-                output_text, context="planning"
-            )
+                # Strip Markdown code fences if present
+                import re
 
-            if success:
-                if isinstance(plan_data, list):
-                    orchestration_state.plan = plan_data
+                if isinstance(output_text, str):
+                    # Remove ```json or ``` wrappers
+                    markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
+                    output_text = re.sub(markdown_pattern, "", output_text.strip())
                     logger.info(
-                        f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan (using {strategy_info})"
+                        f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}"
                     )
+
+                # Use enhanced JSON parsing with multiple recovery strategies
+                success, plan_data, strategy_info = error_handler.attempt_json_parsing(
+                    output_text, context="planning"
+                )
+
+                if success:
+                    if isinstance(plan_data, list):
+                        orchestration_state.plan = plan_data
+                        logger.info(
+                            f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan (using {strategy_info})"
+                        )
+                    else:
+                        raise ValueError("Planning result is not a list of steps")
                 else:
-                    raise ValueError("Planning result is not a list of steps")
-            else:
-                # Failed to parse after all strategies
+                    # Failed to parse after all strategies
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = (
+                        f"Planning JSON parse failed: {strategy_info}"
+                    )
+                    task.status = TaskStatus.FAILED
+                    task.error_message = (
+                        f"Planning JSON parse failed: {strategy_info}. "
+                        f"Raw output: {output_text[:500]}"
+                    )
+                    db.commit()
+                    return {"status": "failed", "reason": "planning_json_error"}
+            except Exception as e:
+                logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
                 orchestration_state.status = OrchestrationStatus.ABORTED
-                orchestration_state.abort_reason = (
-                    f"Planning JSON parse failed: {strategy_info}"
-                )
+                orchestration_state.abort_reason = f"Planning parse failed: {e}"
                 task.status = TaskStatus.FAILED
-                task.error_message = (
-                    f"Planning JSON parse failed: {strategy_info}. "
-                    f"Raw output: {output_text[:500]}"
-                )
+                task.error_message = str(e)
                 db.commit()
-                return {"status": "failed", "reason": "planning_json_error"}
-        except Exception as e:
-            logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
-            orchestration_state.status = OrchestrationStatus.ABORTED
-            orchestration_state.abort_reason = f"Planning parse failed: {e}"
-            task.status = TaskStatus.FAILED
-            task.error_message = str(e)
-            db.commit()
-            return {"status": "failed", "reason": "planning_parse_error"}
+                return {"status": "failed", "reason": "planning_parse_error"}
+
+        _save_orchestration_checkpoint(
+            db, session_id, task_id, prompt, orchestration_state
+        )
 
         # PHASE 2: EXECUTING - Execute each step
         logger.info(
             f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps"
         )
 
-        for step_index, step in enumerate(orchestration_state.plan):
+        for step_index in range(
+            orchestration_state.current_step_index, len(orchestration_state.plan)
+        ):
+            step = orchestration_state.plan[step_index]
             db.refresh(session)
             if session.status in ["stopped", "paused"] or not session.is_active:
                 logger.info(
                     f"[ORCHESTRATION] Session {session_id} marked {session.status}; stopping task execution before step {step_index + 1}"
+                )
+                _save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
                 )
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.utcnow()
@@ -423,11 +548,17 @@ def execute_openclaw_task(
 
             if step_status == "success":
                 orchestration_state.record_success(step_record)
+                _save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
                 logger.info(
                     f"[ORCHESTRATION] Step {step_index + 1} completed successfully"
                 )
             else:
                 orchestration_state.record_failure(step_record)
+                _save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
 
                 # PHASE 3: DEBUGGING - Fix failed step
                 logger.info(
@@ -862,3 +993,4 @@ def generate_task_report(self, task_id: int, output_format: str = "json"):
     except Exception as exc:
         logger.error(f"Report generation failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
+

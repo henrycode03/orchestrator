@@ -64,10 +64,7 @@ def _ensure_task_workspace(
 ) -> Dict[str, str]:
     """Ensure a selected task has a subfolder and workspace on disk."""
     from app.models import Project, Task
-    from app.services.prompt_templates import (
-        OrchestrationState,
-        OPENCLAW_WORKSPACE_ROOT,
-    )
+    from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
 
     task = (
         db.query(Task)
@@ -429,7 +426,7 @@ async def execute_task(
         task_workspace = None
 
         if task_request.task_id:
-            from app.models import Task
+            from app.models import Task, SessionTask
 
             selected_task = (
                 db.query(Task)
@@ -627,9 +624,7 @@ async def websocket_log_stream(
                     else:
                         query = query.filter(LogEntry.session_instance_id.is_(None))
 
-                    new_logs = (
-                        query.order_by(LogEntry.created_at.asc()).limit(100).all()
-                    )
+                    new_logs = query.order_by(LogEntry.created_at.asc()).limit(100).all()
                     for log in new_logs:
                         last_log_id = max(last_log_id, log.id)
                         await websocket.send_json(
@@ -1047,9 +1042,7 @@ async def stop_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session stopped: {session.name}",
-                log_metadata=json.dumps(
-                    {"force": force, "revoked_task_ids": revoked_ids}
-                ),
+                log_metadata=json.dumps({"force": force, "revoked_task_ids": revoked_ids}),
             )
         )
         db.commit()
@@ -1093,13 +1086,31 @@ async def pause_session(
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
+        from app.services.checkpoint_service import CheckpointService
+
         revoked_ids = _revoke_session_celery_tasks(db, session_id, terminate=True)
 
-        # Initialize OpenClaw service
-        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
-
-        # Pause the OpenClaw session
-        await openclaw_service.pause_session()
+        checkpoint_name = None
+        checkpoint_service = CheckpointService(db)
+        try:
+            latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
+            checkpoint_name = (
+                f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            )
+            checkpoint_service.save_checkpoint(
+                session_id=session_id,
+                checkpoint_name=checkpoint_name,
+                context_data=latest_checkpoint.get("context", {}),
+                orchestration_state=latest_checkpoint.get("orchestration_state", {}),
+                current_step_index=latest_checkpoint.get("current_step_index"),
+                step_results=latest_checkpoint.get("step_results", []),
+            )
+        except Exception:
+            # Fallback for direct/non-worker executions that don't have an autosave yet.
+            openclaw_service = OpenClawSessionService(
+                db, session_id, use_demo_mode=False
+            )
+            await openclaw_service.pause_session()
 
         # Update database
         session.is_active = True  # Keep session active when paused
@@ -1113,7 +1124,12 @@ async def pause_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session paused: {session.name}",
-                log_metadata=json.dumps({"revoked_task_ids": revoked_ids}),
+                log_metadata=json.dumps(
+                    {
+                        "revoked_task_ids": revoked_ids,
+                        "checkpoint_name": checkpoint_name,
+                    }
+                ),
             )
         )
         db.commit()
@@ -1152,16 +1168,44 @@ async def resume_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check if paused
-    if session.status != "paused":
-        raise HTTPException(status_code=400, detail="Session is not paused")
+    # Check if resumable
+    if session.status not in ["paused", "stopped"]:
+        raise HTTPException(status_code=400, detail="Session is not resumable")
 
     try:
-        # Initialize OpenClaw service
-        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
+        from app.services.checkpoint_service import CheckpointService
+        from app.tasks.worker import execute_openclaw_task
+        from app.models import Task
 
-        # Resume the OpenClaw session
-        await openclaw_service.resume_session()
+        checkpoint_service = CheckpointService(db)
+        checkpoint_data = checkpoint_service.load_checkpoint(session_id)
+        checkpoint_name = checkpoint_data.get("checkpoint_name")
+        context_data = checkpoint_data.get("context", {})
+        task_id = context_data.get("task_id")
+        if not task_id:
+            latest_session_task = (
+                db.query(SessionTask)
+                .filter(SessionTask.session_id == session_id)
+                .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+                .first()
+            )
+            task_id = latest_session_task.task_id if latest_session_task else None
+
+        task = db.query(Task).filter(Task.id == task_id).first() if task_id else None
+        if not task:
+            raise HTTPException(
+                status_code=404, detail="No task found to resume from checkpoint"
+            )
+
+        prompt = context_data.get("task_description") or task.description or task.title
+
+        result = execute_openclaw_task.delay(
+            session_id=session_id,
+            task_id=task.id,
+            prompt=prompt,
+            timeout_seconds=300,
+            resume_checkpoint_name=checkpoint_name,
+        )
 
         # Update database
         session.status = "running"
@@ -1175,7 +1219,13 @@ async def resume_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session resumed: {session.name}",
-                log_metadata=json.dumps({}),
+                log_metadata=json.dumps(
+                    {
+                        "checkpoint_name": checkpoint_name,
+                        "celery_task_id": result.id,
+                        "task_id": task.id,
+                    }
+                ),
             )
         )
         db.commit()

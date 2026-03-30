@@ -116,6 +116,13 @@ function SessionDashboard() {
     fetchProjectTasks();
   }, [fetchProject, fetchProjectTasks]);
 
+  useEffect(() => {
+    if (!id) return;
+    if (session?.status === 'paused' || session?.status === 'stopped') {
+      loadCheckpoints();
+    }
+  }, [id, session?.status]);
+
   // Fetch logs for the current session only (project-scoped)
   const fetchSessionLogs = useCallback(async () => {
     console.log('fetchSessionLogs called, session id:', id);
@@ -1062,7 +1069,7 @@ function SessionDashboard() {
                   </>
                 )}
                 
-                {session?.status === 'paused' && (
+                {(session?.status === 'paused' || (session?.status === 'stopped' && checkpoints.length > 0)) && (
                   <button
                     onClick={handleResume}
                     disabled={executing}
@@ -1507,3 +1514,4 @@ function SessionDashboard() {
 }
 
 export default SessionDashboard;
+
