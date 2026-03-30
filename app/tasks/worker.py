@@ -80,8 +80,7 @@ def _save_orchestration_checkpoint(
             "debug_attempts": orchestration_state.debug_attempts,
             "changed_files": orchestration_state.changed_files,
             "execution_results": [
-                _serialize_step_result(r)
-                for r in orchestration_state.execution_results
+                _serialize_step_result(r) for r in orchestration_state.execution_results
             ],
         },
         current_step_index=orchestration_state.current_step_index,
@@ -310,12 +309,12 @@ def execute_openclaw_task(
                 )
                 or 0
             )
-            orchestration_state.debug_attempts = checkpoint_state.get(
-                "debug_attempts", []
-            ) or []
-            orchestration_state.changed_files = checkpoint_state.get(
-                "changed_files", []
-            ) or []
+            orchestration_state.debug_attempts = (
+                checkpoint_state.get("debug_attempts", []) or []
+            )
+            orchestration_state.changed_files = (
+                checkpoint_state.get("changed_files", []) or []
+            )
             orchestration_state.execution_results = [
                 _restore_step_result(item)
                 for item in checkpoint_state.get(

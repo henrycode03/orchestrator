@@ -64,7 +64,10 @@ def _ensure_task_workspace(
 ) -> Dict[str, str]:
     """Ensure a selected task has a subfolder and workspace on disk."""
     from app.models import Project, Task
-    from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
+    from app.services.prompt_templates import (
+        OrchestrationState,
+        OPENCLAW_WORKSPACE_ROOT,
+    )
 
     task = (
         db.query(Task)
@@ -624,7 +627,9 @@ async def websocket_log_stream(
                     else:
                         query = query.filter(LogEntry.session_instance_id.is_(None))
 
-                    new_logs = query.order_by(LogEntry.created_at.asc()).limit(100).all()
+                    new_logs = (
+                        query.order_by(LogEntry.created_at.asc()).limit(100).all()
+                    )
                     for log in new_logs:
                         last_log_id = max(last_log_id, log.id)
                         await websocket.send_json(
@@ -1042,7 +1047,9 @@ async def stop_session(
                 session_id=session_id,
                 level="INFO",
                 message=f"Session stopped: {session.name}",
-                log_metadata=json.dumps({"force": force, "revoked_task_ids": revoked_ids}),
+                log_metadata=json.dumps(
+                    {"force": force, "revoked_task_ids": revoked_ids}
+                ),
             )
         )
         db.commit()
@@ -1094,9 +1101,7 @@ async def pause_session(
         checkpoint_service = CheckpointService(db)
         try:
             latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
-            checkpoint_name = (
-                f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-            )
+            checkpoint_name = f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_service.save_checkpoint(
                 session_id=session_id,
                 checkpoint_name=checkpoint_name,
@@ -1186,7 +1191,9 @@ async def resume_session(
             latest_session_task = (
                 db.query(SessionTask)
                 .filter(SessionTask.session_id == session_id)
-                .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+                .order_by(
+                    SessionTask.started_at.desc().nullslast(), SessionTask.id.desc()
+                )
                 .first()
             )
             task_id = latest_session_task.task_id if latest_session_task else None

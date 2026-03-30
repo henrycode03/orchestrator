@@ -121,7 +121,7 @@ function SessionDashboard() {
     if (session?.status === 'paused' || session?.status === 'stopped') {
       loadCheckpoints();
     }
-  }, [id, session?.status]);
+  }, [id, session?.status, loadCheckpoints]);
 
   // Fetch logs for the current session only (project-scoped)
   const fetchSessionLogs = useCallback(async () => {
