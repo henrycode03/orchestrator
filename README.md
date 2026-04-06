@@ -32,7 +32,7 @@ This is a complete AI development agent orchestrator that automates software dev
 
 ### One-Command Startup
 ```bash
-cd ~/.openclaw/workspace/projects/orchestrator
+cd ~/.openclaw/workspace/vault/projects/orchestrator
 ./start_all.sh
 ```
 
@@ -228,6 +228,12 @@ How to respond:
 - `POST /api/v1/auth/refresh` - Refresh access token
 - `GET /api/v1/auth/me` - Get current user
 
+**Test Accounts:**
+- `test@example.com` / `test123` ✅ (active)
+- `test@demo.com` / (check with DB)
+- `testuser@example.com` / (check with DB)
+- `REDACTED` / (your account)
+
 ### Projects
 - `GET /api/v1/projects` - List all projects
 - `POST /api/v1/projects` - Create project
@@ -293,31 +299,84 @@ redis-cli ping  # Should return PONG
 
 ### Frontend Can't Connect to Backend
 
-**Check VITE_API_URL in frontend/.env:**
+**1. Check VITE_API_URL in frontend/.env:**
 ```bash
 cat frontend/.env
 ```
 
-Should contain:
+**For localhost access:**
 ```
 VITE_API_URL=http://localhost:8080/api/v1
+VITE_API_WS_HOST=localhost:8080
 ```
 
-**Or configure `LOCALHOST` in root `.env`:**
+**For container/network access (e.g., from 172.17.0.2):**
+```
+VITE_API_URL=http://172.17.0.2:8080/api/v1
+VITE_API_WS_HOST=172.17.0.2:8080
+```
+
+**⚠️ CRITICAL: CORS Configuration**
+The frontend and backend must use matching origins. Common mistakes:
+- Frontend running on `http://localhost:3000` but API configured as `http://172.17.0.2:8080` → **CORS error!**
+- Frontend running on `http://172.17.0.2:3000` but API configured as `http://localhost:8080` → **Connection refused!**
+
+**Fix:** Match the API URL to where you're accessing the dashboard from:
+- Accessing dashboard from `localhost:3000` → Use `VITE_API_URL=http://localhost:8080/api/v1`
+- Accessing dashboard from `172.17.0.2:3000` → Use `VITE_API_URL=http://172.17.0.2:8080/api/v1`
+
+After changing `.env`, **restart Vite dev server** for changes to take effect:
 ```bash
-cat .env | grep LOCALHOST
-# Set: LOCALHOST=<your-ip> for containerized deployment
+pkill -f "vite"
+sleep 2
+cd frontend && pnpm dev
+```
+
+### CORS Errors When Logging In
+
+**Symptoms:**
+- Login button clicks but nothing happens
+- Browser console shows: `Access to fetch at '...' from origin '...' has been blocked by CORS policy`
+
+**Diagnosis:**
+1. Check frontend origin (where you access dashboard from):
+   - `http://localhost:3000` (local browser)
+   - `http://172.17.0.2:3000` (network access)
+
+2. Check API URL in `frontend/.env`:
+   ```bash
+   cat frontend/.env | grep VITE_API_URL
+   ```
+
+3. If origins don't match → **that's your CORS problem**
+
+**Backend CORS Configuration:**
+The backend allows these origins by default (see `app/config.py`):
+```python
+CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://localhost:8000",
+    "http://172.17.0.1:3000",
+    "http://172.17.0.2:3000",
+    "http://172.17.0.2:8080",
+]
+```
+
+**Test CORS manually:**
+```bash
+# Test from localhost origin
+curl -X POST http://localhost:8080/api/v1/auth/tokens \
+  -H "Content-Type: application/json" \
+  -H "Origin: http://localhost:3000" \
+  -d '{"email": "test@example.com", "password": "test123"}' \
+  -v 2>&1 | grep "access-control-allow-origin"
 ```
 
 **Browser can't access dashboard (host browser issues):**
 
 **1. Get access token from API:**
 ```bash
-# Register test user
-curl -X POST http://localhost:8080/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "password": "test123"}'
-
 # Login and get token
 TOKEN=$(curl -X POST http://localhost:8080/api/v1/auth/tokens \
   -H "Content-Type: application/json" \
@@ -333,10 +392,10 @@ echo "Token: $TOKEN"
 - Refresh page
 
 **3. Common issues:**
-- **401 Unauthorized** → Token expired, get new token
+- **401 Unauthorized** → Token expired (valid 7 days), get new token
 - **404 Not Found** → API URL mismatch, check `VITE_API_URL`
 - **Blank page** → Check browser console for JavaScript errors
-- **CORS errors** → Ensure backend allows your origin in `app/main.py`
+- **CORS errors** → Match frontend origin with API URL in `.env`
 
 ---
 
@@ -481,9 +540,9 @@ After=network.target redis.service
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/root/.openclaw/workspace/projects/orchestrator
-Environment="PATH=/root/.openclaw/workspace/projects/orchestrator/venv/bin:/usr/bin:/bin"
-ExecStart=/root/.openclaw/workspace/projects/orchestrator/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
+WorkingDirectory=/root/.openclaw/workspace/vault/projects/orchestrator
+Environment="PATH=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin:/usr/bin:/bin"
+ExecStart=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
 Restart=always
 
 [Install]
@@ -504,9 +563,9 @@ After=network.target redis.service orchestrator-backend.service
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/root/.openclaw/workspace/projects/orchestrator
-Environment="PATH=/root/.openclaw/workspace/projects/orchestrator/venv/bin:/usr/bin:/bin"
-ExecStart=/root/.openclaw/workspace/projects/orchestrator/venv/bin/celery -A app.celery_app worker --loglevel=info -Q default,openclaw,github
+WorkingDirectory=/root/.openclaw/workspace/vault/projects/orchestrator
+Environment="PATH=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin:/usr/bin:/bin"
+ExecStart=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/celery -A app.celery_app worker --loglevel=info -Q default,openclaw,github
 Restart=always
 
 [Install]
@@ -530,7 +589,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        root /root/.openclaw/workspace/projects/orchestrator/frontend/dist;
+        root /root/.openclaw/workspace/vault/projects/orchestrator/frontend/dist;
         try_files $uri $uri/ /index.html;
     }
 
