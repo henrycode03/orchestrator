@@ -110,7 +110,11 @@ class OpenClawSessionService:
         )
 
         for candidate in dict.fromkeys(candidates):
-            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if (
+                candidate
+                and os.path.isfile(candidate)
+                and os.access(candidate, os.X_OK)
+            ):
                 return [candidate, *configured_args]
 
         node_executable = shutil.which("node")
