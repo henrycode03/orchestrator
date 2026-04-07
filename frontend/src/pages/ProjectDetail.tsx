@@ -97,7 +97,6 @@ function ProjectDetail() {
     if (!id) return;
     try {
       const response = await tasksAPI.getByProject(Number(id));
-      console.log('[TASKS_FETCH] loaded tasks', response.data);
       setTasks(response.data || []);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
@@ -206,19 +205,11 @@ function ProjectDetail() {
 
     setUpdatingTask(true);
     try {
-      const payload = {
-        title: editTitle.trim(),
-        description: editDescription,
-        steps: editSteps,
-      };
-      console.log('[TASK_UPDATE] submitting', { taskId, payload });
-
       const response = await tasksAPI.update(taskId, {
         title: editTitle.trim(),
         description: editDescription,
         steps: editSteps,
       });
-      console.log('[TASK_UPDATE] response', response.data);
 
       setTasks((currentTasks) =>
         currentTasks.map((task) =>
@@ -710,3 +701,4 @@ function ProjectDetail() {
 }
 
 export default ProjectDetail;
+
