@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import json
 import asyncio
+import logging
 from pydantic import BaseModel
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry
@@ -13,6 +14,8 @@ from app.schemas import TaskCreate, TaskUpdate, TaskResponse
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs, deduplicate_logs
+
+logger = logging.getLogger(__name__)
 
 
 # Pydantic models for overwrite protection
@@ -226,11 +229,96 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
         raise HTTPException(status_code=404, detail="Task not found")
 
     update_data = task_update.model_dump(exclude_unset=True)
+    print(
+        "[TASK_UPDATE]",
+        json.dumps(
+            {
+                "task_id": task_id,
+                "incoming": update_data,
+                "before": {
+                    "title": task.title,
+                    "description": task.description,
+                    "steps": task.steps,
+                    "status": (
+                        task.status.value
+                        if hasattr(task.status, "value")
+                        else task.status
+                    ),
+                },
+            },
+            default=str,
+        ),
+        flush=True,
+    )
+    logger.info(
+        "[TASK_UPDATE] task_id=%s incoming=%s before=%s",
+        task_id,
+        update_data,
+        {
+            "title": task.title,
+            "description": task.description,
+            "steps": task.steps,
+            "status": task.status.value if hasattr(task.status, "value") else task.status,
+        },
+    )
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No task fields provided")
+
+    editable_fields = {
+        "title",
+        "description",
+        "status",
+        "priority",
+        "steps",
+        "current_step",
+        "error_message",
+    }
+
     for field, value in update_data.items():
+        if field not in editable_fields:
+            continue
+        if field in {"description", "steps"} and value == "":
+            value = None
         setattr(task, field, value)
+
+    task.updated_at = datetime.utcnow()
 
     db.commit()
     db.refresh(task)
+    print(
+        "[TASK_UPDATE_AFTER]",
+        json.dumps(
+            {
+                "task_id": task_id,
+                "after": {
+                    "title": task.title,
+                    "description": task.description,
+                    "steps": task.steps,
+                    "status": (
+                        task.status.value
+                        if hasattr(task.status, "value")
+                        else task.status
+                    ),
+                    "updated_at": task.updated_at.isoformat()
+                    if task.updated_at
+                    else None,
+                },
+            },
+            default=str,
+        ),
+        flush=True,
+    )
+    logger.info(
+        "[TASK_UPDATE] task_id=%s after=%s",
+        task_id,
+        {
+            "title": task.title,
+            "description": task.description,
+            "steps": task.steps,
+            "status": task.status.value if hasattr(task.status, "value") else task.status,
+            "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        },
+    )
     return task
 
 
