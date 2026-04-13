@@ -369,14 +369,14 @@ Use Orchestrator when you want OpenClaw work to be observable and manageable ins
 Consider giving it a star — it helps others discover the project and keeps us motivated!
 
 <p align="center">
-  <a href="https://github.com/eric202209/orchestrator/stargazers">
-    <img src="https://img.shields.io/github/stars/eric202209/orchestrator?style=for-the-badge&logo=github&color=yellow" alt="GitHub Stars" />
+  <a href="https://github.com/henrycode03/orchestrator/stargazers">
+    <img src="https://img.shields.io/github/stars/henrycode03/orchestrator?style=for-the-badge&logo=github&color=yellow" alt="GitHub Stars" />
   </a>
 </p>
 
 <p align="center">
-  <a href="https://star-history.com/#eric202209/orchestrator&Date">
-    <img src="https://api.star-history.com/svg?repos=eric202209/orchestrator&type=Date" width="600" alt="Star History Chart" />
+  <a href="https://star-history.com/#henrycode03/orchestrator&Date">
+    <img src="https://api.star-history.com/svg?repos=henrycode03/orchestrator&type=Date" width="600" alt="Star History Chart" />
   </a>
 </p>
 
