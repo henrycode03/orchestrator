@@ -45,6 +45,8 @@ from app.auth import verify_token
 
 router = APIRouter()
 
+DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 900
+
 
 # In-memory WebSocket connections for log streaming
 active_websockets: dict = {}
@@ -232,6 +234,34 @@ def create_session(
     # This prevents double-commit delays
 
     return db_session
+
+
+@router.get("/sessions", response_model=List[SessionResponse])
+def list_sessions(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    project_id: Optional[int] = None,
+):
+    """List sessions across projects for authenticated dashboard use."""
+    query = db.query(SessionModel).filter(SessionModel.deleted_at.is_(None))
+
+    if project_id is not None:
+        query = query.filter(SessionModel.project_id == project_id)
+    if is_active is not None:
+        query = query.filter(SessionModel.is_active == is_active)
+    if status:
+        query = query.filter(SessionModel.status == status)
+
+    return (
+        query.order_by(SessionModel.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 @router.get("/projects/{project_id}/sessions", response_model=List[SessionResponse])
@@ -1171,7 +1201,7 @@ async def start_session(
                         session_id=session_id,
                         task_id=task.id,
                         prompt=task.description or task.title,
-                        timeout_seconds=300,
+                        timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
                     )
                     print(f"DEBUG: Celery task queued with ID: {result.id}")
                     queued_tasks.append(
@@ -1464,11 +1494,19 @@ async def resume_session(
 
     try:
         from app.services.checkpoint_service import CheckpointService
+        from app.services.checkpoint_service import CheckpointError
         from app.tasks.worker import execute_openclaw_task
         from app.models import Task
 
         checkpoint_service = CheckpointService(db)
-        checkpoint_data = checkpoint_service.load_checkpoint(session_id)
+        try:
+            checkpoint_data = checkpoint_service.load_checkpoint(session_id)
+        except CheckpointError as checkpoint_error:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No usable checkpoint found for session {session_id}: {checkpoint_error}",
+            ) from checkpoint_error
+
         checkpoint_name = checkpoint_data.get("checkpoint_name")
         context_data = checkpoint_data.get("context", {})
         task_id = context_data.get("task_id")
@@ -1495,7 +1533,7 @@ async def resume_session(
             session_id=session_id,
             task_id=task.id,
             prompt=prompt,
-            timeout_seconds=300,
+            timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
             resume_checkpoint_name=checkpoint_name,
         )
 
@@ -1528,6 +1566,8 @@ async def resume_session(
             "message": f"Session '{session.name}' resumed successfully",
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         db.add(
             LogEntry(

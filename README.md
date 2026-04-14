@@ -281,6 +281,35 @@ Command mapping:
 
 ---
 
+## Mobile Command Mode Setup
+
+If you want OpenClaw to handle short ClawMobile control commands reliably, configure both:
+
+- `AGENT.md` for command behavior and response style
+- `TOOLS.md` for API usage and command-to-endpoint mapping
+
+Recommended split:
+
+- `AGENT.md`: keep it short, action-oriented, and mobile-focused
+- `TOOLS.md`: keep it concrete, with auth, endpoints, and command mappings
+
+Example `AGENT.md` idea:
+
+```text
+For ClawMobile control commands, check live Orchestrator state first, then act with a brief mobile-friendly reply.
+```
+
+Recommended `TOOLS.md` coverage:
+
+- mobile API base URL and auth header
+- dashboard, project, task, session, and checkpoint endpoints
+- command mapping for `show blockers`, `open project`, `status session`, `resume session`, and `stop session`
+- rules for auth failures and non-200 responses
+
+This keeps mobile command mode predictable instead of relying on OpenClaw to guess what the user meant.
+
+---
+
 ## Main API Areas
 
 - Auth: register, login, refresh, current user
@@ -382,4 +411,4 @@ Consider giving it a star — it helps others discover the project and keeps us 
 
 ---
 
-**Last updated: 2026-04-13**
+**Last updated: 2026-04-14**

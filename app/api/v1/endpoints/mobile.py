@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_active_user
-from app.models import LogEntry, Project, Session as SessionModel, Task, TaskStatus, User
+from app.models import LogEntry, Project, Session as SessionModel, SessionTask, Task, TaskStatus, User
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.system_settings import get_effective_mobile_gateway_key
 
@@ -202,6 +202,7 @@ def get_mobile_connection_info(
             f"{mobile_base_url}/sessions/{{session_id}}/checkpoints",
             f"{mobile_base_url}/sessions/{{session_id}}/resume",
             f"{mobile_base_url}/sessions/{{session_id}}/stop",
+            f"{mobile_base_url}/tasks/{{task_id}}/retry",
         ],
     }
 
@@ -481,7 +482,64 @@ async def resume_mobile_session(
     )
 
 
+@router.post("/mobile/tasks/{task_id}/retry")
+def retry_mobile_task(
+    task_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Retry a failed or timed-out task through the mobile API."""
+    _log_mobile_request(request, "retry_task", task_id=task_id)
+    from app.api.v1.endpoints.tasks import retry_task
+
+    return retry_task(task_id=task_id, db=db)
+
+
 # ── Tasks ─────────────────────────────────────────────────────
+
+
+@router.get("/mobile/tasks/{task_id}")
+def get_mobile_task(
+    task_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Get task detail including linked session context."""
+    _log_mobile_request(request, "task_detail", task_id=task_id)
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    from app.api.v1.endpoints.tasks import _get_active_task_session
+
+    session_task = (
+        db.query(SessionModel.id, SessionModel.name)
+        .join(SessionTask, SessionTask.session_id == SessionModel.id)
+        .filter(SessionTask.task_id == task_id, SessionModel.deleted_at.is_(None))
+        .order_by(
+            SessionTask.started_at.desc().nullslast(),
+            SessionTask.completed_at.desc().nullslast(),
+            SessionTask.id.desc(),
+        )
+        .first()
+    )
+    active_session_id = _get_active_task_session(db, task_id)
+
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+        "project_id": task.project_id,
+        "priority": task.priority or 0,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        "error_message": task.error_message,
+        "session_id": session_task.id if session_task else None,
+        "session_name": session_task.name if session_task else None,
+        "has_active_session": bool(active_session_id),
+    }
 
 
 @router.get("/mobile/projects/{project_id}/tasks")

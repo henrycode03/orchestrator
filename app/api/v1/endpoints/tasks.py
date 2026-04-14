@@ -38,6 +38,7 @@ router = APIRouter()
 
 # Constants
 MAX_PROMPT_LENGTH = 50000  # Max prompt length to avoid context window overflow
+DEFAULT_TASK_RETRY_TIMEOUT_SECONDS = 900
 
 
 def _latest_session_success_for_task(
@@ -59,6 +60,109 @@ def _latest_session_success_for_task(
         .first()
     )
     return success_log is not None
+
+
+def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
+    from app.models import Session as SessionModel
+
+    active_session = (
+        db.query(SessionTask)
+        .join(SessionTask.session)
+        .filter(
+            SessionTask.task_id == task_id,
+            SessionModel.deleted_at.is_(None),
+            SessionModel.status.in_(["pending", "running", "paused", "active"]),
+        )
+        .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+        .first()
+    )
+    return active_session.session_id if active_session else None
+
+
+def _queue_task_retry(
+    db: Session,
+    task: Task,
+    timeout_seconds: int = DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
+) -> dict:
+    from app.models import Session as SessionModel
+    from app.tasks.worker import execute_openclaw_task
+
+    active_session_id = _get_active_task_session(db, task.id)
+    if active_session_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task already has an active session ({active_session_id}). Open the session to resume or stop it first.",
+        )
+
+    prompt = (task.description or task.title or "").strip()
+    if not prompt:
+        raise HTTPException(
+            status_code=400, detail="Task is missing a description or title to execute"
+        )
+
+    started_at = datetime.utcnow()
+    new_session = SessionModel(
+        name=f"{task.title}_session",
+        description=prompt[:500],
+        project_id=task.project_id,
+        status="running",
+        is_active=True,
+        started_at=started_at,
+        instance_id=f"orchestrator-task-{task.id}-{int(time.time())}",
+    )
+    db.add(new_session)
+    db.commit()
+    db.refresh(new_session)
+
+    session_task = SessionTask(
+        session_id=new_session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+        started_at=started_at,
+    )
+    db.add(session_task)
+
+    task.status = TaskStatus.RUNNING
+    task.error_message = None
+    task.started_at = started_at
+    task.completed_at = None
+    task.current_step = 0
+
+    result = execute_openclaw_task.delay(
+        session_id=new_session.id,
+        task_id=task.id,
+        prompt=prompt,
+        timeout_seconds=timeout_seconds,
+    )
+
+    db.add(
+        LogEntry(
+            session_id=new_session.id,
+            session_instance_id=new_session.instance_id,
+            task_id=task.id,
+            level="INFO",
+            message=f"Task queued: {task.title}",
+            log_metadata=json.dumps({"celery_task_id": result.id, "retry": True}),
+        )
+    )
+    db.add(
+        LogEntry(
+            session_id=new_session.id,
+            session_instance_id=new_session.instance_id,
+            task_id=task.id,
+            level="INFO",
+            message=f"Session started: {new_session.name}",
+        )
+    )
+    db.commit()
+
+    return {
+        "status": "started",
+        "task_id": task.id,
+        "session_id": new_session.id,
+        "celery_task_id": result.id,
+        "message": f"Task '{task.title}' restarted successfully",
+    }
 
 
 @router.get("/tasks", response_model=List[TaskResponse])
@@ -331,6 +435,22 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
             task_dict["session_id"] = session_id
 
     return task_dict
+
+
+@router.post("/tasks/{task_id}/retry")
+def retry_task(task_id: int, db: Session = Depends(get_db)):
+    """Queue a fresh execution for a failed or timed-out task."""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.status == TaskStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail="Task is already running. Open the linked session to monitor it.",
+        )
+
+    return _queue_task_retry(db, task)
 
 
 @router.put("/tasks/{task_id}", response_model=TaskResponse)

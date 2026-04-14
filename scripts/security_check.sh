@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Security Check Script
-# Checks all public (non-.notes/) files for sensitive information
+# Checks tracked source files for likely secret exposure before commit/publish
 
 set -e
 
@@ -19,15 +19,21 @@ ERRORS=0
 check_pattern() {
     local pattern=$1
     local description=$2
+    local exclude_file=${3:-}
     
     echo -n "Checking for $description... "
     
-    # Search in public files only (exclude .notes/, node_modules/, venv/)
-    result=$(find . -type f \( -name "*.md" -o -name "*.py" -o -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.json" \) \
+    # Search in source-like files only (exclude generated/runtime paths)
+    result=$(find . -type f \( -name "*.md" -o -name "*.py" -o -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.json" -o -name "*.sh" -o -name "*.yml" -o -name "*.yaml" \) \
         ! -path "./.notes/*" \
         ! -path "./node_modules/*" \
+        ! -path "./frontend/node_modules/*" \
         ! -path "./venv/*" \
+        ! -path "./dist/*" \
+        ! -path "./frontend/dist/*" \
+        ! -path "./build/*" \
         ! -path "./.git/*" \
+        ${exclude_file:+! -path "$exclude_file"} \
         -exec grep -lE "$pattern" {} \; 2>/dev/null | grep -v "^$" || true)
     
     if [ -n "$result" ]; then
@@ -45,6 +51,13 @@ check_pattern() {
 }
 
 # Check for API keys and tokens
+# Targeted patterns first to reduce false positives.
+check_pattern "VITE_[A-Z0-9_]*(KEY|TOKEN|SECRET)[A-Z0-9_]*\s*=.*" "Vite secret-like env vars (public by design)"
+check_pattern "MOBILE_GATEWAY_API_KEY\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded mobile gateway API keys"
+check_pattern "OPENCLAW_API_KEY\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded OpenClaw API keys"
+check_pattern "X-OpenClaw-API-Key['\"]?\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded X-OpenClaw-API-Key headers"
+check_pattern "Bearer\s+[A-Za-z0-9._-]{20,}" "hardcoded bearer tokens"
+check_pattern "[A-Fa-f0-9]{64}" "64-character hex strings (possible API keys)"
 check_pattern "[A-Za-z0-9]{32,}" "long alphanumeric strings (potential API keys)"
 check_pattern "sk-[A-Za-z0-9]{20,}" "sk- prefixed tokens (Stripe/OpenAI)"
 check_pattern "ghp_[A-Za-z0-9]{36}" "GitHub Personal Access Tokens"
@@ -63,9 +76,9 @@ check_pattern "192\.168\.\d+\.\d+" "192.168.x.x IP addresses (private networks)"
 check_pattern "10\.\d+\.\d+\.\d+" "10.x.x.x IP addresses (private networks)"
 
 # Check for credentials
-check_pattern "credential" "credential references"
-check_pattern "auth_token" "auth_token references"
-check_pattern "access_token" "access_token references"
+check_pattern "credential" "credential references" "./scripts/security_check.sh"
+check_pattern "auth_token" "auth_token references" "./scripts/security_check.sh"
+check_pattern "access_token" "access_token references" "./scripts/security_check.sh"
 
 echo ""
 echo "========================================"
@@ -79,6 +92,7 @@ else
     echo -e "${RED}⚠️  Found $ERRORS potential security issues!${NC}"
     echo ""
     echo "Review the files above and remove or sanitize sensitive information."
+    echo "If a secret was already committed, rotate it first, then rewrite git history."
     echo "Consider adding them to .gitignore if they're environment-specific."
     exit 1
 fi

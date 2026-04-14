@@ -267,6 +267,14 @@ export const tasksAPI = {
 
 // Sessions API
 export const sessionsAPI = {
+  getAll: (params?: {
+    status?: string;
+    is_active?: boolean;
+    project_id?: number;
+    skip?: number;
+    limit?: number;
+  }) => apiClient.get<Session[]>('/sessions', { params }),
+
   create: (data: { project_id: number; name: string; description?: string }) =>
     apiClient.post<Session>('/sessions', data),
 

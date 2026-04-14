@@ -1196,8 +1196,10 @@ def execute_openclaw_task(
                 project_context=f"Build project: {project_name_slug}",
             )
 
+            # Give each step a workable minimum budget so larger scaffold/build
+            # steps do not fail prematurely on otherwise healthy runs.
             step_timeout_seconds = max(
-                120, timeout_seconds // max(1, len(orchestration_state.plan))
+                240, timeout_seconds // max(1, len(orchestration_state.plan))
             )
 
             # Execute step
@@ -1267,7 +1269,7 @@ def execute_openclaw_task(
                 )
 
                 debug_result = asyncio.run(
-                    openclaw_service.execute_task(debug_prompt, timeout_seconds=120)
+                    openclaw_service.execute_task(debug_prompt, timeout_seconds=180)
                 )
 
                 # Parse debug result with enhanced error handling
@@ -1308,7 +1310,7 @@ def execute_openclaw_task(
 
                         revise_result = asyncio.run(
                             openclaw_service.execute_task(
-                                revise_prompt, timeout_seconds=120
+                                revise_prompt, timeout_seconds=180
                             )
                         )
 

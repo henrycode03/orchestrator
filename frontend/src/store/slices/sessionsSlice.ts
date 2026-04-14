@@ -1,21 +1,13 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
-import axios from 'axios';
 import { Session, SessionFilters } from '@/types';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
-const MOBILE_API_KEY = import.meta.env.VITE_MOBILE_API_KEY || 'REMOVED_SECRET';
+import { sessionsAPI } from '@/api/client';
 
 export const fetchSessions = createAsyncThunk<Session[], SessionFilters>(
   'sessions/fetch',
   async (filters = {}, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`${API_BASE}/mobile/sessions`, { 
-        params: filters,
-        headers: {
-          'X-OpenClaw-API-Key': MOBILE_API_KEY,
-        },
-      });
-      return response.data.sessions || [];
+      const response = await sessionsAPI.getAll(filters);
+      return response.data || [];
     } catch (error: unknown) {
       const axiosError = error as {
         response?: { data?: { message?: string } };
@@ -93,3 +85,4 @@ export const {
 } = sessionsSlice.actions;
 
 export default sessionsSlice.reducer;
+
