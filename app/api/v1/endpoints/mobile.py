@@ -199,6 +199,9 @@ def get_mobile_connection_info(
             f"{mobile_base_url}/projects/{{project_id}}/tasks",
             f"{mobile_base_url}/sessions",
             f"{mobile_base_url}/sessions/{{session_id}}/summary",
+            f"{mobile_base_url}/sessions/{{session_id}}/checkpoints",
+            f"{mobile_base_url}/sessions/{{session_id}}/resume",
+            f"{mobile_base_url}/sessions/{{session_id}}/stop",
         ],
     }
 
@@ -431,6 +434,53 @@ def get_session_summary(
     }
 
 
+@router.get("/mobile/sessions/{session_id}/checkpoints")
+async def list_mobile_session_checkpoints(
+    session_id: int, request: Request, db: Session = Depends(get_db)
+):
+    """List checkpoints for a session using mobile shared-key auth."""
+    _log_mobile_request(request, "session_checkpoints", session_id=session_id)
+    from app.api.v1.endpoints.sessions import list_session_checkpoints
+
+    return await list_session_checkpoints(session_id=session_id, db=db, current_user=None)
+
+
+@router.post("/mobile/sessions/{session_id}/stop")
+async def stop_mobile_session(
+    session_id: int,
+    request: Request,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Stop a session through the mobile API."""
+    _log_mobile_request(request, "stop_session", session_id=session_id, force=force)
+    from app.api.v1.endpoints.sessions import stop_session
+
+    return await stop_session(
+        session_id=session_id,
+        db=db,
+        current_user=None,
+        force=force,
+    )
+
+
+@router.post("/mobile/sessions/{session_id}/resume")
+async def resume_mobile_session(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Resume a stopped or paused session through the mobile API."""
+    _log_mobile_request(request, "resume_session", session_id=session_id)
+    from app.api.v1.endpoints.sessions import resume_session
+
+    return await resume_session(
+        session_id=session_id,
+        db=db,
+        current_user=None,
+    )
+
+
 # ── Tasks ─────────────────────────────────────────────────────
 
 
@@ -561,4 +611,3 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
             for log in recent_logs
         ],
     }
-

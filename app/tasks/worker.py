@@ -219,27 +219,145 @@ def _render_task_report(
 def _extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, Any]]]:
     """Accept common planning response wrappers and return the step list."""
 
-    if isinstance(parsed_planning_output, list):
+    def looks_like_single_step(candidate: Any) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+
+        step_like_keys = {
+            "step_number",
+            "description",
+            "commands",
+            "verification",
+            "rollback",
+            "expected_files",
+        }
+        return bool(step_like_keys.intersection(candidate.keys()))
+
+    def looks_like_plan_steps(candidate: Any) -> bool:
+        if not isinstance(candidate, list) or not candidate:
+            return False
+
+        required_hint_keys = {
+            "step_number",
+            "description",
+            "commands",
+            "verification",
+            "rollback",
+            "expected_files",
+        }
+        saw_step_like_item = False
+
+        for item in candidate:
+            if not isinstance(item, dict):
+                return False
+            if required_hint_keys.intersection(item.keys()):
+                saw_step_like_item = True
+
+        return saw_step_like_item
+
+    if looks_like_single_step(parsed_planning_output):
+        return [parsed_planning_output]
+
+    if looks_like_plan_steps(parsed_planning_output):
         return parsed_planning_output
+
+    if isinstance(parsed_planning_output, list):
+        for item in parsed_planning_output:
+            nested_plan = _extract_plan_steps(item)
+            if nested_plan is not None:
+                return nested_plan
+        return None
 
     if not isinstance(parsed_planning_output, dict):
         return None
 
-    for key in ("steps", "plan", "task_plan", "execution_plan"):
+    priority_keys = (
+        "steps",
+        "plan",
+        "task_plan",
+        "execution_plan",
+        "revised_plan",
+        "remaining_steps",
+        "workflow",
+        "items",
+    )
+    for key in priority_keys:
         candidate = parsed_planning_output.get(key)
-        if isinstance(candidate, list):
+        if looks_like_single_step(candidate):
+            return [candidate]
+        if looks_like_plan_steps(candidate):
             return candidate
 
     payloads = parsed_planning_output.get("payloads")
     if isinstance(payloads, list):
         for payload in payloads:
-            if isinstance(payload, dict):
-                for key in ("steps", "plan", "task_plan", "execution_plan"):
-                    candidate = payload.get(key)
-                    if isinstance(candidate, list):
-                        return candidate
+            nested_plan = _extract_plan_steps(payload)
+            if nested_plan is not None:
+                return nested_plan
+
+    for value in parsed_planning_output.values():
+        if looks_like_single_step(value):
+            return [value]
+        if looks_like_plan_steps(value):
+            return value
+
+    for value in parsed_planning_output.values():
+        if isinstance(value, (dict, list)):
+            nested_plan = _extract_plan_steps(value)
+            if nested_plan is not None:
+                return nested_plan
 
     return None
+
+
+def _extract_structured_text(value: Any) -> str:
+    """Recover human/model text from common OpenClaw payload shapes."""
+
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, list):
+        parts = [_extract_structured_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+
+    if not isinstance(value, dict):
+        return str(value)
+
+    for key in ("text", "output_text", "content_text"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    content = value.get("content")
+    if isinstance(content, list):
+        content_text = _extract_structured_text(content)
+        if content_text.strip():
+            return content_text
+    elif isinstance(content, str) and content.strip():
+        return content
+
+    message = value.get("message")
+    if isinstance(message, (dict, list, str)):
+        message_text = _extract_structured_text(message)
+        if message_text.strip():
+            return message_text
+
+    payloads = value.get("payloads")
+    if isinstance(payloads, list):
+        payload_text = _extract_structured_text(payloads)
+        if payload_text.strip():
+            return payload_text
+
+    for candidate in value.values():
+        if isinstance(candidate, (dict, list, str)):
+            nested_text = _extract_structured_text(candidate)
+            if nested_text.strip():
+                return nested_text
+
+    return json.dumps(value)
 
 
 def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
@@ -862,47 +980,18 @@ def execute_openclaw_task(
                     f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
                 )
 
-                # Handle different output formats from OpenClaw CLI
-                if isinstance(output_result, dict):
-                    # Format 1: OpenClaw CLI returns full JSON with "payloads" key
-                    if "payloads" in output_result:
-                        payloads = output_result.get("payloads", [])
-                        if isinstance(payloads, list) and len(payloads) > 0:
-                            first_payload = payloads[0]
-                            if isinstance(first_payload, dict):
-                                output_text = first_payload.get("text", "")
-                                # Debug: Log the extraction
-                                logger.info(
-                                    f"[ORCHESTRATION] Extracted 'text' from payload, length: {len(output_text)}, preview: {output_text[:100]}"
-                                )
-                            elif isinstance(first_payload, str):
-                                # Payload is already a string
-                                output_text = first_payload
-                                logger.info(
-                                    f"[ORCHESTRATION] Payload is string, length: {len(output_text)}"
-                                )
-                            else:
-                                # Unknown type, convert to string
-                                output_text = str(first_payload)
-                                logger.info(
-                                    f"[ORCHESTRATION] Payload is {type(first_payload)}, converted to string"
-                                )
-                        else:
-                            output_text = json.dumps(output_result)
-                            logger.info(
-                                "[ORCHESTRATION] Empty payloads, using full JSON"
-                            )
-                    # Format 2: Direct dict response
-                    else:
-                        output_text = json.dumps(output_result)
-                        logger.info("[ORCHESTRATION] Direct dict response")
+                output_text = _extract_structured_text(output_result)
+                if not output_text.strip() and isinstance(output_result, dict):
+                    output_text = json.dumps(output_result)
+                    logger.info(
+                        "[ORCHESTRATION] Structured text extraction empty; using full JSON"
+                    )
                 elif isinstance(output_result, str):
-                    # Format 3: Raw string response
-                    output_text = output_result
                     logger.info("[ORCHESTRATION] Raw string response")
                 else:
-                    output_text = str(output_result)
-                    logger.info(f"[ORCHESTRATION] Unknown type, converted to string")
+                    logger.info(
+                        f"[ORCHESTRATION] Structured text extracted from {type(output_result)}"
+                    )
 
                 logger.info(
                     f"[ORCHESTRATION] Final extracted text length: {len(output_text)}"
@@ -964,8 +1053,15 @@ def execute_openclaw_task(
                         task.current_step = 0
                         db.commit()
                     else:
+                        plan_shape = type(plan_data).__name__
+                        plan_keys = (
+                            sorted(plan_data.keys())
+                            if isinstance(plan_data, dict)
+                            else []
+                        )
                         raise ValueError(
-                            "Planning result is not a list of steps"
+                            "Planning result is not a recognized list of steps "
+                            f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                         )
                 else:
                     # Failed to parse after all strategies
