@@ -45,6 +45,36 @@ class TaskWorkspaceViolationError(ValueError):
     pass
 
 
+def _set_session_alert(
+    session: Optional[SessionModel],
+    level: Optional[str] = None,
+    message: Optional[str] = None,
+) -> None:
+    if not session:
+        return
+    session.last_alert_level = level
+    session.last_alert_message = message
+    session.last_alert_at = datetime.utcnow() if message else None
+
+
+def _get_next_pending_project_task(
+    db: Session, project_id: Optional[int]
+) -> Optional[Task]:
+    if not project_id:
+        return None
+    return (
+        db.query(Task)
+        .filter(Task.project_id == project_id, Task.status == TaskStatus.PENDING)
+        .order_by(
+            Task.plan_position.asc().nullslast(),
+            Task.priority.desc(),
+            Task.created_at.asc().nullslast(),
+            Task.id.asc(),
+        )
+        .first()
+    )
+
+
 def _strip_heredoc_bodies(command_text: str) -> str:
     """Replace heredoc bodies so shell validation only sees the outer command."""
 
@@ -721,6 +751,12 @@ def execute_openclaw_task(
                 metadata=metadata,
             )
 
+        execution_profile = (
+            getattr(task, "execution_profile", None)
+            or getattr(session, "default_execution_profile", None)
+            or "full_lifecycle"
+        )
+
         # Get the project associated with this session
         project = (
             db.query(Project).filter(Project.id == session.project_id).first()
@@ -930,6 +966,7 @@ def execute_openclaw_task(
                 project_context=project_context,
                 workspace_root=str(orchestration_state.workspace_root),
                 project_dir=str(orchestration_state.project_dir),
+                execution_profile=execution_profile,
             )
 
             # Planning often needs more time than the old 120 second cap,
@@ -1194,6 +1231,7 @@ def execute_openclaw_task(
                 expected_files=expected_files,
                 completed_steps_summary=orchestration_state.prior_results_summary(),
                 project_context=f"Build project: {project_name_slug}",
+                execution_profile=execution_profile,
             )
 
             # Give each step a workable minimum budget so larger scaffold/build
@@ -1402,6 +1440,7 @@ def execute_openclaw_task(
             changed_files=orchestration_state.changed_files,
             num_debug_attempts=len(orchestration_state.debug_attempts),
             final_status="success",
+            execution_profile=execution_profile,
         )
 
         summary_result = asyncio.run(
@@ -1418,11 +1457,19 @@ def execute_openclaw_task(
             session_task_link.status = TaskStatus.DONE
             session_task_link.completed_at = task.completed_at
 
-        # Update session status to stopped when task completes
+        _set_session_alert(session, None, None)
+
+        next_task = None
+        if session and session.execution_mode == "automatic":
+            next_task = _get_next_pending_project_task(db, session.project_id)
+
         if session:
-            session.status = "stopped"
-            session.is_active = False
-            session.completed_at = datetime.utcnow()
+            if next_task:
+                session.status = "running"
+                session.is_active = True
+            else:
+                session.status = "stopped"
+                session.is_active = False
 
         db.commit()
 
@@ -1434,6 +1481,54 @@ def execute_openclaw_task(
             f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps",
             metadata={"phase": "completed", "steps": len(orchestration_state.plan)},
         )
+
+        if session and next_task:
+            next_session_task_link = _get_latest_session_task_link(
+                db, session_id, next_task.id
+            )
+            if not next_session_task_link:
+                next_session_task_link = SessionTask(
+                    session_id=session_id,
+                    task_id=next_task.id,
+                    status=TaskStatus.RUNNING,
+                    started_at=datetime.utcnow(),
+                )
+                db.add(next_session_task_link)
+            else:
+                next_session_task_link.status = TaskStatus.RUNNING
+                next_session_task_link.started_at = datetime.utcnow()
+                next_session_task_link.completed_at = None
+
+            next_task.status = TaskStatus.RUNNING
+            next_task.started_at = datetime.utcnow()
+            next_task.completed_at = None
+            next_task.error_message = None
+            next_task.current_step = 0
+
+            db.add(
+                LogEntry(
+                    session_id=session_id,
+                    session_instance_id=session.instance_id,
+                    task_id=next_task.id,
+                    level="INFO",
+                    message=(
+                        f"[ORCHESTRATION] Auto-advancing to next task {next_task.id}: {next_task.title}"
+                    ),
+                    log_metadata=json.dumps(
+                        {
+                            "auto_advance": True,
+                            "plan_position": getattr(next_task, "plan_position", None),
+                        }
+                    ),
+                )
+            )
+            db.commit()
+            execute_openclaw_task.delay(
+                session_id=session_id,
+                task_id=next_task.id,
+                prompt=next_task.description or next_task.title,
+                timeout_seconds=900,
+            )
 
         # Generate and save task report
         try:
@@ -1494,11 +1589,16 @@ def execute_openclaw_task(
                 task.error_message += "\nDiagnosis: Empty response from AI agent"
                 task.error_message += "\nSuggested fix: Retry with more specific prompt"
 
-        # Update session status to stopped when task fails
+        alert_message = (
+            f"Task {task_id} failed in {session.execution_mode if session else 'session'} mode: {str(exc)}"
+            if session
+            else f"Task {task_id} failed: {str(exc)}"
+        )
+
         if session:
-            session.status = "stopped"
+            session.status = "paused"
             session.is_active = False
-            session.completed_at = datetime.utcnow()
+            _set_session_alert(session, "error", alert_message[:2000])
 
         if is_timeout:
             if task:
@@ -1534,6 +1634,25 @@ def execute_openclaw_task(
             )
 
         db.commit()
+
+        if session:
+            db.add(
+                LogEntry(
+                    session_id=session_id,
+                    session_instance_id=session.instance_id,
+                    task_id=task_id,
+                    level="ERROR",
+                    message=alert_message[:2000],
+                    log_metadata=json.dumps(
+                        {
+                            "alarm": True,
+                            "execution_mode": session.execution_mode,
+                            "task_id": task_id,
+                        }
+                    ),
+                )
+            )
+            db.commit()
 
         logger.error(f"[ORCHESTRATION] Task {task_id} failed: {str(exc)}")
         if is_timeout:

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, Task, Session } from '../types/api';
+import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
 import { 
   GitBranch, 
   FileText,
@@ -24,6 +25,7 @@ function ProjectDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeTab, setActiveTab] = useState<'sessions' | 'tasks' | 'planner'>('tasks');
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -444,7 +446,41 @@ function ProjectDetail() {
           </div>
         </div>
 
+        <div className="mb-8 flex flex-wrap gap-2">
+          {[
+            { key: 'tasks', label: 'Task List' },
+            { key: 'planner', label: 'Project Architect' },
+            { key: 'sessions', label: 'AI Sessions' },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key as 'sessions' | 'tasks' | 'planner')}
+              className={`rounded-xl px-4 py-2 text-sm font-medium transition-all ${
+                activeTab === tab.key
+                  ? 'bg-primary-500 text-white shadow-lg shadow-primary-500/20'
+                  : 'bg-slate-800/70 text-slate-300 hover:bg-slate-700/80 hover:text-white'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'planner' && (
+          <div className="mb-8">
+            <ProjectPlannerPanel
+              project={project}
+              onTasksCommitted={(createdTasks) => {
+                setTasks((currentTasks) => [...createdTasks, ...currentTasks]);
+                setActiveTab('tasks');
+              }}
+            />
+          </div>
+        )}
+
         {/* Sessions Section */}
+        {activeTab === 'sessions' && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold text-white flex items-center gap-2">
@@ -513,8 +549,10 @@ function ProjectDetail() {
             </div>
           )}
         </div>
+        )}
 
         {/* Tasks Section */}
+        {activeTab === 'tasks' && (
         <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold text-white">Tasks</h2>
@@ -587,6 +625,7 @@ function ProjectDetail() {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Create Task Modal */}

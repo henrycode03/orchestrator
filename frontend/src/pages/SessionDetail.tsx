@@ -392,19 +392,21 @@ export default function SessionDetail() {
       try {
         const currentSession = await sessionsAPI.getById(Number(sessionId));
         const currentStatus = currentSession.data.status;
+        setSession(currentSession.data);
+
+        if (currentSession.data.project_id) {
+          const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id);
+          setTasks(currentTasks.data || []);
+        }
         
         // If session changed to running/paused, connect WebSocket
         if ((currentStatus === 'running' || currentStatus === 'paused') && !wsRef.current) {
           console.log(`Session is now ${currentStatus}, connecting WebSocket...`);
           setupWebSocket(Number(sessionId));
         }
-        
-        // Update session state if changed
-        if (session?.status !== currentStatus) {
-          setSession(currentSession.data);
-          if (currentStatus === 'stopped' || currentStatus === 'paused') {
-            await loadCheckpointCount(Number(sessionId));
-          }
+
+        if (currentStatus === 'stopped' || currentStatus === 'paused') {
+          await loadCheckpointCount(Number(sessionId));
         }
       } catch (err) {
         console.warn('Status poll error:', err);
@@ -574,6 +576,64 @@ export default function SessionDetail() {
     }
   };
 
+  const refreshTasksForSession = useCallback(async () => {
+    if (!sessionId || !session) return;
+    try {
+      const [refreshRes, tasksRes, updatedSession] = await Promise.all([
+        sessionsAPI.refreshTasks(Number(sessionId)),
+        tasksAPI.getByProject(session.project_id),
+        sessionsAPI.getById(Number(sessionId)),
+      ]);
+      setTasks(tasksRes.data || []);
+      setSession(updatedSession.data);
+      if (refreshRes.data.queued_task) {
+        pushTimelineEvent(
+          `Queued next task: ${refreshRes.data.queued_task.task_name}`,
+          'INFO'
+        );
+      } else {
+        pushTimelineEvent('Session task state refreshed', 'INFO');
+      }
+    } catch (error) {
+      console.error('Failed to refresh session tasks:', error);
+      alert('Failed to refresh session tasks');
+    }
+  }, [pushTimelineEvent, session, sessionId]);
+
+  const handleExecuteTask = useCallback(async (task: Task) => {
+    if (!sessionId) return;
+    try {
+      await sessionsAPI.runTask(Number(sessionId), task.id);
+      pushTimelineEvent(`Queued task ${task.id}: ${task.title}`, 'INFO');
+      const [updatedSession, updatedTasks] = await Promise.all([
+        sessionsAPI.getById(Number(sessionId)),
+        tasksAPI.getByProject(task.project_id),
+      ]);
+      setSession(updatedSession.data);
+      setTasks(updatedTasks.data || []);
+      if (!wsRef.current) {
+        setupWebSocket(Number(sessionId));
+      }
+    } catch (error) {
+      console.error('Failed to run task manually:', error);
+      alert('Failed to queue the selected task');
+    }
+  }, [pushTimelineEvent, sessionId, setupWebSocket]);
+
+  const handleExecutionModeChange = useCallback(async (mode: 'automatic' | 'manual') => {
+    if (!sessionId || !session) return;
+    try {
+      const response = await sessionsAPI.update(Number(sessionId), {
+        execution_mode: mode,
+      });
+      setSession(response.data);
+      pushTimelineEvent(`Execution mode switched to ${mode}`, 'INFO');
+    } catch (error) {
+      console.error('Failed to update execution mode:', error);
+      alert('Failed to update execution mode');
+    }
+  }, [pushTimelineEvent, session, sessionId]);
+
   const getActionButtons = () => {
     if (!session) return null;
 
@@ -738,13 +798,20 @@ export default function SessionDetail() {
           <SessionTasksPanel
             actionButtons={getActionButtons()}
             formatDateTime={formatDateTime}
+            onExecuteTask={handleExecuteTask}
+            onRefreshTasks={refreshTasksForSession}
             session={session}
             tasks={tasks}
           />
         )}
 
         {activeTab === 'settings' && (
-          <SessionSettingsPanel formatDateTime={formatDateTime} session={session} />
+          <SessionSettingsPanel
+            formatDateTime={formatDateTime}
+            onModeChange={handleExecutionModeChange}
+            onRefreshTasks={refreshTasksForSession}
+            session={session}
+          />
         )}
       </div>
     </div>

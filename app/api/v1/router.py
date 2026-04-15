@@ -7,6 +7,7 @@ from app.api.v1.endpoints import (
     github,
     sessions,
     projects,
+    planner,
     users,
     mobile,
     resume,
@@ -61,6 +62,11 @@ api_router.include_router(
 api_router.include_router(
     projects.router,
     tags=["projects"],
+)
+
+api_router.include_router(
+    planner.router,
+    tags=["planner"],
 )
 
 api_router.include_router(

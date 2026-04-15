@@ -8,6 +8,15 @@ import {
   X,
   Settings
 } from 'lucide-react';
+import type { ExecutionProfile } from '../types/api';
+
+const executionProfiles: Array<{ value: ExecutionProfile; label: string; description: string }> = [
+  { value: 'full_lifecycle', label: 'Full Lifecycle', description: 'Plan, implement, verify, and summarize by default.' },
+  { value: 'execute_only', label: 'Execute Only', description: 'Bias toward implementation work with minimal planning overhead.' },
+  { value: 'test_only', label: 'Test Only', description: 'Focus on verification, tests, and failure reporting.' },
+  { value: 'debug_only', label: 'Debug Only', description: 'Reproduce, diagnose, fix, and verify issues.' },
+  { value: 'review_only', label: 'Review Only', description: 'Inspect and report findings without implementation-first behavior.' },
+];
 
 function NewSession() {
   const navigate = useNavigate();
@@ -16,6 +25,8 @@ function NewSession() {
   const [loading, setLoading] = useState(true);
   const [sessionName, setSessionName] = useState('');
   const [sessionDescription, setSessionDescription] = useState('');
+  const [executionMode, setExecutionMode] = useState<'automatic' | 'manual'>('automatic');
+  const [defaultExecutionProfile, setDefaultExecutionProfile] = useState<ExecutionProfile>('full_lifecycle');
   const [submitting, setSubmitting] = useState(false);
 
   const fetchProjects = useCallback(async () => {
@@ -70,6 +81,8 @@ function NewSession() {
         project_id: Number(projectId),
         name: sessionName,
         description: sessionDescription || undefined,
+        execution_mode: executionMode,
+        default_execution_profile: defaultExecutionProfile,
       });
       
       // Redirect to the new session
@@ -192,6 +205,55 @@ function NewSession() {
                 rows={4}
                 className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-2">
+                Execution Mode
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setExecutionMode('automatic')}
+                  className={`rounded-lg border px-4 py-3 text-left transition-colors ${
+                    executionMode === 'automatic'
+                      ? 'border-primary-500 bg-primary-500/10 text-white'
+                      : 'border-slate-700 bg-slate-900/50 text-slate-300 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="font-medium">Automatic</div>
+                  <div className="mt-1 text-xs text-slate-400">Follow task order and continue to the next pending task automatically.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExecutionMode('manual')}
+                  className={`rounded-lg border px-4 py-3 text-left transition-colors ${
+                    executionMode === 'manual'
+                      ? 'border-primary-500 bg-primary-500/10 text-white'
+                      : 'border-slate-700 bg-slate-900/50 text-slate-300 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="font-medium">Manual</div>
+                  <div className="mt-1 text-xs text-slate-400">Start the session, then choose each task yourself from the session task list.</div>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-2">
+                Default Task Profile
+              </label>
+              <select
+                value={defaultExecutionProfile}
+                onChange={(e) => setDefaultExecutionProfile(e.target.value as ExecutionProfile)}
+                className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+              >
+                {executionProfiles.map((profile) => (
+                  <option key={profile.value} value={profile.value}>
+                    {profile.label} - {profile.description}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Submit Button */}

@@ -11,11 +11,15 @@ export interface Project {
 export interface Task {
   id: number;
   project_id: number;
+  plan_id?: number | null;
   session_id?: number | null;
   title: string;
   description: string | null;
   status: TaskStatus;
+  execution_profile: ExecutionProfile;
   priority: number;
+  estimated_effort?: string | null;
+  plan_position?: number | null;
   steps: string | null;
   current_step: number;
   error_message: string | null;
@@ -27,6 +31,12 @@ export interface Task {
 }
 
 export type TaskStatus = 'pending' | 'running' | 'failed' | 'done' | 'cancelled';
+export type ExecutionProfile =
+  | 'full_lifecycle'
+  | 'execute_only'
+  | 'test_only'
+  | 'debug_only'
+  | 'review_only';
 
 export interface Session {
   id: number;
@@ -35,6 +45,11 @@ export interface Session {
   description: string | null;
   is_active: boolean;
   status: SessionStatus;
+  execution_mode: 'automatic' | 'manual';
+  default_execution_profile: ExecutionProfile;
+  last_alert_level?: string | null;
+  last_alert_message?: string | null;
+  last_alert_at?: string | null;
   session_key: string | null;
   started_at: string | null;
   stopped_at: string | null;
@@ -45,6 +60,28 @@ export interface Session {
   // Instance tracking for preventing ID reuse issues
   instance_id?: string | null;
   deleted_at?: string | null;
+}
+
+export interface Plan {
+  id: number;
+  project_id: number;
+  title: string;
+  source_brain: string;
+  requirement: string;
+  markdown: string;
+  status: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface PlannerTaskCandidate {
+  title: string;
+  description: string | null;
+  execution_profile: ExecutionProfile;
+  priority: number;
+  plan_position?: number | null;
+  estimated_effort?: string | null;
+  include?: boolean;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed';

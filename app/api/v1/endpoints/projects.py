@@ -5,9 +5,10 @@ from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
-from app.models import Project, Session as SessionModel, LogEntry, Task, SessionTask
+from app.models import Project, Session as SessionModel, LogEntry, Task, SessionTask, Plan
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
+from app.services.checkpoint_service import CheckpointService
 from app.config import settings
 
 router = APIRouter()
@@ -65,6 +66,16 @@ def purge_soft_deleted_projects(db: Session = Depends(get_db)):
 
     for project in old_deleted_projects:
         project_id = project.id
+        checkpoint_service = CheckpointService(db)
+        session_ids = [
+            session_id
+            for (session_id,) in db.query(SessionModel.id)
+            .filter(SessionModel.project_id == project_id)
+            .all()
+        ]
+        for session_id in session_ids:
+            checkpoint_service.delete_all_checkpoints(session_id)
+        checkpoint_service.cleanup_orphaned_checkpoints()
 
         # Delete all related data (cascade)
         # Delete session tasks first (foreign key to session)
@@ -83,6 +94,10 @@ def purge_soft_deleted_projects(db: Session = Depends(get_db)):
 
         # Delete all tasks in this project
         db.query(Task).filter(Task.project_id == project_id).delete(
+            synchronize_session=False
+        )
+
+        db.query(Plan).filter(Plan.project_id == project_id).delete(
             synchronize_session=False
         )
 
@@ -107,7 +122,11 @@ def purge_soft_deleted_projects(db: Session = Depends(get_db)):
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
 def get_project(project_id: int, db: Session = Depends(get_db)):
     """Get a specific project"""
-    project = db.query(Project).filter(Project.id == project_id).first()
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
@@ -118,7 +137,11 @@ def update_project(
     project_id: int, project_update: ProjectUpdate, db: Session = Depends(get_db)
 ):
     """Update a project"""
-    db_project = db.query(Project).filter(Project.id == project_id).first()
+    db_project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -142,7 +165,11 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     from app.models import Session, TaskCheckpoint
     from app.services.checkpoint_service import CheckpointService
 
-    db_project = db.query(Project).filter(Project.id == project_id).first()
+    db_project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -174,6 +201,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
         checkpoint_service = CheckpointService(db)
         for session_id in session_ids:
             checkpoint_service.delete_all_checkpoints(session_id)
+        checkpoint_service.cleanup_orphaned_checkpoints()
 
         db.query(LogEntry).filter(
             LogEntry.session_id.in_(session_ids)

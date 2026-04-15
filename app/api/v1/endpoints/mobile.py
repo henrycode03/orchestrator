@@ -449,8 +449,22 @@ def get_session_summary(
         "session_id": session_id,
         "name": session.name,
         "status": session.status,
+        "execution_mode": getattr(session, "execution_mode", "automatic"),
         "is_active": session.is_active,
         "started_at": session.started_at.isoformat() if session.started_at else None,
+        "active_alert": (
+            {
+                "level": getattr(session, "last_alert_level", None),
+                "message": getattr(session, "last_alert_message", None),
+                "at": (
+                    session.last_alert_at.isoformat()
+                    if getattr(session, "last_alert_at", None)
+                    else None
+                ),
+            }
+            if getattr(session, "last_alert_message", None)
+            else None
+        ),
         "task_progress": {
             "total": task_counts["total"],
             "pending": task_counts["pending"],
@@ -567,6 +581,7 @@ def get_mobile_task(
         "status": task.status.value if hasattr(task.status, "value") else str(task.status),
         "project_id": task.project_id,
         "priority": task.priority or 0,
+        "plan_position": getattr(task, "plan_position", None),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         "error_message": task.error_message,
@@ -602,7 +617,14 @@ def list_project_tasks(
         except KeyError:
             raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
 
-    tasks = query.order_by(Task.created_at.asc().nullslast(), Task.id.asc()).all()
+    tasks = (
+        query.order_by(
+            Task.plan_position.asc().nullslast(),
+            Task.priority.desc(),
+            Task.created_at.asc().nullslast(),
+            Task.id.asc(),
+        ).all()
+    )
 
     task_payload = []
     total_tasks = len(tasks)
@@ -633,6 +655,8 @@ def list_project_tasks(
                     t.status.value if hasattr(t.status, "value") else str(t.status)
                 ),
                 "priority": getattr(t, "priority", None),
+                "plan_position": getattr(t, "plan_position", None),
+                "error_message": getattr(t, "error_message", None),
                 "created_at": (
                     t.created_at.isoformat()
                     if hasattr(t, "created_at") and t.created_at
@@ -706,6 +730,16 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
 
     # Recent activity (last 5 log entries)
     recent_logs = db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(5).all()
+    alerted_sessions = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.deleted_at.is_(None),
+            SessionModel.last_alert_message.isnot(None),
+        )
+        .order_by(SessionModel.last_alert_at.desc().nullslast(), SessionModel.id.desc())
+        .limit(5)
+        .all()
+    )
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
@@ -729,6 +763,21 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
                 ),
             },
         },
+        "alerts": [
+            {
+                "session_id": session.id,
+                "project_id": session.project_id,
+                "session_name": session.name,
+                "level": session.last_alert_level,
+                "message": session.last_alert_message,
+                "at": (
+                    session.last_alert_at.isoformat()
+                    if session.last_alert_at
+                    else None
+                ),
+            }
+            for session in alerted_sessions
+        ],
         "recent_activity": [
             {
                 "level": log.level,

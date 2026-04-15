@@ -69,11 +69,38 @@ class CheckpointService:
         """Get the file path for a specific checkpoint"""
         return str(self.checkpoint_dir / f"session_{session_id}_{checkpoint_name}.json")
 
-    def _get_session_checkpoint_dir(self, session_id: int) -> str:
+    def _get_session_checkpoint_dir(self, session_id: int, create: bool = False) -> str:
         """Get the directory for all checkpoints of a session"""
         dir_path = self.checkpoint_dir / f"session_{session_id}"
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
+        if create:
+            Path(dir_path).mkdir(parents=True, exist_ok=True)
         return str(dir_path)
+
+    def _remove_tree(self, path: Path) -> tuple[int, int]:
+        """Remove a directory tree or a single file. Returns (files, dirs) removed."""
+        deleted_files = 0
+        deleted_dirs = 0
+
+        if not path.exists():
+            return deleted_files, deleted_dirs
+
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            return 1, 0
+
+        for child in sorted(path.rglob("*"), reverse=True):
+            if child.is_file():
+                child.unlink(missing_ok=True)
+                deleted_files += 1
+            elif child.is_dir():
+                child.rmdir()
+                deleted_dirs += 1
+
+        if path.exists():
+            path.rmdir()
+            deleted_dirs += 1
+
+        return deleted_files, deleted_dirs
 
     def _log_checkpoint(self, session_id: int, level: str, message: str):
         """Log checkpoint operation"""
@@ -243,7 +270,7 @@ class CheckpointService:
                     return
 
             # New format: checkpoints/session_{id}/*.json
-            session_dir = self._get_session_checkpoint_dir(session_id)
+            session_dir = self._get_session_checkpoint_dir(session_id, create=False)
             if os.path.exists(session_dir):
                 for filename in os.listdir(session_dir):
                     if filename.endswith(".json"):
@@ -296,7 +323,7 @@ class CheckpointService:
                     os.remove(candidate)
                     deleted = True
 
-            session_dir = Path(self._get_session_checkpoint_dir(session_id))
+            session_dir = Path(self._get_session_checkpoint_dir(session_id, create=False))
             if session_dir.exists():
                 for candidate in session_dir.glob("*.json"):
                     try:
@@ -348,20 +375,8 @@ class CheckpointService:
                     deleted_count += 1
 
                 # Remove any leftover nested artifacts, then the directory itself.
-                for child in sorted(session_dir.iterdir(), reverse=True):
-                    if child.is_file():
-                        child.unlink(missing_ok=True)
-                        deleted_count += 1
-                    elif child.is_dir():
-                        for nested in sorted(child.rglob("*"), reverse=True):
-                            if nested.is_file():
-                                nested.unlink(missing_ok=True)
-                                deleted_count += 1
-                            elif nested.is_dir():
-                                nested.rmdir()
-                        child.rmdir()
-                if session_dir.exists() and not any(session_dir.iterdir()):
-                    session_dir.rmdir()
+                removed_files, _ = self._remove_tree(session_dir)
+                deleted_count += removed_files
 
             if deleted_count:
                 self._log_checkpoint(
@@ -460,15 +475,9 @@ class CheckpointService:
                         candidate.unlink(missing_ok=True)
                         deleted_files += 1
                     elif candidate.is_dir():
-                        for nested in sorted(candidate.rglob("*"), reverse=True):
-                            if nested.is_file():
-                                nested.unlink(missing_ok=True)
-                                deleted_files += 1
-                            elif nested.is_dir():
-                                nested.rmdir()
-                        if candidate.exists():
-                            candidate.rmdir()
-                        deleted_dirs += 1
+                        removed_files, removed_dirs = self._remove_tree(candidate)
+                        deleted_files += removed_files
+                        deleted_dirs += removed_dirs
 
             if orphaned_session_ids:
                 self.db.add(
@@ -512,7 +521,7 @@ class CheckpointService:
             all_checkpoints = []
 
             # Search in subdirectory (new format): checkpoints/session_{id}/*.json
-            session_dir = self._get_session_checkpoint_dir(session_id)
+            session_dir = self._get_session_checkpoint_dir(session_id, create=False)
             if os.path.exists(session_dir):
                 for filename in os.listdir(session_dir):
                     if filename.endswith(".json"):

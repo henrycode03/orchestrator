@@ -112,6 +112,14 @@ export function SessionConnectionNotice({
           </p>
         </div>
       )}
+
+      {session.last_alert_message && (
+        <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 p-4">
+          <p className="text-sm text-amber-300">
+            Alert{session.last_alert_at ? ` • ${new Date(session.last_alert_at).toLocaleString()}` : ''}: {session.last_alert_message}
+          </p>
+        </div>
+      )}
     </>
   );
 }
@@ -135,6 +143,9 @@ export function SessionStats({
           Status
         </p>
         <p className="font-semibold capitalize text-white">{session.status}</p>
+        <p className="mt-1 text-xs uppercase tracking-wide text-slate-500">
+          {session.execution_mode} mode
+        </p>
       </div>
       <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
         <p className="mb-1 flex items-center gap-2 text-sm text-slate-400">
@@ -345,6 +356,8 @@ export function SessionLogsPanel({
 interface SessionTasksPanelProps {
   actionButtons: ReactNode;
   formatDateTime: (value?: string | null) => string;
+  onExecuteTask?: (task: Task) => void;
+  onRefreshTasks?: () => void;
   session: Session;
   tasks: Task[];
 }
@@ -352,6 +365,8 @@ interface SessionTasksPanelProps {
 export function SessionTasksPanel({
   actionButtons,
   formatDateTime,
+  onExecuteTask,
+  onRefreshTasks,
   session,
   tasks,
 }: SessionTasksPanelProps) {
@@ -360,8 +375,16 @@ export function SessionTasksPanel({
       {actionButtons && session.status !== 'running' && (
         <div className="mb-4 rounded-lg border border-blue-700/50 bg-blue-900/20 p-4">
           <p className="mb-2 text-sm text-blue-400">
-            Session is not running. Start the session to execute tasks automatically.
+            Session is not running. Start the session to execute tasks automatically or enter manual mode and run tasks one by one.
           </p>
+          {onRefreshTasks && (
+            <button
+              onClick={onRefreshTasks}
+              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-blue-700"
+            >
+              Refresh Task View
+            </button>
+          )}
         </div>
       )}
 
@@ -382,8 +405,24 @@ export function SessionTasksPanel({
             className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur transition-colors hover:border-slate-600"
           >
             <div className="mb-2 flex items-start justify-between">
-              <h3 className="font-semibold text-white">{task.title}</h3>
-              <StatusBadge status={task.status} size="sm" />
+              <div>
+                <h3 className="font-semibold text-white">{task.title}</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Order: {task.plan_position ?? 'manual'} • Priority: {task.priority ?? 0}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <StatusBadge status={task.status} size="sm" />
+                {onExecuteTask && (session.execution_mode === 'manual' || task.status === 'pending') && (
+                  <button
+                    onClick={() => onExecuteTask(task)}
+                    disabled={task.status === 'done' || task.status === 'running'}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Run Task
+                  </button>
+                )}
+              </div>
             </div>
             {task.description && (
               <p className="mt-1 text-sm text-slate-400">{task.description}</p>
@@ -414,15 +453,54 @@ export function SessionTasksPanel({
 
 interface SessionSettingsPanelProps {
   formatDateTime: (value?: string | null) => string;
+  onModeChange?: (mode: 'automatic' | 'manual') => void;
+  onRefreshTasks?: () => void;
   session: Session;
 }
 
 export function SessionSettingsPanel({
   formatDateTime,
+  onModeChange,
+  onRefreshTasks,
   session,
 }: SessionSettingsPanelProps) {
   return (
     <div className="space-y-4">
+      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+        <p className="mb-2 text-sm text-slate-400">Execution Mode</p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onModeChange?.('automatic')}
+            className={cn(
+              'rounded-lg px-3 py-2 text-sm transition-colors',
+              session.execution_mode === 'automatic'
+                ? 'bg-primary-600 text-white'
+                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+            )}
+          >
+            Automatic
+          </button>
+          <button
+            onClick={() => onModeChange?.('manual')}
+            className={cn(
+              'rounded-lg px-3 py-2 text-sm transition-colors',
+              session.execution_mode === 'manual'
+                ? 'bg-primary-600 text-white'
+                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+            )}
+          >
+            Manual
+          </button>
+          {onRefreshTasks && (
+            <button
+              onClick={onRefreshTasks}
+              className="ml-auto rounded-lg bg-slate-700 px-3 py-2 text-sm text-white transition-colors hover:bg-slate-600"
+            >
+              Refresh Tasks
+            </button>
+          )}
+        </div>
+      </div>
       <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
         <p className="mb-1 text-sm text-slate-400">Session ID</p>
         <p className="font-mono text-sm text-white">{session.id}</p>

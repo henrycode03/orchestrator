@@ -48,7 +48,9 @@ class ProjectResponse(ProjectBase):
 class TaskBase(BaseModel):
     title: str
     description: Optional[str] = None
+    execution_profile: Optional[str] = "full_lifecycle"
     priority: Optional[int] = 0
+    plan_position: Optional[int] = None
 
 
 class TaskCreate(TaskBase):
@@ -60,7 +62,9 @@ class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     status: Optional[TaskStatusEnum] = None
+    execution_profile: Optional[str] = None
     priority: Optional[int] = None
+    plan_position: Optional[int] = None
     steps: Optional[str] = None
     current_step: Optional[int] = None
     error_message: Optional[str] = None
@@ -69,7 +73,11 @@ class TaskUpdate(BaseModel):
 class TaskResponse(TaskBase):
     id: int
     project_id: int
+    plan_id: Optional[int] = None
     status: TaskStatusEnum
+    execution_profile: str = "full_lifecycle"
+    estimated_effort: Optional[str] = None
+    plan_position: Optional[int] = None
     steps: Optional[str] = None
     current_step: Optional[int] = 0
     error_message: Optional[str] = None
@@ -77,6 +85,31 @@ class TaskResponse(TaskBase):
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PlannerTaskCandidate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    execution_profile: str = "full_lifecycle"
+    priority: int = 0
+    plan_position: Optional[int] = None
+    estimated_effort: Optional[str] = None
+    include: bool = True
+
+
+class PlanResponse(BaseModel):
+    id: int
+    project_id: int
+    title: str
+    source_brain: str
+    requirement: str
+    markdown: str
+    status: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -90,6 +123,8 @@ class SessionBase(BaseModel):
 
 class SessionCreate(SessionBase):
     project_id: int
+    execution_mode: Optional[str] = "automatic"
+    default_execution_profile: Optional[str] = "full_lifecycle"
 
 
 class SessionUpdate(BaseModel):
@@ -97,13 +132,22 @@ class SessionUpdate(BaseModel):
     description: Optional[str] = None
     is_active: Optional[bool] = None
     status: Optional[str] = None
+    execution_mode: Optional[str] = None
+    default_execution_profile: Optional[str] = None
+    last_alert_level: Optional[str] = None
+    last_alert_message: Optional[str] = None
 
 
 class SessionResponse(SessionBase):
     id: int
     project_id: int
     status: str
+    execution_mode: str
+    default_execution_profile: str = "full_lifecycle"
     is_active: bool
+    last_alert_level: Optional[str] = None
+    last_alert_message: Optional[str] = None
+    last_alert_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     stopped_at: Optional[datetime] = None
     paused_at: Optional[datetime] = None

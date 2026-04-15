@@ -19,7 +19,17 @@ class TaskService:
 
     def get_project_tasks(self, project_id: int):
         """Get all tasks for a project"""
-        return self.db.query(Task).filter(Task.project_id == project_id).all()
+        return (
+            self.db.query(Task)
+            .filter(Task.project_id == project_id)
+            .order_by(
+                Task.plan_position.asc().nullslast(),
+                Task.priority.desc(),
+                Task.created_at.asc().nullslast(),
+                Task.id.asc(),
+            )
+            .all()
+        )
 
     def update_task_status(
         self, task_id: int, new_status: TaskStatus, error_message: str = None
@@ -59,7 +69,12 @@ class TaskService:
         return (
             self.db.query(Task)
             .filter(Task.project_id == project_id, Task.status == TaskStatus.PENDING)
-            .order_by(Task.priority.desc())
+            .order_by(
+                Task.plan_position.asc().nullslast(),
+                Task.priority.desc(),
+                Task.created_at.asc().nullslast(),
+                Task.id.asc(),
+            )
             .first()
         )
 

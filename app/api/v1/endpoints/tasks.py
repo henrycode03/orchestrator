@@ -106,6 +106,7 @@ def _queue_task_retry(
         description=prompt[:500],
         project_id=task.project_id,
         status="running",
+        default_execution_profile=getattr(task, "execution_profile", "full_lifecycle"),
         is_active=True,
         started_at=started_at,
         instance_id=f"orchestrator-task-{task.id}-{int(time.time())}",
@@ -214,6 +215,12 @@ def get_project_tasks(
     tasks = (
         db.query(Task)
         .filter(Task.project_id == project_id)
+        .order_by(
+            Task.plan_position.asc().nullslast(),
+            Task.priority.desc(),
+            Task.created_at.asc().nullslast(),
+            Task.id.asc(),
+        )
         .offset(skip)
         .limit(limit)
         .all()

@@ -85,7 +85,11 @@ def _ensure_task_workspace(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found for this session")
 
-    project = db.query(Project).filter(Project.id == session.project_id).first()
+    project = (
+        db.query(Project)
+        .filter(Project.id == session.project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -177,6 +181,140 @@ def _get_session_task_subfolder(db: Session, session: SessionModel) -> str:
             return workspace["task_subfolder"]
 
     return f"task_{session.id}"
+
+
+def _set_session_alert(
+    db: Session,
+    session: SessionModel,
+    level: Optional[str] = None,
+    message: Optional[str] = None,
+) -> None:
+    session.last_alert_level = level
+    session.last_alert_message = message
+    session.last_alert_at = datetime.utcnow() if message else None
+    db.flush()
+
+
+def _queue_task_for_session(
+    db: Session,
+    session: SessionModel,
+    task_id: int,
+    timeout_seconds: int = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    from app.models import Task
+    from app.tasks.worker import execute_openclaw_task
+
+    task = (
+        db.query(Task)
+        .filter(Task.id == task_id, Task.project_id == session.project_id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found for this session")
+
+    task_workspace = _ensure_task_workspace(db, session, task.id)
+    session_task_link = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id, SessionTask.task_id == task.id)
+        .first()
+    )
+    if not session_task_link:
+        session_task_link = SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=datetime.utcnow(),
+        )
+        db.add(session_task_link)
+    else:
+        session_task_link.status = TaskStatus.RUNNING
+        session_task_link.started_at = datetime.utcnow()
+        session_task_link.completed_at = None
+
+    task.status = TaskStatus.RUNNING
+    task.started_at = datetime.utcnow()
+    task.completed_at = None
+    task.error_message = None
+    task.current_step = 0
+
+    session.status = "running"
+    session.is_active = True
+    if not session.started_at:
+        session.started_at = datetime.utcnow()
+    _set_session_alert(db, session, None, None)
+
+    result = execute_openclaw_task.delay(
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description or task.title,
+        timeout_seconds=timeout_seconds,
+    )
+
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            task_id=task.id,
+            level="INFO",
+            message=f"Queued task {task.id}: {task.title}",
+            log_metadata=json.dumps(
+                {
+                    "celery_task_id": result.id,
+                    "task_workspace": task_workspace["workspace_path"],
+                    "plan_position": getattr(task, "plan_position", None),
+                    "execution_mode": session.execution_mode,
+                }
+            ),
+        )
+    )
+    db.commit()
+
+    return {
+        "task_id": task.id,
+        "task_name": task.title,
+        "celery_id": result.id,
+        "plan_position": getattr(task, "plan_position", None),
+    }
+
+
+def _maybe_queue_next_automatic_task(
+    db: Session,
+    session: SessionModel,
+    timeout_seconds: int = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+) -> Optional[Dict[str, Any]]:
+    from app.models import Task
+    from app.services.task_service import TaskService
+
+    if session.execution_mode != "automatic" or not session.project_id:
+        return None
+
+    running_task = (
+        db.query(Task)
+        .join(SessionTask, SessionTask.task_id == Task.id)
+        .filter(
+            SessionTask.session_id == session.id,
+            SessionTask.status == TaskStatus.RUNNING,
+            Task.status == TaskStatus.RUNNING,
+        )
+        .first()
+    )
+    if running_task:
+        return None
+
+    task_service = TaskService(db)
+    next_task = task_service.get_next_pending_task(session.project_id)
+    if not next_task:
+        session.status = "stopped"
+        session.is_active = False
+        db.commit()
+        return None
+
+    return _queue_task_for_session(
+        db=db,
+        session=session,
+        task_id=next_task.id,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _revoke_session_celery_tasks(
@@ -275,11 +413,18 @@ def get_project_sessions(
     """Get all sessions for a project with filtering"""
     from app.models import Project
 
-    project = db.query(Project).filter(Project.id == project_id).first()
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    query = db.query(SessionModel).filter(SessionModel.project_id == project_id)
+    query = db.query(SessionModel).filter(
+        SessionModel.project_id == project_id,
+        SessionModel.deleted_at.is_(None),
+    )
     if is_active is not None:
         query = query.filter(SessionModel.is_active == is_active)
 
@@ -294,7 +439,11 @@ def get_session(
     current_user=Depends(get_current_user),
 ):
     """Get a specific session with detailed information"""
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -326,11 +475,22 @@ def update_session(
     current_user=Depends(get_current_user),
 ):
     """Update a session"""
-    db_session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    db_session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
     if not db_session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     update_data = session_update.model_dump(exclude_unset=True)
+    if "execution_mode" in update_data and update_data["execution_mode"] not in {
+        "automatic",
+        "manual",
+    }:
+        raise HTTPException(
+            status_code=400, detail="execution_mode must be 'automatic' or 'manual'"
+        )
     for field, value in update_data.items():
         setattr(db_session, field, value)
 
@@ -349,6 +509,95 @@ def update_session(
     db.commit()
 
     return db_session
+
+
+@router.post("/sessions/{session_id}/refresh-tasks")
+def refresh_session_tasks(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Refresh a session against the latest project task list and queue the next task if applicable."""
+    from app.services.task_service import TaskService
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.project_id:
+        raise HTTPException(status_code=400, detail="Session is not linked to a project")
+
+    task_service = TaskService(db)
+    ordered_tasks = task_service.get_project_tasks(session.project_id)
+    counts = {
+        "total": len(ordered_tasks),
+        "pending": len([task for task in ordered_tasks if task.status == TaskStatus.PENDING]),
+        "running": len([task for task in ordered_tasks if task.status == TaskStatus.RUNNING]),
+        "done": len([task for task in ordered_tasks if task.status == TaskStatus.DONE]),
+        "failed": len([task for task in ordered_tasks if task.status == TaskStatus.FAILED]),
+    }
+
+    queued_task = None
+    if session.status == "running" and session.execution_mode == "automatic":
+        queued_task = _maybe_queue_next_automatic_task(db, session)
+
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            level="INFO",
+            message="Session tasks refreshed from project state",
+            log_metadata=json.dumps(
+                {
+                    "execution_mode": session.execution_mode,
+                    "counts": counts,
+                    "queued_task": queued_task,
+                }
+            ),
+        )
+    )
+    db.commit()
+
+    return {
+        "session_id": session.id,
+        "execution_mode": session.execution_mode,
+        "counts": counts,
+        "queued_task": queued_task,
+    }
+
+
+@router.post("/sessions/{session_id}/tasks/{task_id}/run")
+def run_session_task(
+    session_id: int,
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Queue a specific task for manual execution inside a session."""
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.instance_id:
+        session.instance_id = str(uuid.uuid4())
+        db.commit()
+        db.refresh(session)
+
+    queued = _queue_task_for_session(db=db, session=session, task_id=task_id)
+    return {
+        "status": "queued",
+        "session_id": session.id,
+        "execution_mode": session.execution_mode,
+        "queued_task": queued,
+    }
 
 
 @router.delete(
@@ -392,6 +641,7 @@ def delete_session(
 
     checkpoint_service = CheckpointService(db)
     deleted_checkpoints = checkpoint_service.delete_all_checkpoints(session_id)
+    orphan_cleanup = checkpoint_service.cleanup_orphaned_checkpoints()
 
     deleted_session_tasks = (
         db.query(SessionTask).filter(SessionTask.session_id == session_id).delete()
@@ -410,11 +660,12 @@ def delete_session(
     db.commit()
     logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
     logger.info(
-        "Deleted session %s artifacts: checkpoints=%s session_tasks=%s task_checkpoints=%s",
+        "Deleted session %s artifacts: checkpoints=%s session_tasks=%s task_checkpoints=%s orphan_cleanup=%s",
         session_id,
         deleted_checkpoints,
         deleted_session_tasks,
         deleted_task_checkpoints,
+        orphan_cleanup,
     )
 
     # Optional: Actually delete the session row if you want hard delete behavior
@@ -1124,12 +1375,13 @@ async def start_session(
         )
         session_key = await openclaw_service.create_openclaw_session(task_description)
 
-        # If session is linked to a project, queue all pending tasks
+        _set_session_alert(db, session, None, None)
+
+        # If session is linked to a project, optionally queue the next pending task
         print(f"DEBUG: session.project_id = {session.project_id}")
         if session.project_id:
             print(f"DEBUG: Found project_id {session.project_id}, queuing tasks...")
             from app.services.task_service import TaskService
-            from app.models import Task
 
             task_service = TaskService(db)
             project_tasks = task_service.get_project_tasks(session.project_id)
@@ -1188,42 +1440,45 @@ async def start_session(
                     db.commit()
                     pending_tasks = task_service.get_project_tasks(session.project_id)
 
-            # Queue all pending tasks for execution
             queued_tasks = []
-            for task in pending_tasks:
-                if task.status == TaskStatus.PENDING:
-                    # Update task status to running
-                    task_service.update_task_status(task.id, TaskStatus.RUNNING)
-
-                    # Queue the task for execution via Celery
-                    print(f"DEBUG: Queuing task {task.id}: {task.title}")
-                    result = execute_openclaw_task.delay(
-                        session_id=session_id,
-                        task_id=task.id,
-                        prompt=task.description or task.title,
-                        timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+            if session.execution_mode == "automatic":
+                next_task = task_service.get_next_pending_task(session.project_id)
+                if next_task:
+                    print(
+                        f"DEBUG: Queuing next automatic task {next_task.id}: {next_task.title}"
                     )
-                    print(f"DEBUG: Celery task queued with ID: {result.id}")
                     queued_tasks.append(
-                        {
-                            "task_id": task.id,
-                            "task_name": task.title,
-                            "celery_id": result.id,
-                        }
+                        _queue_task_for_session(
+                            db=db,
+                            session=session,
+                            task_id=next_task.id,
+                            timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+                        )
                     )
-                    print(f"DEBUG: Task queued successfully")
-
-                    # Log the task queue
+                else:
+                    session.status = "stopped"
+                    session.is_active = False
                     db.add(
                         LogEntry(
                             session_id=session_id,
                             session_instance_id=session_instance_id,
-                            task_id=task.id,
-                            level="INFO",
-                            message=f"Task queued: {task.title}",
-                            log_metadata=json.dumps({"celery_task_id": result.id}),
+                            level="WARN",
+                            message="No pending tasks were available for automatic execution",
                         )
                     )
+                    db.commit()
+            else:
+                session.status = "running"
+                session.is_active = True
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session_instance_id,
+                        level="INFO",
+                        message="Session started in manual mode. Use the session task list to choose the next task to run.",
+                    )
+                )
+                db.commit()
 
             if not queued_tasks:
                 task_status_summary = {
@@ -1253,9 +1508,13 @@ async def start_session(
             )
 
         # Update session state
-        session.is_active = True
         session.started_at = datetime.now(timezone.utc)
-        session.status = "running"
+        if session.execution_mode == "manual":
+            session.is_active = True
+            session.status = "running"
+        elif session.status != "stopped":
+            session.is_active = True
+            session.status = "running"
         db.commit()
 
         # Log the start with instance tracking

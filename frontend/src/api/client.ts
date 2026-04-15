@@ -3,6 +3,9 @@ import type {
   Project, 
   Task, 
   Session, 
+  ExecutionProfile,
+  Plan,
+  PlannerTaskCandidate,
   LogEntry, 
   SessionStatistics, 
   AuthTokens, 
@@ -178,6 +181,7 @@ export const projectsAPI = {
   delete: (id: number) => apiClient.delete(`/projects/${id}`),
 
   getSessions: (projectId: number) => apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
+  getPlans: (projectId: number) => apiClient.get<Plan[]>(`/projects/${projectId}/plans`),
 
   // Get logs for a project (filters by project_id, not session_id)
   getLogs: (
@@ -206,6 +210,41 @@ export const projectsAPI = {
       : `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream`;
     return new WebSocket(wsUrl);
   },
+};
+
+export const plannerAPI = {
+  generate: (data: { project_id: number; requirement: string; source_brain?: string }) =>
+    apiClient.post<{ plan: Plan; tasks_preview: PlannerTaskCandidate[] }>('/planner/generate', data),
+
+  parse: (markdown: string) =>
+    apiClient.post<{ tasks: PlannerTaskCandidate[] }>('/planner/parse', { markdown }),
+
+  batchCreateTasks: (
+    projectId: number,
+    data: {
+      markdown?: string;
+      plan_id?: number;
+      plan_title?: string;
+      requirement?: string;
+      source_brain?: string;
+      tasks: PlannerTaskCandidate[];
+    }
+  ) => apiClient.post<{ plan: Plan | null; tasks: Task[] }>(`/projects/${projectId}/batch-tasks`, data),
+
+  deletePlan: (projectId: number, planId: number) =>
+    apiClient.delete(`/projects/${projectId}/plans/${planId}`),
+
+  updatePlan: (
+    projectId: number,
+    planId: number,
+    data: {
+      title?: string;
+      requirement?: string;
+      markdown?: string;
+      source_brain?: string;
+      status?: string;
+    }
+  ) => apiClient.put<Plan>(`/projects/${projectId}/plans/${planId}`, data),
 };
 
 // Tasks API
@@ -275,7 +314,7 @@ export const sessionsAPI = {
     limit?: number;
   }) => apiClient.get<Session[]>('/sessions', { params }),
 
-  create: (data: { project_id: number; name: string; description?: string }) =>
+  create: (data: { project_id: number; name: string; description?: string; execution_mode?: 'automatic' | 'manual'; default_execution_profile?: ExecutionProfile }) =>
     apiClient.post<Session>('/sessions', data),
 
   getByProject: (projectId: number) => apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
@@ -299,6 +338,22 @@ export const sessionsAPI = {
   pause: (id: number) => apiClient.post(`/sessions/${id}/pause`),
 
   resume: (id: number) => apiClient.post(`/sessions/${id}/resume`),
+
+  refreshTasks: (id: number) =>
+    apiClient.post<{
+      session_id: number;
+      execution_mode: 'automatic' | 'manual';
+      counts: { total: number; pending: number; running: number; done: number; failed: number };
+      queued_task?: { task_id: number; task_name: string; celery_id: string; plan_position?: number | null } | null;
+    }>(`/sessions/${id}/refresh-tasks`),
+
+  runTask: (sessionId: number, taskId: number) =>
+    apiClient.post<{
+      status: string;
+      session_id: number;
+      execution_mode: 'automatic' | 'manual';
+      queued_task: { task_id: number; task_name: string; celery_id: string; plan_position?: number | null };
+    }>(`/sessions/${sessionId}/tasks/${taskId}/run`),
 
   // Overwrite protection endpoints
   checkOverwrites: (sessionId: number, data: { project_id: number; task_subfolder: string; planned_files?: string[] }) =>

@@ -12,6 +12,7 @@ from .projects import router as projects_router
 from .sessions import router as sessions_router
 from .tasks import router as tasks_router
 from .orchestrator import router as orchestrator_router
+from .planner import router as planner_router
 
 __all__ = [
     "auth_router",
@@ -24,6 +25,7 @@ __all__ = [
     "sessions_router",
     "tasks_router",
     "orchestrator_router",
+    "planner_router",
 ]
 
 

@@ -9,7 +9,8 @@ from app.config import settings
 from app.api.v1.router import api_router
 from app.api.v1.endpoints import auth
 from app.celery_app import celery_app
-from app.database import engine, init_db
+from app.database import engine, init_db, get_db_session
+from app.services.checkpoint_service import CheckpointService
 import logging
 from urllib.parse import urlparse
 
@@ -21,6 +22,26 @@ async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle"""
     # Startup
     init_db()
+    cleanup_db = None
+    try:
+        cleanup_db = get_db_session()
+        cleanup_result = CheckpointService(cleanup_db).cleanup_orphaned_checkpoints()
+        cleanup_db.commit()
+        if cleanup_result.get("orphaned_session_ids"):
+            logger.info(
+                "Checkpoint startup cleanup removed orphaned artifacts: sessions=%s files=%s dirs=%s",
+                cleanup_result.get("orphaned_session_ids"),
+                cleanup_result.get("deleted_files", 0),
+                cleanup_result.get("deleted_dirs", 0),
+            )
+    except Exception as exc:
+        logger.warning("Checkpoint startup cleanup skipped due to error: %s", exc)
+        if cleanup_db is not None:
+            cleanup_db.rollback()
+    finally:
+        if cleanup_db is not None:
+            cleanup_db.close()
+
     logger.info("=" * 50)
     logger.info("🚀 Orchestrator API starting up...")
     logger.info(f"Version: {settings.VERSION}")

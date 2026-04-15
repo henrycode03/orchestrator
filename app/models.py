@@ -41,6 +41,7 @@ class Project(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # Soft delete tracking
 
     tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
+    plans = relationship("Plan", back_populates="project", cascade="all, delete-orphan")
     sessions = relationship(
         "Session", back_populates="project", cascade="all, delete-orphan"
     )
@@ -54,10 +55,14 @@ class Task(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
+    execution_profile = Column(String(30), default="full_lifecycle")
     priority = Column(Integer, default=0)  # Higher = more important
+    plan_position = Column(Integer, nullable=True, index=True)
+    estimated_effort = Column(String(50), nullable=True)
     steps = Column(Text, nullable=True)  # JSON string of step-by-step plan
     current_step = Column(Integer, default=0)
     error_message = Column(Text, nullable=True)
@@ -69,6 +74,7 @@ class Task(Base):
     task_subfolder = Column(String(255), nullable=True)
 
     project = relationship("Project", back_populates="tasks")
+    plan = relationship("Plan", back_populates="tasks")
     sessions = relationship(
         "SessionTask", back_populates="task", cascade="all, delete-orphan"
     )
@@ -87,6 +93,8 @@ class Session(Base):
     status = Column(
         String(50), default="pending"
     )  # pending, running, paused, stopped, completed
+    execution_mode = Column(String(20), default="automatic")
+    default_execution_profile = Column(String(30), default="full_lifecycle")
     is_active = Column(Boolean, default=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     stopped_at = Column(DateTime(timezone=True), nullable=True)
@@ -96,6 +104,9 @@ class Session(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     # Soft delete tracking to prevent ID reuse issues
     deleted_at = Column(DateTime(timezone=True), nullable=True)
+    last_alert_level = Column(String(20), nullable=True)
+    last_alert_message = Column(Text, nullable=True)
+    last_alert_at = Column(DateTime(timezone=True), nullable=True)
     # Unique session instance identifier (changes on recreation)
     instance_id = Column(
         String(36), nullable=True, index=True
@@ -118,6 +129,23 @@ class Session(Base):
     conversation_history = relationship(
         "ConversationHistory", back_populates="session", cascade="all, delete-orphan"
     )
+
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    source_brain = Column(String(50), nullable=False, default="local")
+    requirement = Column(Text, nullable=False)
+    markdown = Column(Text, nullable=False)
+    status = Column(String(50), nullable=False, default="draft")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    project = relationship("Project", back_populates="plans")
+    tasks = relationship("Task", back_populates="plan")
 
 
 class SessionState(Base):

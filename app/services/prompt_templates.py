@@ -258,6 +258,8 @@ class PromptTemplates:
 
 **Task:** {task_description}
 
+**Execution Profile:** {execution_profile}
+
 **Context:** {project_context}
 
 **Workspace:**
@@ -298,6 +300,9 @@ class PromptTemplates:
 13. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
 14. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
 
+**Execution Profile Rules:**
+{execution_profile_rules}
+
 **Output (JSON ONLY):**
 [
   {{
@@ -316,6 +321,8 @@ class PromptTemplates:
     STEP_EXECUTION = """Execute this step.
 
 **Step:** {step_description}
+
+**Execution Profile:** {execution_profile}
 
 **Working Directory:** {project_dir}
 
@@ -352,6 +359,9 @@ class PromptTemplates:
 10. Do NOT use shell backgrounding such as `&`, `nohup`, `disown`, or long-lived dev servers unless the step explicitly requires process management
 11. Prefer direct interpreter invocations like `node file.js` or `python file.py`, not complex shell wrappers
 12. If verification needs a server, prefer a one-shot test command or explain that the provided verification command is not tool-safe instead of launching a background process
+
+**Execution Profile Rules:**
+{execution_profile_rules}
 
 **Output:** status, output, verification_output, files_changed, error_message
 """
@@ -445,6 +455,8 @@ class PromptTemplates:
     TASK_SUMMARY = """Summarize completed task.
 
 **Task:** {task_description}
+
+**Execution Profile:** {execution_profile}
 
 **Plan:** {plan_summary}
 
@@ -772,6 +784,7 @@ Examples:
         project_context: Optional[str] = None,
         workspace_root: Optional[str] = None,
         project_dir: Optional[str] = None,
+        execution_profile: str = "full_lifecycle",
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -802,6 +815,8 @@ Examples:
 
         context = {
             "task_description": task_description,
+            "execution_profile": execution_profile,
+            "execution_profile_rules": cls.describe_execution_profile(execution_profile),
             "project_context": project_context or "No additional context provided.",
             "workspace_root": ws_root,
             "project_dir": proj_dir,
@@ -820,6 +835,7 @@ Examples:
         expected_files: Optional[List[str]] = None,
         completed_steps_summary: Optional[str] = None,
         project_context: Optional[str] = None,
+        execution_profile: str = "full_lifecycle",
     ) -> str:
         """
         Build a prompt for step execution phase.
@@ -838,6 +854,8 @@ Examples:
         """
         context = {
             "step_description": step_description,
+            "execution_profile": execution_profile,
+            "execution_profile_rules": cls.describe_execution_profile(execution_profile),
             "project_dir": project_dir or "Current task workspace",
             "step_commands": "\n".join(f"- {cmd}" for cmd in step_commands),
             "verification_command": verification_command or "None provided",
@@ -1034,6 +1052,7 @@ Examples:
         changed_files: List[str],
         num_debug_attempts: int,
         final_status: str,
+        execution_profile: str = "full_lifecycle",
     ) -> str:
         """
         Build a prompt for task summary phase.
@@ -1053,6 +1072,7 @@ Examples:
 
         context = {
             "task_description": task_description,
+            "execution_profile": execution_profile,
             "plan_summary": plan_summary,
             "execution_results_summary": execution_results_summary,
             "changed_files": changed_files_text,
@@ -1062,3 +1082,30 @@ Examples:
 
         # Use the TASK_SUMMARY template
         return cls.TASK_SUMMARY.format(**context)
+
+    @classmethod
+    def describe_execution_profile(cls, execution_profile: str) -> str:
+        profile_rules = {
+            "full_lifecycle": [
+                "Plan, implement, verify, and summarize the task end-to-end.",
+                "Include testing or verification steps before considering the task complete.",
+            ],
+            "execute_only": [
+                "Focus on implementation work only; keep planning minimal and avoid broad architectural exploration.",
+                "Do not add extra review or test-only work unless explicitly required for safe completion.",
+            ],
+            "test_only": [
+                "Focus on validation, test creation, test execution, and reporting failures.",
+                "Do not implement product features unless a tiny fix is strictly required to make the test harness run.",
+            ],
+            "debug_only": [
+                "Prioritize reproduction, diagnosis, narrow fixes, and verification of the reported issue.",
+                "Avoid unrelated feature work or broad refactors.",
+            ],
+            "review_only": [
+                "Inspect, analyze, and report findings without changing code unless explicitly asked.",
+                "Prefer read-only commands and concise review output over implementation.",
+            ],
+        }
+        selected = profile_rules.get(execution_profile, profile_rules["full_lifecycle"])
+        return "\n".join(f"- {rule}" for rule in selected)

@@ -514,6 +514,11 @@ class OpenClawSessionService:
             planning_prompt = PromptTemplates.build_planning_prompt(
                 task_description=prompt,
                 project_context=project_context[:1500] if project_context else "",
+                execution_profile=(
+                    getattr(self.task_model, "execution_profile", None)
+                    or getattr(self.session_model, "default_execution_profile", None)
+                    or "full_lifecycle"
+                ),
             )
 
             # OPTIMIZATION: Increased timeout for planning (180s to avoid timeouts on complex tasks)
@@ -659,6 +664,11 @@ class OpenClawSessionService:
                 changed_files=orchestration_state.changed_files,
                 num_debug_attempts=len(orchestration_state.debug_attempts),
                 final_status="completed",
+                execution_profile=(
+                    getattr(self.task_model, "execution_profile", None)
+                    or getattr(self.session_model, "default_execution_profile", None)
+                    or "full_lifecycle"
+                ),
             )
 
             self._log_entry("INFO", "[ORCHESTRATION] Generating summary...")
@@ -732,6 +742,11 @@ class OpenClawSessionService:
                     completed_steps_summary=orchestration_state.prior_results_summary(),
                     project_context=(
                         self.session_model.description if self.session_model else ""
+                    ),
+                    execution_profile=(
+                        getattr(self.task_model, "execution_profile", None)
+                        or getattr(self.session_model, "default_execution_profile", None)
+                        or "full_lifecycle"
                     ),
                 )
 
