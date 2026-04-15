@@ -11,7 +11,8 @@ import {
   Trash2,
   Terminal,
   Activity,
-  Clock
+  Clock,
+  Plus
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState } from '../components/ui';
@@ -450,6 +451,13 @@ function ProjectDetail() {
               <Terminal className="h-5 w-5" />
               AI Sessions
             </h2>
+            <button
+              onClick={() => navigate(`/sessions/new?project_id=${id}`)}
+              className="bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all flex items-center gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              New Session
+            </button>
           </div>
 
           {sessions.length === 0 ? (
@@ -504,7 +512,16 @@ function ProjectDetail() {
 
         {/* Tasks Section */}
         <div>
-          <h2 className="text-xl font-semibold text-white mb-4">Tasks</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-white">Tasks</h2>
+            <button
+              onClick={() => setShowCreateTask(true)}
+              className="bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all flex items-center gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              Add Task
+            </button>
+          </div>
           
           {tasks.length === 0 ? (
             <EmptyState
