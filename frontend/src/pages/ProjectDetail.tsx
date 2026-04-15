@@ -471,20 +471,24 @@ function ProjectDetail() {
               }}
             />
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               {sessions.map((session) => (
                 <div key={session.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-slate-600 transition-all">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-4 flex-1">
-                      <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10 mt-1">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex min-w-0 items-start gap-4 flex-1">
+                      <div className="mt-1 rounded-lg bg-blue-400/10 p-2 text-blue-400">
                         <Terminal className="h-5 w-5" />
                       </div>
-                      <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-white mb-2">{session.name}</h3>
+                      <div className="min-w-0 flex-1">
+                        <h3 className="mb-2 break-words text-lg font-semibold text-white">
+                          {session.name}
+                        </h3>
                         {session.description && (
-                          <p className="text-sm text-slate-400 mb-3">{session.description}</p>
+                          <p className="mb-3 break-words text-sm text-slate-400">
+                            {session.description}
+                          </p>
                         )}
-                        <div className="flex items-center gap-4 text-sm text-slate-500">
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-500">
                           <span className="flex items-center gap-1">
                             <Clock className="h-3 w-3" />
                             {formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}
@@ -493,7 +497,7 @@ function ProjectDetail() {
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center justify-end gap-2 self-end sm:self-start">
                       <StatusBadge status={session.status} size="sm" />
                       <button
                         onClick={() => handleDeleteSession(session.id)}
