@@ -95,7 +95,7 @@ export function ProjectPlannerPanel({
 
   useEffect(() => {
     loadPlans()
-  }, [project.id])
+  }, [project.id, loadPlans])
 
   const handleGenerate = async () => {
     if (!requirement.trim()) {
@@ -263,7 +263,7 @@ export function ProjectPlannerPanel({
 
     if (/^##\s+Task List\s*$/m.test(markdown)) {
       return markdown.replace(
-        /^##\s+Task List\s*$[\s\S]*?(?=^##\s+|\Z)/m,
+        /^##\s+Task List\s*$[\s\S]*?(?=^##\s+|$)/m,
         `## Task List\n${taskLines.join('\n')}\n`
       ).trim()
     }
