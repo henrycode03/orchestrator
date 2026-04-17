@@ -34,6 +34,30 @@ def _ensure_schema_updates():
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
 
+    if "projects" in table_names:
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("projects")
+        }
+        statements = []
+
+        if "github_url" not in existing_columns:
+            statements.append("ALTER TABLE projects ADD COLUMN github_url VARCHAR(512)")
+        if "branch" not in existing_columns:
+            statements.append(
+                "ALTER TABLE projects ADD COLUMN branch VARCHAR(255) DEFAULT 'main'"
+            )
+        if "workspace_path" not in existing_columns:
+            statements.append(
+                "ALTER TABLE projects ADD COLUMN workspace_path VARCHAR(512)"
+            )
+        if "deleted_at" not in existing_columns:
+            statements.append("ALTER TABLE projects ADD COLUMN deleted_at DATETIME")
+
+        if statements:
+            with engine.begin() as connection:
+                for statement in statements:
+                    connection.execute(text(statement))
+
     if "tasks" in table_names:
         existing_columns = {column["name"] for column in inspector.get_columns("tasks")}
         statements = []
@@ -58,6 +82,16 @@ def _ensure_schema_updates():
             statements.append("ALTER TABLE tasks ADD COLUMN promotion_note TEXT")
         if "promoted_at" not in existing_columns:
             statements.append("ALTER TABLE tasks ADD COLUMN promoted_at DATETIME")
+        if "task_subfolder" not in existing_columns:
+            statements.append(
+                "ALTER TABLE tasks ADD COLUMN task_subfolder VARCHAR(255)"
+            )
+        if "started_at" not in existing_columns:
+            statements.append("ALTER TABLE tasks ADD COLUMN started_at DATETIME")
+        if "completed_at" not in existing_columns:
+            statements.append("ALTER TABLE tasks ADD COLUMN completed_at DATETIME")
+        if "updated_at" not in existing_columns:
+            statements.append("ALTER TABLE tasks ADD COLUMN updated_at DATETIME")
 
         if statements:
             with engine.begin() as connection:
@@ -86,6 +120,37 @@ def _ensure_schema_updates():
             statements.append("ALTER TABLE sessions ADD COLUMN last_alert_message TEXT")
         if "last_alert_at" not in existing_columns:
             statements.append("ALTER TABLE sessions ADD COLUMN last_alert_at DATETIME")
+        if "deleted_at" not in existing_columns:
+            statements.append("ALTER TABLE sessions ADD COLUMN deleted_at DATETIME")
+        if "instance_id" not in existing_columns:
+            statements.append("ALTER TABLE sessions ADD COLUMN instance_id VARCHAR(36)")
+        if "paused_at" not in existing_columns:
+            statements.append("ALTER TABLE sessions ADD COLUMN paused_at DATETIME")
+        if "resumed_at" not in existing_columns:
+            statements.append("ALTER TABLE sessions ADD COLUMN resumed_at DATETIME")
+        if "stopped_at" not in existing_columns:
+            statements.append("ALTER TABLE sessions ADD COLUMN stopped_at DATETIME")
+        if "updated_at" not in existing_columns:
+            statements.append("ALTER TABLE sessions ADD COLUMN updated_at DATETIME")
+
+        if statements:
+            with engine.begin() as connection:
+                for statement in statements:
+                    connection.execute(text(statement))
+
+    if "log_entries" in table_names:
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("log_entries")
+        }
+        statements = []
+
+        if "log_metadata" not in existing_columns and "metadata" in existing_columns:
+            # Older installs may still use the reserved-name column.
+            statements.append("ALTER TABLE log_entries ADD COLUMN log_metadata TEXT")
+        if "session_instance_id" not in existing_columns:
+            statements.append(
+                "ALTER TABLE log_entries ADD COLUMN session_instance_id VARCHAR(36)"
+            )
 
         if statements:
             with engine.begin() as connection:

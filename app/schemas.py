@@ -90,6 +90,8 @@ class TaskResponse(TaskBase):
     workspace_status: Optional[str] = "isolated"
     promotion_note: Optional[str] = None
     promoted_at: Optional[datetime] = None
+    task_subfolder: Optional[str] = None
+    session_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None

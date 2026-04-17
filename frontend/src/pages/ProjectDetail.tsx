@@ -54,7 +54,6 @@ function ProjectDetail() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    console.log('🔍 ProjectDetail useEffect triggered, id:', id);
     setError(null);
     if (!id) {
       setError('Invalid project ID');
@@ -64,7 +63,6 @@ function ProjectDetail() {
     
     const loadProjectData = async () => {
       try {
-        console.log('📡 Fetching project data for ID:', id);
         // Fetch project, tasks, and sessions in parallel
         const [projectRes, tasksRes, sessionsRes] = await Promise.all([
           projectsAPI.getById(Number(id)),
@@ -73,7 +71,6 @@ function ProjectDetail() {
         ]);
         const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
         
-        console.log('✅ Data loaded successfully');
         setProject(projectRes.data);
         setTasks(tasksRes.data || []);
         setSessions(sessionsRes.data || []);
@@ -195,20 +192,11 @@ function ProjectDetail() {
   const generateStepsFromDescription = async (description: string) => {
     setGeneratingSteps(true);
     try {
-      // Use OpenClaw AI to generate steps (uses LOCALHOST from .env)
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/generate-steps`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          task_name: taskTitle || 'Task',
-          description: description,
-        }),
+      const response = await sessionsAPI.generateSteps({
+        task_name: taskTitle || 'Task',
+        description,
       });
-      
-      if (!response.ok) throw new Error('Failed to generate steps');
-      
-      const data = await response.json();
-      setTaskSteps(JSON.stringify(data, null, 2));
+      setTaskSteps(JSON.stringify(response.data, null, 2));
     } catch (error) {
       console.error('Failed to generate steps:', error);
       alert('Failed to auto-generate steps. You can manually edit the JSON below.');

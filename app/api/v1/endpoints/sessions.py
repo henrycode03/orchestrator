@@ -64,6 +64,27 @@ def _slugify_task_name(name: str) -> str:
     return slug or "task"
 
 
+def _ensure_unique_session_name(
+    db: Session, project_id: int, desired_name: str, session_id: Optional[int] = None
+) -> str:
+    """Generate a session name that stays unique even with soft-deleted rows."""
+    base_name = (desired_name or "session").strip() or "session"
+    candidate = base_name
+    suffix = 2
+    while True:
+        query = db.query(SessionModel).filter(
+            SessionModel.project_id == project_id,
+            SessionModel.name == candidate,
+        )
+        if session_id is not None:
+            query = query.filter(SessionModel.id != session_id)
+        existing = query.first()
+        if not existing:
+            return candidate
+        candidate = f"{base_name}-{suffix}"
+        suffix += 1
+
+
 def _build_task_subfolder_name(title: str, task_id: int) -> str:
     slug = _slugify_task_name(title)
     return f"task-{slug}" if slug else f"task-{task_id}"
@@ -397,16 +418,17 @@ def create_session(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    db_session = SessionModel(**session.model_dump())
+    session_data = session.model_dump()
+    session_data["name"] = _ensure_unique_session_name(
+        db, session.project_id, session_data.get("name") or "session"
+    )
+    db_session = SessionModel(**session_data)
     db_session.is_active = True  # Session is active when created
     db_session.instance_id = str(
         uuid.uuid4()
     )  # Generate unique instance ID immediately
     db.add(db_session)
-
-    # Commit session creation
-    db.commit()
-    db.refresh(db_session)
+    db.flush()
 
     # Log session creation (single commit with session)
     db.add(
@@ -417,8 +439,8 @@ def create_session(
             log_metadata=json.dumps({"project_id": session.project_id}),
         )
     )
-    # Don't commit here - let the next operation handle it
-    # This prevents double-commit delays
+    db.commit()
+    db.refresh(db_session)
 
     return db_session
 
@@ -1434,27 +1456,60 @@ async def start_session(
         _set_session_alert(db, session, None, None)
 
         # If session is linked to a project, optionally queue the next pending task
-        print(f"DEBUG: session.project_id = {session.project_id}")
         if session.project_id:
-            print(f"DEBUG: Found project_id {session.project_id}, queuing tasks...")
             from app.services.task_service import TaskService
 
             task_service = TaskService(db)
             project_tasks = task_service.get_project_tasks(session.project_id)
-            print(f"DEBUG: Found {len(project_tasks)} tasks for project")
 
             # Recover stale task states from an older interrupted session run.
             # If the session is being restarted and no session is currently active,
             # tasks left in RUNNING should become PENDING so they can be re-queued.
-            stale_running_tasks = [
-                task for task in project_tasks if task.status == TaskStatus.RUNNING
-            ]
-            for task in stale_running_tasks:
+            stale_running_links = (
+                db.query(SessionTask)
+                .filter(
+                    SessionTask.session_id == session_id,
+                    SessionTask.status == TaskStatus.RUNNING,
+                )
+                .all()
+            )
+            stale_running_tasks = []
+            for link in stale_running_links:
+                task = next(
+                    (
+                        candidate
+                        for candidate in project_tasks
+                        if candidate.id == link.task_id
+                    ),
+                    None,
+                )
+                if not task:
+                    continue
+
+                other_active_link = (
+                    db.query(SessionTask)
+                    .join(SessionModel, SessionTask.session_id == SessionModel.id)
+                    .filter(
+                        SessionTask.task_id == task.id,
+                        SessionTask.session_id != session_id,
+                        SessionTask.status == TaskStatus.RUNNING,
+                        SessionModel.deleted_at.is_(None),
+                        SessionModel.status.in_(["pending", "running", "active"]),
+                    )
+                    .first()
+                )
+                if other_active_link:
+                    continue
+
                 task.status = TaskStatus.PENDING
                 task.error_message = None
                 task.started_at = None
                 task.completed_at = None
                 task.current_step = 0
+                link.status = TaskStatus.PENDING
+                link.started_at = None
+                link.completed_at = None
+                stale_running_tasks.append(task)
             if stale_running_tasks:
                 db.add(
                     LogEntry(
@@ -1500,9 +1555,6 @@ async def start_session(
             if session.execution_mode == "automatic":
                 next_task = task_service.get_next_pending_task(session.project_id)
                 if next_task:
-                    print(
-                        f"DEBUG: Queuing next automatic task {next_task.id}: {next_task.title}"
-                    )
                     queued_tasks.append(
                         _queue_task_for_session(
                             db=db,

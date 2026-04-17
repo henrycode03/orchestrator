@@ -480,6 +480,9 @@ export const sessionsAPI = {
   execute: (id: number, data: { task: string; timeout_seconds?: number; task_id?: number }) =>
     apiClient.post(`/sessions/${id}/execute`, data),
 
+  generateSteps: (data: { task_name: string; description: string }) =>
+    apiClient.post<Array<{ title: string; description: string }>>('/generate-steps', data),
+
   getLogs: (id: number) => apiClient.get<LogEntry[]>(`/sessions/${id}/logs`),
 
   getTools: (id: number) => apiClient.get<Array<{ id: number; tool_name: string; parameters: string; result: string; executed_at: string }>>(`/sessions/${id}/tools`),
@@ -535,7 +538,6 @@ export const sessionsAPI = {
     });
   },
 
-  delete: (id: number) => apiClient.delete(`/sessions/${id}`),
 };
 
 export default apiClient;

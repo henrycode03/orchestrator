@@ -42,6 +42,16 @@ MAX_PROMPT_LENGTH = 50000  # Max prompt length to avoid context window overflow
 DEFAULT_TASK_RETRY_TIMEOUT_SECONDS = 1800
 
 
+def _resolve_task_subfolder_name(task: Task) -> str:
+    if getattr(task, "task_subfolder", None):
+        return str(task.task_subfolder)
+
+    title = (task.title or "").strip().lower()
+    slug = "".join(char if char.isalnum() else "-" for char in title)
+    slug = "-".join(part for part in slug.split("-") if part)
+    return f"task-{slug}" if slug else f"task-{task.id}"
+
+
 def _latest_session_success_for_task(
     db: Session, task_id: int, session_id: Optional[int]
 ) -> bool:
@@ -87,6 +97,7 @@ def _queue_task_retry(
     timeout_seconds: int = DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
 ) -> dict:
     from app.models import Session as SessionModel
+    from app.api.v1.endpoints.sessions import _ensure_unique_session_name
     from app.tasks.worker import execute_openclaw_task
     from app.services.task_service import TaskService
 
@@ -119,7 +130,7 @@ def _queue_task_retry(
 
     started_at = datetime.utcnow()
     new_session = SessionModel(
-        name=f"{task.title}_session",
+        name=_ensure_unique_session_name(db, task.project_id, f"{task.title}_session"),
         description=prompt[:500],
         project_id=task.project_id,
         status="running",
@@ -285,7 +296,7 @@ async def execute_task_with_openclaw(
         try:
             overwrite_result = protection.check_and_warn(
                 project_id=task.project.id,
-                task_subfolder=f"task_{task_id}",  # Task subfolder format
+                task_subfolder=_resolve_task_subfolder_name(task),
                 planned_files=[],  # We don't know planned files yet
                 action="warn",  # Show warning but allow proceed
             )
@@ -337,7 +348,7 @@ async def execute_task_with_openclaw(
             protection = OverwriteProtectionService(db)
             result = protection.check_and_warn(
                 project_id=task.project.id,
-                task_subfolder=f"task_{task_id}",
+                task_subfolder=_resolve_task_subfolder_name(task),
                 action="warn",
             )
 
@@ -365,11 +376,10 @@ async def execute_task_with_openclaw(
         # Update task status
         if result["status"] == "completed":
             task.status = TaskStatus.DONE
-            task.output = result.get("output", "")[:10000]  # Limit output size
+            task.error_message = None
         else:
             task.status = TaskStatus.FAILED
-            task.output = result.get("output", "")[:10000]
-            task.error = result.get("error", "Unknown error")
+            task.error_message = result.get("error", "Unknown error")
 
         db.commit()
         db.refresh(task)
@@ -391,16 +401,12 @@ async def execute_task_with_openclaw(
         # Update task with enhanced error information
         if task:
             task.status = TaskStatus.FAILED
-            task.error = error_msg
             task.error_message = f"{error_msg}\nRecommended action: {recovery_plan.get('recommended_action', 'manual_intervention')}"
             db.commit()
-        task.status = TaskStatus.FAILED
-        task.error = error_msg
-        db.commit()
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-@router.get("/tasks/{task_id}")
+@router.get("/tasks/{task_id}", response_model=TaskResponse)
 def get_task(task_id: int, db: Session = Depends(get_db)):
     """Get a task by ID"""
     task_service = TaskService(db)
@@ -788,7 +794,7 @@ async def create_task_backup(task_id: int, db: Session = Depends(get_db)):
 
         backup_result = protection.create_backup_of_existing(
             project_id=task.project.id if task.project else 1,
-            task_subfolder=f"task_{task_id}",
+            task_subfolder=_resolve_task_subfolder_name(task),
         )
 
         return BackupResponse(**backup_result).model_dump()
@@ -821,7 +827,7 @@ async def get_workspace_info(task_id: int, db: Session = Depends(get_db)):
 
         workspace_info = protection.check_workspace_exists(
             project_id=task.project.id if task.project else 1,
-            task_subfolder=f"task_{task_id}",
+            task_subfolder=_resolve_task_subfolder_name(task),
         )
 
         return {
