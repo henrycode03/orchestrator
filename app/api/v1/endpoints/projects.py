@@ -5,7 +5,14 @@ from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
-from app.models import Project, Session as SessionModel, LogEntry, Task, SessionTask, Plan
+from app.models import (
+    Project,
+    Session as SessionModel,
+    LogEntry,
+    Task,
+    SessionTask,
+    Plan,
+)
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
 from app.services.checkpoint_service import CheckpointService
@@ -33,9 +40,13 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
 @router.get("/projects", response_model=List[ProjectResponse])
 def get_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     """Get all active (non-deleted) projects"""
-    projects = db.query(Project).filter(
-        Project.deleted_at.is_(None)
-    ).offset(skip).limit(limit).all()
+    projects = (
+        db.query(Project)
+        .filter(Project.deleted_at.is_(None))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return projects
 
 
@@ -189,13 +200,13 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     db_project.deleted_at = datetime.now(timezone.utc)
 
     # Also soft delete all sessions for this project
-    db.query(Session).filter(
-        Session.project_id == project_id
-    ).update({
-        "deleted_at": datetime.now(timezone.utc),
-        "is_active": False,
-        "status": "deleted"
-    })
+    db.query(Session).filter(Session.project_id == project_id).update(
+        {
+            "deleted_at": datetime.now(timezone.utc),
+            "is_active": False,
+            "status": "deleted",
+        }
+    )
 
     if session_ids:
         checkpoint_service = CheckpointService(db)
@@ -203,12 +214,12 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
             checkpoint_service.delete_all_checkpoints(session_id)
         checkpoint_service.cleanup_orphaned_checkpoints()
 
-        db.query(LogEntry).filter(
-            LogEntry.session_id.in_(session_ids)
-        ).delete(synchronize_session=False)
-        db.query(SessionTask).filter(
-            SessionTask.session_id.in_(session_ids)
-        ).delete(synchronize_session=False)
+        db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(SessionTask).filter(SessionTask.session_id.in_(session_ids)).delete(
+            synchronize_session=False
+        )
         db.query(TaskCheckpoint).filter(
             TaskCheckpoint.session_id.in_(session_ids)
         ).delete(synchronize_session=False)

@@ -352,7 +352,9 @@ def create_session(
 
     db_session = SessionModel(**session.model_dump())
     db_session.is_active = True  # Session is active when created
-    db_session.instance_id = str(uuid.uuid4())  # Generate unique instance ID immediately
+    db_session.instance_id = str(
+        uuid.uuid4()
+    )  # Generate unique instance ID immediately
     db.add(db_session)
 
     # Commit session creation
@@ -395,10 +397,7 @@ def list_sessions(
         query = query.filter(SessionModel.status == status)
 
     return (
-        query.order_by(SessionModel.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
+        query.order_by(SessionModel.created_at.desc()).offset(skip).limit(limit).all()
     )
 
 
@@ -529,16 +528,24 @@ def refresh_session_tasks(
         raise HTTPException(status_code=404, detail="Session not found")
 
     if not session.project_id:
-        raise HTTPException(status_code=400, detail="Session is not linked to a project")
+        raise HTTPException(
+            status_code=400, detail="Session is not linked to a project"
+        )
 
     task_service = TaskService(db)
     ordered_tasks = task_service.get_project_tasks(session.project_id)
     counts = {
         "total": len(ordered_tasks),
-        "pending": len([task for task in ordered_tasks if task.status == TaskStatus.PENDING]),
-        "running": len([task for task in ordered_tasks if task.status == TaskStatus.RUNNING]),
+        "pending": len(
+            [task for task in ordered_tasks if task.status == TaskStatus.PENDING]
+        ),
+        "running": len(
+            [task for task in ordered_tasks if task.status == TaskStatus.RUNNING]
+        ),
         "done": len([task for task in ordered_tasks if task.status == TaskStatus.DONE]),
-        "failed": len([task for task in ordered_tasks if task.status == TaskStatus.FAILED]),
+        "failed": len(
+            [task for task in ordered_tasks if task.status == TaskStatus.FAILED]
+        ),
     }
 
     queued_task = None
@@ -653,9 +660,7 @@ def delete_session(
     )
 
     # Delete all logs for this session to prevent ID reuse issues
-    deleted_logs = db.query(LogEntry).filter(
-        LogEntry.session_id == session_id
-    ).delete()
+    deleted_logs = db.query(LogEntry).filter(LogEntry.session_id == session_id).delete()
 
     db.commit()
     logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
@@ -980,8 +985,12 @@ async def websocket_log_stream(
             f"No logs found for session {session_id} with instance_id {session.instance_id}"
         )
         # Try to get any logs for this session (without instance filter)
-        fallback_logs = log_service.get_recent_logs(session_id, instance_id=None, limit=20)
-        logger.info(f"Fallback: Found {len(fallback_logs)} logs without instance filter")
+        fallback_logs = log_service.get_recent_logs(
+            session_id, instance_id=None, limit=20
+        )
+        logger.info(
+            f"Fallback: Found {len(fallback_logs)} logs without instance filter"
+        )
         recent_logs = fallback_logs
 
     for log in recent_logs:
@@ -1482,11 +1491,19 @@ async def start_session(
 
             if not queued_tasks:
                 task_status_summary = {
-                    str(task.status.value if hasattr(task.status, "value") else task.status): 0
+                    str(
+                        task.status.value
+                        if hasattr(task.status, "value")
+                        else task.status
+                    ): 0
                     for task in pending_tasks
                 }
                 for task in pending_tasks:
-                    key = str(task.status.value if hasattr(task.status, "value") else task.status)
+                    key = str(
+                        task.status.value
+                        if hasattr(task.status, "value")
+                        else task.status
+                    )
                     task_status_summary[key] = task_status_summary.get(key, 0) + 1
 
                 db.add(
@@ -1495,7 +1512,9 @@ async def start_session(
                         session_instance_id=session_instance_id,
                         level="WARN",
                         message="No tasks were queued for this session start",
-                        log_metadata=json.dumps({"task_status_summary": task_status_summary}),
+                        log_metadata=json.dumps(
+                            {"task_status_summary": task_status_summary}
+                        ),
                     )
                 )
                 db.commit()
@@ -1892,15 +1911,20 @@ def get_session_logs(
         effective_limit = 1000
 
     # Build query - filter by instance_id if available
-    logs_query = db.query(LogEntry).filter(
-        LogEntry.session_id == session_id
-    )
+    logs_query = db.query(LogEntry).filter(LogEntry.session_id == session_id)
 
     if session.instance_id:
-        logs_query = logs_query.filter(LogEntry.session_instance_id == session.instance_id)
+        logs_query = logs_query.filter(
+            LogEntry.session_instance_id == session.instance_id
+        )
 
     # Apply pagination
-    logs = logs_query.order_by(LogEntry.created_at.desc()).offset(offset).limit(effective_limit).all()
+    logs = (
+        logs_query.order_by(LogEntry.created_at.desc())
+        .offset(offset)
+        .limit(effective_limit)
+        .all()
+    )
 
     return {"logs": logs, "total": logs_query.count()}
 

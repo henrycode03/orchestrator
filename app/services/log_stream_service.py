@@ -182,8 +182,11 @@ class LogStreamService:
             .filter(
                 LogEntry.session_id.in_(session_id_list),
                 SessionModel.deleted_at.is_(None),  # Only active sessions
-                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
-                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+                SessionModel.instance_id.isnot(
+                    None
+                ),  # Only sessions with instance tracking
+                LogEntry.session_instance_id
+                == SessionModel.instance_id,  # Match instance IDs
             )
             .all()
         )
@@ -199,8 +202,11 @@ class LogStreamService:
             .filter(
                 LogEntry.session_id.in_(session_id_list),
                 SessionModel.deleted_at.is_(None),  # Only active sessions
-                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
-                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+                SessionModel.instance_id.isnot(
+                    None
+                ),  # Only sessions with instance tracking
+                LogEntry.session_instance_id
+                == SessionModel.instance_id,  # Match instance IDs
             )
             .order_by(LogEntry.created_at.desc())
             .limit(10)
@@ -305,8 +311,11 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
         .filter(
             LogEntry.session_id.in_(session_id_list),
             SessionModel.deleted_at.is_(None),  # Only active sessions
-            SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
-            LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+            SessionModel.instance_id.isnot(
+                None
+            ),  # Only sessions with instance tracking
+            LogEntry.session_instance_id
+            == SessionModel.instance_id,  # Match instance IDs
         )
         .all()
     )
@@ -322,8 +331,11 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
         .filter(
             LogEntry.session_id.in_(session_id_list),
             SessionModel.deleted_at.is_(None),  # Only active sessions
-            SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
-            LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+            SessionModel.instance_id.isnot(
+                None
+            ),  # Only sessions with instance tracking
+            LogEntry.session_instance_id
+            == SessionModel.instance_id,  # Match instance IDs
         )
         .order_by(LogEntry.created_at.desc())
         .limit(10)
@@ -464,8 +476,11 @@ def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
             .filter(
                 LogEntry.session_id.in_(session_id_list),
                 SessionModel.deleted_at.is_(None),  # Only active sessions
-                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
-                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+                SessionModel.instance_id.isnot(
+                    None
+                ),  # Only sessions with instance tracking
+                LogEntry.session_instance_id
+                == SessionModel.instance_id,  # Match instance IDs
             )
             .all()
         )
@@ -481,8 +496,11 @@ def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
             .filter(
                 LogEntry.session_id.in_(session_id_list),
                 SessionModel.deleted_at.is_(None),  # Only active sessions
-                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
-                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+                SessionModel.instance_id.isnot(
+                    None
+                ),  # Only sessions with instance tracking
+                LogEntry.session_instance_id
+                == SessionModel.instance_id,  # Match instance IDs
             )
             .order_by(LogEntry.created_at.desc())
             .limit(10)

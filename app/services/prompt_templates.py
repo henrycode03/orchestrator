@@ -816,7 +816,9 @@ Examples:
         context = {
             "task_description": task_description,
             "execution_profile": execution_profile,
-            "execution_profile_rules": cls.describe_execution_profile(execution_profile),
+            "execution_profile_rules": cls.describe_execution_profile(
+                execution_profile
+            ),
             "project_context": project_context or "No additional context provided.",
             "workspace_root": ws_root,
             "project_dir": proj_dir,
@@ -855,7 +857,9 @@ Examples:
         context = {
             "step_description": step_description,
             "execution_profile": execution_profile,
-            "execution_profile_rules": cls.describe_execution_profile(execution_profile),
+            "execution_profile_rules": cls.describe_execution_profile(
+                execution_profile
+            ),
             "project_dir": project_dir or "Current task workspace",
             "step_commands": "\n".join(f"- {cmd}" for cmd in step_commands),
             "verification_command": verification_command or "None provided",

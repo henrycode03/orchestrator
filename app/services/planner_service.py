@@ -57,7 +57,9 @@ class PlannerService:
         task_lines = cls._build_tasks(requirement)
         overview = requirement
         if project_description:
-            overview = f"{requirement}\n\nExisting context: {project_description.strip()}"
+            overview = (
+                f"{requirement}\n\nExisting context: {project_description.strip()}"
+            )
 
         markdown_lines = [
             f"# Project: {project_name}",
@@ -95,16 +97,12 @@ class PlannerService:
             cls._extract_candidate_tasks(task_section), start=1
         ):
             normalized_title = re.sub(r"\s+", " ", title or "").strip(" :-")
-            normalized_description = re.sub(
-                r"\s+", " ", (description or "").strip()
-            )
+            normalized_description = re.sub(r"\s+", " ", (description or "").strip())
             if not normalized_title:
                 continue
 
             explicit_profile, normalized_title, normalized_description = (
-                cls._extract_profile_metadata(
-                    normalized_title, normalized_description
-                )
+                cls._extract_profile_metadata(normalized_title, normalized_description)
             )
 
             dedupe_key = normalized_title.lower()
@@ -147,9 +145,7 @@ class PlannerService:
         return match.group(1).strip() if match else markdown
 
     @classmethod
-    def _extract_candidate_tasks(
-        cls, task_section: str
-    ) -> List[tuple[str, str]]:
+    def _extract_candidate_tasks(cls, task_section: str) -> List[tuple[str, str]]:
         candidates: List[tuple[str, str]] = []
         section_lines = task_section.splitlines()
 
@@ -209,7 +205,9 @@ class PlannerService:
                 if description_parts:
                     break
                 continue
-            if stripped.startswith(("#", "- ", "* ")) or re.match(r"^\d+\.\s", stripped):
+            if stripped.startswith(("#", "- ", "* ")) or re.match(
+                r"^\d+\.\s", stripped
+            ):
                 break
             description_parts.append(stripped)
         return " ".join(description_parts).strip()
@@ -280,9 +278,13 @@ class PlannerService:
         if any(phrase in combined for phrase in ["low priority", "nice to have"]):
             return 30
 
-        if any(word in combined for word in ["first", "foundation", "setup", "bootstrap"]):
+        if any(
+            word in combined for word in ["first", "foundation", "setup", "bootstrap"]
+        ):
             return 80
-        if any(word in combined for word in ["verify", "polish", "cleanup", "document"]):
+        if any(
+            word in combined for word in ["verify", "polish", "cleanup", "document"]
+        ):
             return 40
 
         return 60
@@ -291,13 +293,24 @@ class PlannerService:
     def _infer_execution_profile(cls, title: str, description: str) -> str:
         combined = f"{title} {description}".lower()
 
-        if any(word in combined for word in ["test", "testing", "verify", "verification", "qa"]):
+        if any(
+            word in combined
+            for word in ["test", "testing", "verify", "verification", "qa"]
+        ):
             return "test_only"
-        if any(word in combined for word in ["debug", "fix", "investigate", "root cause"]):
+        if any(
+            word in combined for word in ["debug", "fix", "investigate", "root cause"]
+        ):
             return "debug_only"
-        if any(word in combined for word in ["review", "audit", "inspect changes", "code review"]):
+        if any(
+            word in combined
+            for word in ["review", "audit", "inspect changes", "code review"]
+        ):
             return "review_only"
-        if any(word in combined for word in ["implement", "build", "create", "add", "execute"]):
+        if any(
+            word in combined
+            for word in ["implement", "build", "create", "add", "execute"]
+        ):
             return "execute_only"
         return "full_lifecycle"
 
@@ -343,9 +356,13 @@ class PlannerService:
         if "ui" in requirement_lower or "frontend" in requirement_lower:
             objectives.insert(1, "Design the user workflow and interaction states")
         if "database" in requirement_lower or "schema" in requirement_lower:
-            objectives.insert(1, "Identify required persistence and relationship changes")
+            objectives.insert(
+                1, "Identify required persistence and relationship changes"
+            )
         if project_description:
-            objectives.append("Preserve the project's existing architecture and conventions")
+            objectives.append(
+                "Preserve the project's existing architecture and conventions"
+            )
         return objectives[:5]
 
     @classmethod
@@ -407,12 +424,18 @@ class PlannerService:
             seen_titles.add(title)
             deduped.append((title, description))
 
-        return [f"- [ ] TASK_START: {title} | {description}" for title, description in deduped]
+        return [
+            f"- [ ] TASK_START: {title} | {description}"
+            for title, description in deduped
+        ]
 
     @classmethod
     def _estimate_effort(cls, title: str, description: str) -> str:
         combined = f"{title} {description}".lower()
-        if any(word in combined for word in ["refactor", "architecture", "workflow", "integrate"]):
+        if any(
+            word in combined
+            for word in ["refactor", "architecture", "workflow", "integrate"]
+        ):
             return "medium"
         if any(word in combined for word in ["verify", "test", "review", "inspect"]):
             return "small"

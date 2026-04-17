@@ -158,7 +158,9 @@ class OpenClawSessionService:
             )
 
             if self.task_model and self.task_model.task_subfolder:
-                return str((project_workspace / self.task_model.task_subfolder).resolve())
+                return str(
+                    (project_workspace / self.task_model.task_subfolder).resolve()
+                )
 
             return str(project_workspace.resolve())
         except Exception as exc:
@@ -745,7 +747,9 @@ class OpenClawSessionService:
                     ),
                     execution_profile=(
                         getattr(self.task_model, "execution_profile", None)
-                        or getattr(self.session_model, "default_execution_profile", None)
+                        or getattr(
+                            self.session_model, "default_execution_profile", None
+                        )
                         or "full_lifecycle"
                     ),
                 )

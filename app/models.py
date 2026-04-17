@@ -76,7 +76,9 @@ class Task(Base):
 
     # Add unique constraint on (project_id, task_subfolder) to prevent race conditions
     __table_args__ = (
-        UniqueConstraint("project_id", "task_subfolder", name="uq_tasks_project_subfolder"),
+        UniqueConstraint(
+            "project_id", "task_subfolder", name="uq_tasks_project_subfolder"
+        ),
     )
 
     project = relationship("Project", back_populates="tasks")
@@ -341,4 +343,6 @@ class SystemSetting(Base):
     key = Column(String(255), nullable=False, unique=True, index=True)
     value = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

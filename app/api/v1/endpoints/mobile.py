@@ -19,7 +19,15 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_active_user
-from app.models import LogEntry, Project, Session as SessionModel, SessionTask, Task, TaskStatus, User
+from app.models import (
+    LogEntry,
+    Project,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskStatus,
+    User,
+)
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.system_settings import get_effective_mobile_gateway_key
 
@@ -111,7 +119,9 @@ def require_mobile_gateway_key(
 
 def _log_mobile_request(request: Request, action: str, **extra: object) -> None:
     client_host = request.client.host if request.client else "unknown"
-    details = " ".join(f"{key}={value}" for key, value in extra.items() if value is not None)
+    details = " ".join(
+        f"{key}={value}" for key, value in extra.items() if value is not None
+    )
     suffix = f" {details}" if details else ""
     logger.info(
         "Mobile API request action=%s path=%s client=%s%s",
@@ -138,7 +148,8 @@ def _build_project_tree_lines(
             children = [
                 child
                 for child in sorted(
-                    path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+                    path.iterdir(),
+                    key=lambda item: (not item.is_dir(), item.name.lower()),
                 )
                 if child.name not in TREE_EXCLUDED_NAMES
             ]
@@ -379,6 +390,7 @@ def get_project_tree(
         "truncated": truncated,
     }
 
+
 # ── Sessions ─────────────────────────────────────────────────
 
 
@@ -390,9 +402,7 @@ def list_sessions(
     db: Session = Depends(get_db),
 ):
     """List sessions, optionally filtered by project or status"""
-    _log_mobile_request(
-        request, "list_sessions", project_id=project_id, status=status
-    )
+    _log_mobile_request(request, "list_sessions", project_id=project_id, status=status)
     query = db.query(SessionModel).filter(SessionModel.deleted_at.is_(None))
 
     if project_id:
@@ -491,7 +501,9 @@ async def list_mobile_session_checkpoints(
     _log_mobile_request(request, "session_checkpoints", session_id=session_id)
     from app.api.v1.endpoints.sessions import list_session_checkpoints
 
-    return await list_session_checkpoints(session_id=session_id, db=db, current_user=None)
+    return await list_session_checkpoints(
+        session_id=session_id, db=db, current_user=None
+    )
 
 
 @router.post("/mobile/sessions/{session_id}/stop")
@@ -578,7 +590,9 @@ def get_mobile_task(
         "id": task.id,
         "title": task.title,
         "description": task.description,
-        "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+        "status": (
+            task.status.value if hasattr(task.status, "value") else str(task.status)
+        ),
         "project_id": task.project_id,
         "priority": task.priority or 0,
         "plan_position": getattr(task, "plan_position", None),
@@ -617,14 +631,12 @@ def list_project_tasks(
         except KeyError:
             raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
 
-    tasks = (
-        query.order_by(
-            Task.plan_position.asc().nullslast(),
-            Task.priority.desc(),
-            Task.created_at.asc().nullslast(),
-            Task.id.asc(),
-        ).all()
-    )
+    tasks = query.order_by(
+        Task.plan_position.asc().nullslast(),
+        Task.priority.desc(),
+        Task.created_at.asc().nullslast(),
+        Task.id.asc(),
+    ).all()
 
     task_payload = []
     total_tasks = len(tasks)
@@ -671,7 +683,9 @@ def list_project_tasks(
                 "sequence_total": total_tasks,
                 "latest_session_id": latest_session.id if latest_session else None,
                 "latest_session_name": latest_session.name if latest_session else None,
-                "latest_session_status": latest_session.status if latest_session else None,
+                "latest_session_status": (
+                    latest_session.status if latest_session else None
+                ),
                 "has_active_session": bool(
                     latest_session.is_active if latest_session else False
                 ),
@@ -771,9 +785,7 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
                 "level": session.last_alert_level,
                 "message": session.last_alert_message,
                 "at": (
-                    session.last_alert_at.isoformat()
-                    if session.last_alert_at
-                    else None
+                    session.last_alert_at.isoformat() if session.last_alert_at else None
                 ),
             }
             for session in alerted_sessions

@@ -550,9 +550,7 @@ def _normalize_step(
     if step.get("rollback"):
         raw_rollback = str(step.get("rollback"))
         try:
-            normalized_step["rollback"] = _normalize_command(
-                raw_rollback, project_dir
-            )
+            normalized_step["rollback"] = _normalize_command(raw_rollback, project_dir)
         except TaskWorkspaceViolationError as exc:
             raise TaskWorkspaceViolationError(
                 f"{step_label} rollback blocked: {exc}. "
@@ -740,7 +738,9 @@ def execute_openclaw_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
-        def emit_live(level: str, message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        def emit_live(
+            level: str, message: str, metadata: Optional[Dict[str, Any]] = None
+        ) -> None:
             _record_live_log(
                 db,
                 session_id,
@@ -1056,7 +1056,10 @@ def execute_openclaw_task(
                 ):
                     raise ValueError("Planning failed: context window exceeded")
 
-                if "request timed out before a response was generated" in output_text.lower():
+                if (
+                    "request timed out before a response was generated"
+                    in output_text.lower()
+                ):
                     raise TimeoutError(
                         f"Planning timed out after {planning_timeout_seconds}s"
                     )
@@ -1250,8 +1253,10 @@ def execute_openclaw_task(
 
             # Count attempts for this step (from debug_attempts history)
             step_debug_attempts = [
-                da for da in orchestration_state.debug_attempts
-                if da.get("attempt") is not None and da.get("step_index", -1) == step_index
+                da
+                for da in orchestration_state.debug_attempts
+                if da.get("attempt") is not None
+                and da.get("step_index", -1) == step_index
             ]
             current_attempt = len(step_debug_attempts) + 1
             max_attempts = 3  # Maximum retry attempts per step
@@ -1309,10 +1314,16 @@ def execute_openclaw_task(
                     emit_live(
                         "ERROR",
                         f"[ORCHESTRATION] Step {step_index + 1} failed after {current_attempt} attempts, marking as failed",
-                        metadata={"phase": "debugging", "step_index": step_index + 1, "max_attempts_reached": True},
+                        metadata={
+                            "phase": "debugging",
+                            "step_index": step_index + 1,
+                            "max_attempts_reached": True,
+                        },
                     )
                     orchestration_state.status = OrchestrationStatus.ABORTED
-                    orchestration_state.abort_reason = f"Step {step_index + 1} failed after {current_attempt} attempts"
+                    orchestration_state.abort_reason = (
+                        f"Step {step_index + 1} failed after {current_attempt} attempts"
+                    )
                     task.status = TaskStatus.FAILED
                     task.error_message = f"Step failed after {current_attempt} attempts: {step_record.error_message[:500]}"
                     db.commit()
@@ -1360,7 +1371,10 @@ def execute_openclaw_task(
                         emit_live(
                             "WARN",
                             "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase",
-                            metadata={"phase": "plan_revision", "step_index": step_index + 1},
+                            metadata={
+                                "phase": "plan_revision",
+                                "step_index": step_index + 1,
+                            },
                         )
                         revise_prompt = PromptTemplates.build_plan_revision_prompt(
                             original_plan=orchestration_state.plan,
@@ -1424,26 +1438,36 @@ def execute_openclaw_task(
                         )
 
                         # Store the fix attempt for history
-                        orchestration_state.debug_attempts.append({
-                            "attempt": len(orchestration_state.debug_attempts) + 1,
-                            "fix_type": fix_type,
-                            "fix": debug_data.get("fix", ""),
-                            "analysis": debug_data.get("analysis", ""),
-                            "confidence": debug_data.get("confidence", "MEDIUM"),
-                            "error": step_record.error_message,
-                        })
+                        orchestration_state.debug_attempts.append(
+                            {
+                                "attempt": len(orchestration_state.debug_attempts) + 1,
+                                "fix_type": fix_type,
+                                "fix": debug_data.get("fix", ""),
+                                "analysis": debug_data.get("analysis", ""),
+                                "confidence": debug_data.get("confidence", "MEDIUM"),
+                                "error": step_record.error_message,
+                            }
+                        )
 
                         # If this is a command_fix, we need to modify the step_commands
                         # For code_fix, we let the LLM's execution prompt handle the fix
                         if fix_type == "command_fix" and debug_data.get("fix"):
                             # The fix contains the corrected command(s)
                             # Update the step's expected command for the retry
-                            step_commands = [debug_data.get("fix", step_commands[0] if step_commands else "")]
+                            step_commands = [
+                                debug_data.get(
+                                    "fix", step_commands[0] if step_commands else ""
+                                )
+                            ]
 
                         emit_live(
                             "INFO",
                             f"[ORCHESTRATION] Fix applied ({fix_type}), retrying step {step_index + 1}",
-                            metadata={"phase": "debugging", "step_index": step_index + 1, "fix_type": fix_type},
+                            metadata={
+                                "phase": "debugging",
+                                "step_index": step_index + 1,
+                                "fix_type": fix_type,
+                            },
                         )
                         # Continue to retry the step with the fix incorporated
                         continue  # Retry this step

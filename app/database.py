@@ -41,7 +41,9 @@ def _ensure_schema_updates():
         if "plan_id" not in existing_columns:
             statements.append("ALTER TABLE tasks ADD COLUMN plan_id INTEGER")
         if "estimated_effort" not in existing_columns:
-            statements.append("ALTER TABLE tasks ADD COLUMN estimated_effort VARCHAR(50)")
+            statements.append(
+                "ALTER TABLE tasks ADD COLUMN estimated_effort VARCHAR(50)"
+            )
         if "plan_position" not in existing_columns:
             statements.append("ALTER TABLE tasks ADD COLUMN plan_position INTEGER")
         if "execution_profile" not in existing_columns:
@@ -69,7 +71,9 @@ def _ensure_schema_updates():
                 "ALTER TABLE sessions ADD COLUMN default_execution_profile VARCHAR(30) DEFAULT 'full_lifecycle'"
             )
         if "last_alert_level" not in existing_columns:
-            statements.append("ALTER TABLE sessions ADD COLUMN last_alert_level VARCHAR(20)")
+            statements.append(
+                "ALTER TABLE sessions ADD COLUMN last_alert_level VARCHAR(20)"
+            )
         if "last_alert_message" not in existing_columns:
             statements.append("ALTER TABLE sessions ADD COLUMN last_alert_message TEXT")
         if "last_alert_at" not in existing_columns:

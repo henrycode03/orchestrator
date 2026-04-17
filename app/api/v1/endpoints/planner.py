@@ -56,9 +56,7 @@ class PlanUpdateRequest(BaseModel):
 
 
 @router.post("/planner/generate", response_model=PlannerGenerateResponse)
-def generate_plan(
-    payload: PlannerGenerateRequest, db: Session = Depends(get_db)
-):
+def generate_plan(payload: PlannerGenerateRequest, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == payload.project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -130,16 +128,16 @@ def list_project_plans(project_id: int, db: Session = Depends(get_db)):
     return plans
 
 
-@router.delete("/projects/{project_id}/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/projects/{project_id}/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT
+)
 def delete_project_plan(project_id: int, plan_id: int, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     plan = (
-        db.query(Plan)
-        .filter(Plan.id == plan_id, Plan.project_id == project_id)
-        .first()
+        db.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
     )
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -165,9 +163,7 @@ def update_project_plan(
         raise HTTPException(status_code=404, detail="Project not found")
 
     plan = (
-        db.query(Plan)
-        .filter(Plan.id == plan_id, Plan.project_id == project_id)
-        .first()
+        db.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
     )
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -209,7 +205,9 @@ def create_batch_tasks(
             project_id=project_id,
             title=(payload.plan_title or payload.requirement or "Imported plan")[:255],
             source_brain=payload.source_brain,
-            requirement=payload.requirement or payload.plan_title or "Imported planner markdown",
+            requirement=payload.requirement
+            or payload.plan_title
+            or "Imported planner markdown",
             markdown=payload.markdown,
             status="draft",
         )

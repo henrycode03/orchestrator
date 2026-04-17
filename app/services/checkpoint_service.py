@@ -28,7 +28,9 @@ class CheckpointError(Exception):
 class CheckpointService:
     """Service for managing OpenClaw session checkpoints"""
 
-    LEGACY_CHECKPOINT_DIR = "/root/.openclaw/workspace/vault/projects/orchestrator/checkpoints"
+    LEGACY_CHECKPOINT_DIR = (
+        "/root/.openclaw/workspace/vault/projects/orchestrator/checkpoints"
+    )
 
     def __init__(self, db: Session):
         self.db = db
@@ -207,7 +209,9 @@ class CheckpointService:
             if not os.path.exists(checkpoint_path):
                 checkpoint_path = None
                 for checkpoint_root in self._candidate_checkpoint_roots():
-                    candidate = checkpoint_root / f"session_{session_id}_{checkpoint_name}.json"
+                    candidate = (
+                        checkpoint_root / f"session_{session_id}_{checkpoint_name}.json"
+                    )
                     if candidate.exists():
                         checkpoint_path = str(candidate)
                         break
@@ -318,12 +322,16 @@ class CheckpointService:
             deleted = False
 
             for checkpoint_root in self._candidate_checkpoint_roots():
-                candidate = checkpoint_root / f"session_{session_id}_{checkpoint_name}.json"
+                candidate = (
+                    checkpoint_root / f"session_{session_id}_{checkpoint_name}.json"
+                )
                 if candidate.exists():
                     os.remove(candidate)
                     deleted = True
 
-            session_dir = Path(self._get_session_checkpoint_dir(session_id, create=False))
+            session_dir = Path(
+                self._get_session_checkpoint_dir(session_id, create=False)
+            )
             if session_dir.exists():
                 for candidate in session_dir.glob("*.json"):
                     try:

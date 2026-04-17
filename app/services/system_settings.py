@@ -48,12 +48,16 @@ def get_setting_value_runtime(key: str, default: Optional[str] = None) -> Option
 
 
 def get_effective_workspace_root() -> Path:
-    fallback = os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/")
+    fallback = os.environ.get(
+        "OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"
+    )
     value = get_setting_value_runtime(WORKSPACE_ROOT_KEY, fallback) or fallback
     return Path(value).expanduser().resolve()
 
 
-def get_effective_mobile_gateway_key(env_mobile_key: str, env_openclaw_key: str) -> tuple[Optional[str], Optional[str]]:
+def get_effective_mobile_gateway_key(
+    env_mobile_key: str, env_openclaw_key: str
+) -> tuple[Optional[str], Optional[str]]:
     override_key = get_setting_value_runtime(MOBILE_API_KEY_KEY)
     if override_key:
         return override_key, MOBILE_API_KEY_KEY
