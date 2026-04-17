@@ -50,6 +50,14 @@ def _ensure_schema_updates():
             statements.append(
                 "ALTER TABLE tasks ADD COLUMN execution_profile VARCHAR(30) DEFAULT 'full_lifecycle'"
             )
+        if "workspace_status" not in existing_columns:
+            statements.append(
+                "ALTER TABLE tasks ADD COLUMN workspace_status VARCHAR(30) DEFAULT 'isolated'"
+            )
+        if "promotion_note" not in existing_columns:
+            statements.append("ALTER TABLE tasks ADD COLUMN promotion_note TEXT")
+        if "promoted_at" not in existing_columns:
+            statements.append("ALTER TABLE tasks ADD COLUMN promoted_at DATETIME")
 
         if statements:
             with engine.begin() as connection:

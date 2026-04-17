@@ -29,6 +29,7 @@ from app.services import OpenClawSessionService, PromptTemplates
 from app.services.error_handler import error_handler
 from app.services.checkpoint_service import CheckpointService
 from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.task_service import TaskService
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
@@ -526,6 +527,11 @@ def _normalize_step(
     normalized_commands = []
     for command_index, command in enumerate(step.get("commands", []) or [], start=1):
         raw_command = str(command)
+        if not raw_command.strip():
+            logger_obj.warning(
+                f"[ISOLATION] Skipping blank command in {step_label} command {command_index}"
+            )
+            continue
         try:
             normalized_commands.append(_normalize_command(raw_command, project_dir))
         except TaskWorkspaceViolationError as exc:
@@ -535,8 +541,8 @@ def _normalize_step(
             ) from exc
     normalized_step["commands"] = normalized_commands
 
-    if step.get("verification"):
-        raw_verification = str(step.get("verification"))
+    raw_verification = str(step.get("verification") or "").strip()
+    if raw_verification:
         try:
             normalized_step["verification"] = _normalize_command(
                 raw_verification, project_dir
@@ -546,9 +552,11 @@ def _normalize_step(
                 f"{step_label} verification blocked: {exc}. "
                 f"Offending command: {raw_verification}"
             ) from exc
+    else:
+        normalized_step["verification"] = None
 
-    if step.get("rollback"):
-        raw_rollback = str(step.get("rollback"))
+    raw_rollback = str(step.get("rollback") or "").strip()
+    if raw_rollback:
         try:
             normalized_step["rollback"] = _normalize_command(raw_rollback, project_dir)
         except TaskWorkspaceViolationError as exc:
@@ -556,6 +564,8 @@ def _normalize_step(
                 f"{step_label} rollback blocked: {exc}. "
                 f"Offending command: {raw_rollback}"
             ) from exc
+    else:
+        normalized_step["rollback"] = None
 
     normalized_step["expected_files"] = _normalize_expected_files(
         step.get("expected_files", []), project_dir, logger_obj, step_index
@@ -688,6 +698,42 @@ Example:
   }}
 ]
 """
+
+
+def _is_long_running_verification_task(
+    execution_profile: str, step_description: str, task_prompt: str
+) -> bool:
+    combined = f"{execution_profile} {step_description} {task_prompt}".lower()
+    verification_markers = (
+        "verify",
+        "verification",
+        "refine",
+        "integration",
+        "end-to-end",
+        "e2e",
+        "test",
+        "qa",
+        "audit",
+        "review",
+        "build",
+    )
+    return execution_profile in {"test_only", "review_only"} or any(
+        marker in combined for marker in verification_markers
+    )
+
+
+def _should_retry_planning_with_minimal_prompt(
+    planning_result: Dict[str, Any], output_text: str = ""
+) -> bool:
+    error_text = (planning_result.get("error") or "").lower()
+    combined_text = f"{error_text}\n{(output_text or '').lower()}"
+    retry_markers = (
+        "context window exceeded",
+        "request timed out before a response was generated",
+        "timed out",
+        "timeout",
+    )
+    return any(marker in combined_text for marker in retry_markers)
 
 
 @celery_app.task(
@@ -829,6 +875,45 @@ def execute_openclaw_task(
             os.makedirs(task_workspace, exist_ok=True)
             logger.info(f"Created task workspace: {task_workspace}")
 
+        task_service = TaskService(db)
+        hydration_result = (
+            task_service.hydrate_task_workspace(project, task, orchestration_state.project_dir)
+            if project and task
+            else {"hydrated": False, "source_tasks": [], "files_copied": 0}
+        )
+        if hydration_result.get("hydrated"):
+            logger.info(
+                "[ORCHESTRATION] Hydrated workspace for task %s with %s files from prior tasks",
+                task_id,
+                hydration_result.get("files_copied", 0),
+            )
+            emit_live(
+                "INFO",
+                (
+                    f"[ORCHESTRATION] Hydrated current workspace with {hydration_result.get('files_copied', 0)} "
+                    "files from completed/promoted prior tasks"
+                ),
+                metadata={
+                    "phase": "workspace_hydration",
+                    "sources": hydration_result.get("source_tasks", []),
+                },
+            )
+
+        project_context_summary = task_service.build_project_execution_context(
+            project=project,
+            current_task=task,
+        )
+        if hydration_result.get("hydrated"):
+            hydrated_sources = ", ".join(
+                f"#{item.get('task_id')} {item.get('title')}"
+                for item in hydration_result.get("source_tasks", [])[:6]
+            )
+            project_context_summary = (
+                f"{project_context_summary}\n"
+                f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
+            )[:5000]
+        orchestration_state.project_context = project_context_summary
+
         is_resume_execution = bool(resume_checkpoint_name)
 
         # Check if task has been running too long (safety check).
@@ -858,6 +943,7 @@ def execute_openclaw_task(
         task.completed_at = None
         task.error_message = None
         task.current_step = 0
+        task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         if session_task_link:
             session_task_link.status = TaskStatus.RUNNING
@@ -946,7 +1032,59 @@ def execute_openclaw_task(
                     metadata={"phase": "resume"},
                 )
 
-        if not resumed_from_checkpoint:
+        refreshed_project_context = task_service.build_project_execution_context(
+            project=project,
+            current_task=task,
+        )
+        if hydration_result.get("hydrated"):
+            hydrated_sources = ", ".join(
+                f"#{item.get('task_id')} {item.get('title')}"
+                for item in hydration_result.get("source_tasks", [])[:6]
+            )
+            refreshed_project_context = (
+                f"{refreshed_project_context}\n"
+                f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
+            )[:5000]
+        orchestration_state.project_context = refreshed_project_context
+
+        if (
+            not resumed_from_checkpoint
+            and task
+            and task.steps
+            and not orchestration_state.plan
+        ):
+            try:
+                stored_plan_payload = json.loads(task.steps)
+                stored_plan = _extract_plan_steps(stored_plan_payload)
+                if stored_plan:
+                    orchestration_state.plan = _normalize_plan_with_live_logging(
+                        db,
+                        session_id,
+                        task_id,
+                        stored_plan,
+                        orchestration_state.project_dir,
+                        logger,
+                        session.instance_id,
+                        "Stored task plan",
+                    )
+                    logger.info(
+                        "[ORCHESTRATION] Reusing stored plan for task %s with %s steps",
+                        task_id,
+                        len(orchestration_state.plan),
+                    )
+                    emit_live(
+                        "INFO",
+                        f"[ORCHESTRATION] Reusing saved plan with {len(orchestration_state.plan)} steps",
+                        metadata={"phase": "planning", "source": "stored_task_plan"},
+                    )
+            except Exception as stored_plan_error:
+                logger.warning(
+                    "[ORCHESTRATION] Failed to reuse stored plan for task %s: %s",
+                    task_id,
+                    stored_plan_error,
+                )
+
+        if not resumed_from_checkpoint and not orchestration_state.plan:
             # PHASE 1: PLANNING - Generate step plan
             logger.info("[ORCHESTRATION] Phase 1: PLANNING - generating step plan")
             emit_live(
@@ -956,39 +1094,40 @@ def execute_openclaw_task(
             )
 
             # Use project_name (already slugified) for the project context
-            project_name_slug = (
-                orchestration_state.project_name.strip() or f"session-{session_id}"
-            )
-            project_context = f"Build project: {project_name_slug}"
-
             planning_prompt = PromptTemplates.build_planning_prompt(
                 task_description=prompt,
-                project_context=project_context,
+                project_context=orchestration_state.project_context,
                 workspace_root=str(orchestration_state.workspace_root),
                 project_dir=str(orchestration_state.project_dir),
                 execution_profile=execution_profile,
             )
 
-            # Planning often needs more time than the old 120 second cap,
+            # Planning often needs more time than the old 300 second cap,
             # especially for larger repos or denser prompts.
-            planning_timeout_seconds = max(180, min(timeout_seconds, 300))
+            planning_timeout_seconds = max(240, min(timeout_seconds, 480))
             planning_result = asyncio.run(
                 openclaw_service.execute_task(
                     planning_prompt, timeout_seconds=planning_timeout_seconds
                 )
             )
 
-            planning_error = (planning_result.get("error") or "").lower()
-            if "context window exceeded" in planning_error or (
-                "context" in planning_error and "exceeded" in planning_error
+            initial_output_text = _extract_structured_text(planning_result.get("output", ""))
+            if _should_retry_planning_with_minimal_prompt(
+                planning_result, initial_output_text
             ):
                 logger.warning(
-                    "[ORCHESTRATION] Planning hit context limit; retrying with minimal prompt"
+                    "[ORCHESTRATION] Planning failed on the first pass; retrying with minimal prompt"
                 )
                 emit_live(
                     "WARN",
-                    "[ORCHESTRATION] Planning prompt exceeded context; retrying with minimal prompt",
-                    metadata={"phase": "planning", "retry": "minimal_prompt"},
+                    "[ORCHESTRATION] Planning needed a fallback; retrying with minimal prompt",
+                    metadata={
+                        "phase": "planning",
+                        "retry": "minimal_prompt",
+                        "reason": (planning_result.get("error") or initial_output_text)[
+                            :240
+                        ],
+                    },
                 )
                 minimal_planning_prompt = _build_minimal_planning_prompt(
                     prompt, orchestration_state.project_dir
@@ -996,7 +1135,7 @@ def execute_openclaw_task(
                 planning_result = asyncio.run(
                     openclaw_service.execute_task(
                         minimal_planning_prompt,
-                        timeout_seconds=min(planning_timeout_seconds, 180),
+                        timeout_seconds=min(planning_timeout_seconds, 240),
                     )
                 )
 
@@ -1050,18 +1189,11 @@ def execute_openclaw_task(
                     output_text, context="planning"
                 )
 
-                planning_error = (planning_result.get("error") or "").lower()
-                if "context window exceeded" in planning_error or (
-                    "context" in planning_error and "exceeded" in planning_error
-                ):
-                    raise ValueError("Planning failed: context window exceeded")
-
-                if (
-                    "request timed out before a response was generated"
-                    in output_text.lower()
+                if _should_retry_planning_with_minimal_prompt(
+                    planning_result, output_text
                 ):
                     raise TimeoutError(
-                        f"Planning timed out after {planning_timeout_seconds}s"
+                        f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
                     )
 
                 if success:
@@ -1222,9 +1354,6 @@ def execute_openclaw_task(
 
             # Build execution prompt
             # Use project_name (already slugified) for consistency
-            project_name_slug = (
-                orchestration_state.project_name.strip() or f"session-{session_id}"
-            )
             execution_prompt = PromptTemplates.build_execution_prompt(
                 step_description=step_description,
                 step_commands=step_commands,
@@ -1233,15 +1362,22 @@ def execute_openclaw_task(
                 rollback_command=rollback_command,
                 expected_files=expected_files,
                 completed_steps_summary=orchestration_state.prior_results_summary(),
-                project_context=f"Build project: {project_name_slug}",
+                project_context=orchestration_state.project_context,
                 execution_profile=execution_profile,
             )
 
             # Give each step a workable minimum budget so larger scaffold/build
             # steps do not fail prematurely on otherwise healthy runs.
-            step_timeout_seconds = max(
-                240, timeout_seconds // max(1, len(orchestration_state.plan))
-            )
+            if _is_long_running_verification_task(
+                execution_profile, step_description, prompt
+            ):
+                step_timeout_seconds = max(
+                    600, min(timeout_seconds, 1800)
+                )
+            else:
+                step_timeout_seconds = max(
+                    300, timeout_seconds // max(1, min(len(orchestration_state.plan), 3))
+                )
 
             # Execute step
             step_result = asyncio.run(
@@ -1521,6 +1657,7 @@ def execute_openclaw_task(
         task.error_message = None
         task.summary = summary_result.get("output", "")[:2000]
         task.current_step = len(orchestration_state.plan)
+        task.workspace_status = "ready" if task.task_subfolder else "not_created"
         if session_task_link:
             session_task_link.status = TaskStatus.DONE
             session_task_link.completed_at = task.completed_at
@@ -1639,6 +1776,7 @@ def execute_openclaw_task(
             task.status = TaskStatus.FAILED
             task.error_message = str(exc)
             task.completed_at = datetime.utcnow()
+            task.workspace_status = "blocked" if task.task_subfolder else "not_created"
 
         if not session_task_link:
             session_task_link = _get_latest_session_task_link(db, session_id, task_id)

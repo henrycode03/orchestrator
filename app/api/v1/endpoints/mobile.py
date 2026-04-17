@@ -9,6 +9,7 @@ Flow:
 
 import secrets
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,7 @@ from app.models import (
 )
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.system_settings import get_effective_mobile_gateway_key
+from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 TREE_MAX_DEPTH = 3
@@ -44,6 +46,7 @@ TREE_EXCLUDED_NAMES = {
     ".idea",
     ".pytest_cache",
 }
+TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 
 
 def _status_value(value: object) -> str:
@@ -152,6 +155,7 @@ def _build_project_tree_lines(
                     key=lambda item: (not item.is_dir(), item.name.lower()),
                 )
                 if child.name not in TREE_EXCLUDED_NAMES
+                and not TASK_REPORT_RE.match(child.name)
             ]
         except OSError:
             lines.append(f"{prefix}[unreadable]")
@@ -168,7 +172,7 @@ def _build_project_tree_lines(
             lines.append(f"{prefix}{branch}{label}")
             entries_seen += 1
 
-            if child.is_dir():
+            if child.is_dir() and not (depth == 0 and child.name.startswith("task-")):
                 next_prefix = f"{prefix}{'    ' if is_last else '│   '}"
                 walk(child, next_prefix, depth + 1)
                 if truncated:
@@ -176,6 +180,28 @@ def _build_project_tree_lines(
 
     walk(root, "", 0)
     return lines, truncated
+
+
+def _get_latest_task_attempt(db: Session, task_id: int):
+    return (
+        db.query(
+            SessionTask.status,
+            SessionTask.started_at,
+            SessionTask.completed_at,
+            SessionModel.id.label("session_id"),
+            SessionModel.name.label("session_name"),
+            SessionModel.status.label("session_status"),
+            SessionModel.is_active.label("session_is_active"),
+        )
+        .join(SessionModel, SessionTask.session_id == SessionModel.id)
+        .filter(SessionTask.task_id == task_id, SessionModel.deleted_at.is_(None))
+        .order_by(
+            SessionTask.started_at.desc().nullslast(),
+            SessionTask.completed_at.desc().nullslast(),
+            SessionTask.id.desc(),
+        )
+        .first()
+    )
 
 
 router = APIRouter(dependencies=[Depends(require_mobile_gateway_key)])
@@ -368,24 +394,51 @@ def get_project_tree(
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    baseline = TaskService(db).get_project_baseline_overview(project)
     if not project_root.exists():
         return {
             "project_id": project_id,
             "project_name": project.name,
             "root": str(project_root),
             "exists": False,
+            "baseline": baseline,
             "tree_lines": [],
+            "task_workspaces": [],
             "total_entries_shown": 0,
             "truncated": False,
         }
 
     tree_lines, truncated = _build_project_tree_lines(project_root)
+    task_workspaces = (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.task_subfolder.isnot(None),
+        )
+        .order_by(
+            Task.plan_position.asc().nullslast(),
+            Task.created_at.asc().nullslast(),
+            Task.id.asc(),
+        )
+        .all()
+    )
     return {
         "project_id": project_id,
         "project_name": project.name,
         "root": str(project_root),
         "exists": True,
+        "baseline": baseline,
         "tree_lines": tree_lines,
+        "task_workspaces": [
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "status": _status_value(task.status),
+                "plan_position": getattr(task, "plan_position", None),
+                "subfolder": task.task_subfolder,
+            }
+            for task in task_workspaces
+        ],
         "total_entries_shown": len(tree_lines),
         "truncated": truncated,
     }
@@ -570,21 +623,20 @@ def get_mobile_task(
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    TaskService(db).sync_workspace_status(task)
 
     from app.api.v1.endpoints.tasks import _get_active_task_session
 
-    session_task = (
-        db.query(SessionModel.id, SessionModel.name)
-        .join(SessionTask, SessionTask.session_id == SessionModel.id)
-        .filter(SessionTask.task_id == task_id, SessionModel.deleted_at.is_(None))
-        .order_by(
-            SessionTask.started_at.desc().nullslast(),
-            SessionTask.completed_at.desc().nullslast(),
-            SessionTask.id.desc(),
-        )
-        .first()
-    )
+    latest_attempt = _get_latest_task_attempt(db, task_id)
     active_session_id = _get_active_task_session(db, task_id)
+    latest_attempt_status = (
+        _status_value(latest_attempt.status) if latest_attempt else None
+    )
+    is_live_attempt = (
+        bool(latest_attempt.session_is_active)
+        if latest_attempt and latest_attempt_status == TaskStatus.RUNNING.value
+        else False
+    )
 
     return {
         "id": task.id,
@@ -599,9 +651,17 @@ def get_mobile_task(
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         "error_message": task.error_message,
-        "session_id": session_task.id if session_task else None,
-        "session_name": session_task.name if session_task else None,
-        "has_active_session": bool(active_session_id),
+        "workspace_status": getattr(task, "workspace_status", None),
+        "promotion_note": getattr(task, "promotion_note", None),
+        "promoted_at": (
+            task.promoted_at.isoformat() if getattr(task, "promoted_at", None) else None
+        ),
+        "session_id": latest_attempt.session_id if latest_attempt else None,
+        "session_name": latest_attempt.session_name if latest_attempt else None,
+        "latest_attempt_status": latest_attempt_status,
+        "latest_session_status": latest_attempt_status,
+        "has_active_session": bool(active_session_id and is_live_attempt),
+        "is_live_attempt": is_live_attempt,
     }
 
 
@@ -637,25 +697,24 @@ def list_project_tasks(
         Task.created_at.asc().nullslast(),
         Task.id.asc(),
     ).all()
+    task_service = TaskService(db)
+    changed = False
+    for task in tasks:
+        changed = task_service.sync_workspace_status(task, commit=False) or changed
+    if changed:
+        db.commit()
 
     task_payload = []
     total_tasks = len(tasks)
     for index, t in enumerate(tasks, start=1):
-        latest_session = (
-            db.query(
-                SessionModel.id,
-                SessionModel.name,
-                SessionModel.status,
-                SessionModel.is_active,
-            )
-            .join(SessionTask, SessionTask.session_id == SessionModel.id)
-            .filter(SessionTask.task_id == t.id, SessionModel.deleted_at.is_(None))
-            .order_by(
-                SessionTask.started_at.desc().nullslast(),
-                SessionTask.completed_at.desc().nullslast(),
-                SessionTask.id.desc(),
-            )
-            .first()
+        latest_attempt = _get_latest_task_attempt(db, t.id)
+        latest_attempt_status = (
+            _status_value(latest_attempt.status) if latest_attempt else None
+        )
+        is_live_attempt = (
+            bool(latest_attempt.session_is_active)
+            if latest_attempt and latest_attempt_status == TaskStatus.RUNNING.value
+            else False
         )
 
         task_payload.append(
@@ -669,6 +728,13 @@ def list_project_tasks(
                 "priority": getattr(t, "priority", None),
                 "plan_position": getattr(t, "plan_position", None),
                 "error_message": getattr(t, "error_message", None),
+                "workspace_status": getattr(t, "workspace_status", None),
+                "promotion_note": getattr(t, "promotion_note", None),
+                "promoted_at": (
+                    t.promoted_at.isoformat()
+                    if getattr(t, "promoted_at", None)
+                    else None
+                ),
                 "created_at": (
                     t.created_at.isoformat()
                     if hasattr(t, "created_at") and t.created_at
@@ -681,14 +747,16 @@ def list_project_tasks(
                 ),
                 "sequence_index": index,
                 "sequence_total": total_tasks,
-                "latest_session_id": latest_session.id if latest_session else None,
-                "latest_session_name": latest_session.name if latest_session else None,
-                "latest_session_status": (
-                    latest_session.status if latest_session else None
+                "latest_session_id": (
+                    latest_attempt.session_id if latest_attempt else None
                 ),
-                "has_active_session": bool(
-                    latest_session.is_active if latest_session else False
+                "latest_session_name": (
+                    latest_attempt.session_name if latest_attempt else None
                 ),
+                "latest_attempt_status": latest_attempt_status,
+                "latest_session_status": latest_attempt_status,
+                "has_active_session": is_live_attempt,
+                "is_live_attempt": is_live_attempt,
             }
         )
 

@@ -25,6 +25,17 @@ function ProjectDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [workspaceOverview, setWorkspaceOverview] = useState<{
+    counts: Record<string, number>;
+    baseline: {
+      exists: boolean;
+      path?: string | null;
+      file_count: number;
+      promoted_task_count: number;
+    };
+    promoted_tasks: Array<{ id: number; title: string; promoted_at?: string | null }>;
+    ready_task_ids: number[];
+  } | null>(null);
   const [activeTab, setActiveTab] = useState<'sessions' | 'tasks' | 'planner'>('tasks');
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
@@ -39,6 +50,7 @@ function ProjectDetail() {
   const [editSteps, setEditSteps] = useState('');
   const [updatingTask, setUpdatingTask] = useState(false);
   const [savingGithubUrl, setSavingGithubUrl] = useState(false);
+  const [rebuildingBaseline, setRebuildingBaseline] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -59,11 +71,13 @@ function ProjectDetail() {
           tasksAPI.getByProject(Number(id)),
           sessionsAPI.getByProject(Number(id))
         ]);
+        const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
         
         console.log('✅ Data loaded successfully');
         setProject(projectRes.data);
         setTasks(tasksRes.data || []);
         setSessions(sessionsRes.data || []);
+        setWorkspaceOverview(workspaceRes.data || null);
       } catch (err) {
         console.error('❌ Failed to load project data:', err);
         setError(err instanceof Error ? err.message : 'Failed to load project data');
@@ -98,10 +112,84 @@ function ProjectDetail() {
   const fetchTasks = async () => {
     if (!id) return;
     try {
-      const response = await tasksAPI.getByProject(Number(id));
+      const [response, workspaceResponse] = await Promise.all([
+        tasksAPI.getByProject(Number(id)),
+        projectsAPI.getWorkspaceOverview(Number(id)),
+      ]);
       setTasks(response.data || []);
+      setWorkspaceOverview(workspaceResponse.data || null);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
+    }
+  };
+
+  const getWorkspaceBadgeClass = (status?: string | null) => {
+    switch (status) {
+      case 'promoted':
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+      case 'ready':
+        return 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+      case 'changes_requested':
+        return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+      case 'blocked':
+        return 'border-red-500/30 bg-red-500/10 text-red-300';
+      case 'in_progress':
+        return 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300';
+      default:
+        return 'border-slate-600 bg-slate-700/40 text-slate-300';
+    }
+  };
+
+  const formatWorkspaceStatus = (status?: string | null) =>
+    (status || 'not_created').replace(/_/g, ' ');
+
+  const handlePromoteTask = async (task: Task) => {
+    const note = window.prompt('Optional promotion note for this task workspace:', task.promotion_note || '');
+    if (note === null) return;
+    try {
+      const response = await tasksAPI.promoteWorkspace(task.id, note || undefined);
+      setTasks((current) => current.map((item) => (item.id === task.id ? response.data : item)));
+      const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
+      setWorkspaceOverview(workspaceResponse.data || null);
+    } catch (error) {
+      console.error('Failed to promote task workspace:', error);
+      alert('Failed to promote task workspace. Please try again.');
+    }
+  };
+
+  const handleRequestChanges = async (task: Task) => {
+    const note = window.prompt('Describe what still needs to change before promotion:', task.promotion_note || '');
+    if (!note) return;
+    try {
+      const response = await tasksAPI.requestWorkspaceChanges(task.id, note);
+      setTasks((current) => current.map((item) => (item.id === task.id ? response.data : item)));
+      const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
+      setWorkspaceOverview(workspaceResponse.data || null);
+    } catch (error) {
+      console.error('Failed to mark task workspace for changes:', error);
+      alert('Failed to update workspace review state. Please try again.');
+    }
+  };
+
+  const handleRebuildBaseline = async () => {
+    if (!id) return;
+    if (!window.confirm('Rebuild the project baseline from all promoted task workspaces?')) {
+      return;
+    }
+
+    try {
+      setRebuildingBaseline(true);
+      const result = await projectsAPI.rebuildBaseline(Number(id));
+      const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
+      setWorkspaceOverview(workspaceResponse.data || null);
+      alert(
+        `Baseline rebuilt with ${result.data.files_copied} files from ${result.data.promoted_task_count} promoted task(s).`
+      );
+    } catch (error) {
+      console.error('Failed to rebuild project baseline:', error);
+      alert('Failed to rebuild the project baseline. Please try again.');
+    } finally {
+      setRebuildingBaseline(false);
     }
   };
   const generateStepsFromDescription = async (description: string) => {
@@ -142,10 +230,14 @@ function ProjectDetail() {
       title: taskTitle.trim(),
       description: taskDescription || null,
       status: 'pending',
+      execution_profile: 'full_lifecycle',
       priority: 0,
       steps: taskSteps.trim() ? taskSteps : null,
       current_step: 0,
       error_message: null,
+      workspace_status: 'not_created',
+      promotion_note: null,
+      promoted_at: null,
       created_at: now,
       updated_at: now,
       started_at: null,
@@ -577,6 +669,48 @@ function ProjectDetail() {
             />
           ) : (
             <div className="space-y-4">
+              {workspaceOverview && (
+                <div className="space-y-3 rounded-xl border border-slate-700 bg-slate-800/40 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Canonical Baseline</p>
+                      <p className="mt-1 text-sm text-slate-300">
+                        {workspaceOverview.baseline.exists
+                          ? `${workspaceOverview.baseline.file_count} files built from ${workspaceOverview.baseline.promoted_task_count} promoted task(s)`
+                          : 'No canonical baseline yet'}
+                      </p>
+                      {workspaceOverview.baseline.path && (
+                        <p className="mt-1 text-xs text-slate-500">{workspaceOverview.baseline.path}</p>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleRebuildBaseline}
+                      disabled={rebuildingBaseline || (workspaceOverview.baseline.promoted_task_count || 0) === 0}
+                      className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-white transition-colors hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {rebuildingBaseline ? 'Rebuilding...' : 'Rebuild Baseline'}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Ready</p>
+                    <p className="mt-1 text-xl font-semibold text-sky-300">{workspaceOverview.counts.ready || 0}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Promoted</p>
+                    <p className="mt-1 text-xl font-semibold text-emerald-300">{workspaceOverview.counts.promoted || 0}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Changes Requested</p>
+                    <p className="mt-1 text-xl font-semibold text-amber-300">{workspaceOverview.counts.changes_requested || 0}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Blocked</p>
+                    <p className="mt-1 text-xl font-semibold text-red-300">{workspaceOverview.counts.blocked || 0}</p>
+                  </div>
+                  </div>
+                </div>
+              )}
               {tasks.map((task) => (
                 <div key={task.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-slate-600 transition-all">
                   <div className="flex items-start justify-between">
@@ -589,6 +723,16 @@ function ProjectDetail() {
                         {task.description && (
                           <p className="text-sm text-slate-400 mb-3">{task.description}</p>
                         )}
+                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${getWorkspaceBadgeClass(task.workspace_status)}`}>
+                            Workspace: {formatWorkspaceStatus(task.workspace_status)}
+                          </span>
+                          {task.task_subfolder && (
+                            <span className="rounded-full border border-slate-700 px-2.5 py-1 text-xs text-slate-400">
+                              {task.task_subfolder}
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-4 text-sm text-slate-500">
                           <span className="flex items-center gap-1">
                             <Clock className="h-3 w-3" />
@@ -598,9 +742,32 @@ function ProjectDetail() {
                             <span>Step {task.current_step}</span>
                           )}
                         </div>
+                        {task.promotion_note && (
+                          <p className="mt-3 text-xs text-slate-500">
+                            Review note: {task.promotion_note}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
+                        <button
+                          onClick={() => handlePromoteTask(task)}
+                          className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-500"
+                          title="Promote workspace"
+                        >
+                          Promote
+                        </button>
+                      )}
+                      {task.task_subfolder && task.workspace_status !== 'promoted' && (
+                        <button
+                          onClick={() => handleRequestChanges(task)}
+                          className="rounded-lg bg-amber-600/90 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-amber-500"
+                          title="Request changes before promotion"
+                        >
+                          Request Changes
+                        </button>
+                      )}
                       <button
                         onClick={() => startEditTask(task)}
                         className="text-slate-400 hover:text-blue-400 transition-colors"
@@ -802,4 +969,3 @@ function ProjectDetail() {
 }
 
 export default ProjectDetail;
-

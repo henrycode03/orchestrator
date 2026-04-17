@@ -89,6 +89,32 @@ function TaskDetail() {
     fetchTask();
   };
 
+  const handlePromote = async () => {
+    if (!task) return;
+    const note = window.prompt('Optional promotion note for this workspace:', task.promotion_note || '');
+    if (note === null) return;
+    try {
+      await tasksAPI.promoteWorkspace(task.id, note || undefined);
+      await fetchTask();
+    } catch (error) {
+      console.error('Failed to promote task workspace:', error);
+      setSaveError('Failed to promote task workspace');
+    }
+  };
+
+  const handleRequestChanges = async () => {
+    if (!task) return;
+    const note = window.prompt('Describe what still needs to change before promotion:', task.promotion_note || '');
+    if (!note) return;
+    try {
+      await tasksAPI.requestWorkspaceChanges(task.id, note);
+      await fetchTask();
+    } catch (error) {
+      console.error('Failed to request workspace changes:', error);
+      setSaveError('Failed to mark workspace as needing changes');
+    }
+  };
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'done':
@@ -313,6 +339,40 @@ function TaskDetail() {
               </div>
             )}
 
+            <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4">
+              <h3 className="mb-2 text-sm font-medium text-slate-300">Workspace Review</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs capitalize text-slate-200">
+                  {String(task.workspace_status || 'not_created').replace(/_/g, ' ')}
+                </span>
+                {task.task_subfolder && (
+                  <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400">
+                    {task.task_subfolder}
+                  </span>
+                )}
+              </div>
+              {task.promotion_note && (
+                <p className="mt-3 text-sm text-slate-400">{task.promotion_note}</p>
+              )}
+              {task.promoted_at && (
+                <p className="mt-2 text-xs text-emerald-400">
+                  Promoted {new Date(task.promoted_at).toLocaleString()}
+                </p>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
+                  <Button size="sm" onClick={handlePromote}>
+                    Promote Workspace
+                  </Button>
+                )}
+                {task.task_subfolder && task.workspace_status !== 'promoted' && (
+                  <Button size="sm" variant="outline" onClick={handleRequestChanges}>
+                    Request Changes
+                  </Button>
+                )}
+              </div>
+            </div>
+
             {task.steps && (
               <div>
                 <h3 className="text-sm font-medium text-slate-300 mb-2 flex items-center gap-2">
@@ -349,4 +409,3 @@ function TaskDetail() {
 }
 
 export default TaskDetail;
-

@@ -16,6 +16,7 @@ from app.models import (
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
 from app.services.checkpoint_service import CheckpointService
+from app.services.task_service import TaskService
 from app.config import settings
 
 router = APIRouter()
@@ -141,6 +142,25 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+@router.post("/projects/{project_id}/baseline/rebuild")
+def rebuild_project_baseline(project_id: int, db: Session = Depends(get_db)):
+    """Rebuild the canonical project baseline from promoted task workspaces."""
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = TaskService(db).rebuild_project_baseline(project)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        **result,
+    }
 
 
 @router.put("/projects/{project_id}", response_model=ProjectResponse)

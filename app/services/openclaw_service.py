@@ -39,6 +39,7 @@ from app.services.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.permission_service import PermissionApprovalService
+from app.services.task_service import TaskService
 from app.services.performance_optimizations import (
     optimize_prompt,
     compress_context,
@@ -431,6 +432,7 @@ class OpenClawSessionService:
         try:
             # OPTIMIZATION: Compress context to reduce token usage
             project_context = ""
+            task_service = TaskService(self.db)
             if self.session_model and self.session_model.project_id:
                 try:
                     isolation_service = ProjectIsolationService(self.db)
@@ -467,21 +469,6 @@ class OpenClawSessionService:
                 )
 
             if orchestration_state is None:
-                # OPTIMIZATION: Compress project context
-                project_context = (
-                    compress_context(
-                        {
-                            "description": (
-                                self.session_model.description
-                                if self.session_model
-                                else ""
-                            )
-                        }
-                    ).get("description", "")[:2000]
-                    if self.session_model
-                    else ""
-                )
-
                 orchestration_state = OrchestrationState(
                     session_id=str(self.session_id),
                     task_description=prompt,
@@ -508,74 +495,147 @@ class OpenClawSessionService:
                     self.task_model.task_subfolder
                 )
 
+            os.makedirs(orchestration_state.project_dir, exist_ok=True)
+
+            if project_model and self.task_model:
+                hydration_result = task_service.hydrate_task_workspace(
+                    project=project_model,
+                    current_task=self.task_model,
+                    target_dir=orchestration_state.project_dir,
+                )
+                project_context = task_service.build_project_execution_context(
+                    project=project_model,
+                    current_task=self.task_model,
+                    max_chars=4000,
+                )
+                if hydration_result.get("hydrated"):
+                    hydrated_sources = ", ".join(
+                        f"#{item.get('task_id')} {item.get('title')}"
+                        for item in hydration_result.get("source_tasks", [])[:6]
+                    )
+                    project_context = (
+                        f"{project_context}\n"
+                        f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
+                    )[:5000]
+                    self._log_entry(
+                        "INFO",
+                        (
+                            f"[ORCHESTRATION] Hydrated workspace with {hydration_result.get('files_copied', 0)} "
+                            "files from completed/promoted prior tasks"
+                        ),
+                    )
+                orchestration_state.project_context = project_context
+            elif self.session_model:
+                project_context = (
+                    compress_context(
+                        {"description": self.session_model.description or ""}
+                    ).get("description", "")[:2000]
+                    if self.session_model
+                    else ""
+                )
+                orchestration_state.project_context = project_context
+
             # Phase 1: PLANNING (OPTIMIZED)
             orchestration_state.status = OrchestrationStatus.PLANNING
             self._log_entry("INFO", "[ORCHESTRATION] PLANNING phase")
 
-            # OPTIMIZATION: Compress project context in planning prompt
-            planning_prompt = PromptTemplates.build_planning_prompt(
-                task_description=prompt,
-                project_context=project_context[:1500] if project_context else "",
-                execution_profile=(
-                    getattr(self.task_model, "execution_profile", None)
-                    or getattr(self.session_model, "default_execution_profile", None)
-                    or "full_lifecycle"
-                ),
-            )
+            if self.task_model and self.task_model.steps and not orchestration_state.plan:
+                try:
+                    stored_plan_payload = json.loads(self.task_model.steps)
+                    from app.tasks.worker import _extract_plan_steps
 
-            # OPTIMIZATION: Increased timeout for planning (180s to avoid timeouts on complex tasks)
-            planning_result = await self.execute_task(
-                planning_prompt, timeout_seconds=180
-            )
-
-            if planning_result.get("status") == "failed":
-                planning_error = planning_result.get(
-                    "error", "Planning failed during OpenClaw execution"
-                )
-                self._log_entry(
-                    "ERROR", f"[ORCHESTRATION] Planning failed: {planning_error}"
-                )
-                raise OpenClawSessionError(planning_error)
-
-            # Parse plan from result
-            try:
-                output_text = planning_result.get("output", "[]")
-
-                # OpenClaw returns: { "payloads": [ { "text": "..." } ] }
-                # Extract the actual text content
-                if isinstance(output_text, str):
-                    try:
-                        output_data = json.loads(output_text)
-                        if isinstance(output_data, dict) and "payloads" in output_data:
-                            payloads = output_data.get("payloads", [])
-                            if isinstance(payloads, list) and len(payloads) > 0:
-                                # Get the text from first payload
-                                first_payload = payloads[0]
-                                if isinstance(first_payload, dict):
-                                    output_text = first_payload.get("text", output_text)
-                    except json.JSONDecodeError:
-                        pass  # Not OpenClaw format, use as-is
-
-                # Strip Markdown code fences if present
-                if isinstance(output_text, str):
-                    import re
-
-                    # Remove ```json or ``` wrappers
-                    markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
-                    output_text = re.sub(markdown_pattern, "", output_text.strip())
-
-                self._log_entry(
-                    "INFO",
-                    f"[PLANNING] Output type: {type(output_text)}, content: {output_text[:200]}...",
-                )
-                plan = json.loads(output_text)
-                if isinstance(plan, list):
-                    orchestration_state.plan = plan
+                    stored_plan = _extract_plan_steps(stored_plan_payload)
+                    if stored_plan:
+                        orchestration_state.plan = stored_plan
+                        self._log_entry(
+                            "INFO",
+                            f"[ORCHESTRATION] Reusing saved plan with {len(stored_plan)} steps",
+                        )
+                except Exception as stored_plan_error:
                     self._log_entry(
-                        "INFO", f"[ORCHESTRATION] Generated {len(plan)} steps"
+                        "WARN",
+                        f"[ORCHESTRATION] Failed to reuse saved task plan: {stored_plan_error}",
                     )
-                else:
-                    # Fallback to single step
+
+            if not orchestration_state.plan:
+                # OPTIMIZATION: Compress project context in planning prompt
+                planning_prompt = PromptTemplates.build_planning_prompt(
+                    task_description=prompt,
+                    project_context=orchestration_state.project_context[:4000]
+                    if orchestration_state.project_context
+                    else "",
+                    execution_profile=(
+                        getattr(self.task_model, "execution_profile", None)
+                        or getattr(self.session_model, "default_execution_profile", None)
+                        or "full_lifecycle"
+                    ),
+                )
+
+                # OPTIMIZATION: Increased timeout for planning (180s to avoid timeouts on complex tasks)
+                planning_result = await self.execute_task(
+                    planning_prompt, timeout_seconds=180
+                )
+
+                if planning_result.get("status") == "failed":
+                    planning_error = planning_result.get(
+                        "error", "Planning failed during OpenClaw execution"
+                    )
+                    self._log_entry(
+                        "ERROR", f"[ORCHESTRATION] Planning failed: {planning_error}"
+                    )
+                    raise OpenClawSessionError(planning_error)
+
+                # Parse plan from result
+                try:
+                    output_text = planning_result.get("output", "[]")
+
+                    # OpenClaw returns: { "payloads": [ { "text": "..." } ] }
+                    # Extract the actual text content
+                    if isinstance(output_text, str):
+                        try:
+                            output_data = json.loads(output_text)
+                            if isinstance(output_data, dict) and "payloads" in output_data:
+                                payloads = output_data.get("payloads", [])
+                                if isinstance(payloads, list) and len(payloads) > 0:
+                                    first_payload = payloads[0]
+                                    if isinstance(first_payload, dict):
+                                        output_text = first_payload.get("text", output_text)
+                        except json.JSONDecodeError:
+                            pass
+
+                    # Strip Markdown code fences if present
+                    if isinstance(output_text, str):
+                        import re
+
+                        markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
+                        output_text = re.sub(markdown_pattern, "", output_text.strip())
+
+                    self._log_entry(
+                        "INFO",
+                        f"[PLANNING] Output type: {type(output_text)}, content: {output_text[:200]}...",
+                    )
+                    plan = json.loads(output_text)
+                    if isinstance(plan, list):
+                        orchestration_state.plan = plan
+                        self._log_entry(
+                            "INFO", f"[ORCHESTRATION] Generated {len(plan)} steps"
+                        )
+                    else:
+                        # Fallback to single step
+                        orchestration_state.plan = [
+                            {
+                                "step_number": 1,
+                                "description": prompt,
+                                "commands": [prompt],
+                                "verification": None,
+                                "rollback": None,
+                                "expected_files": [],
+                            }
+                        ]
+                        self._log_entry(
+                            "INFO", "[ORCHESTRATION] Using fallback single-step plan"
+                        )
+                except json.JSONDecodeError:
                     orchestration_state.plan = [
                         {
                             "step_number": 1,
@@ -589,20 +649,6 @@ class OpenClawSessionService:
                     self._log_entry(
                         "INFO", "[ORCHESTRATION] Using fallback single-step plan"
                     )
-            except json.JSONDecodeError:
-                orchestration_state.plan = [
-                    {
-                        "step_number": 1,
-                        "description": prompt,
-                        "commands": [prompt],
-                        "verification": None,
-                        "rollback": None,
-                        "expected_files": [],
-                    }
-                ]
-                self._log_entry(
-                    "INFO", "[ORCHESTRATION] Using fallback single-step plan"
-                )
 
             # Phase 2: EXECUTING
             orchestration_state.status = OrchestrationStatus.EXECUTING
@@ -742,9 +788,7 @@ class OpenClawSessionService:
                     rollback_command=step.get("rollback"),
                     expected_files=step.get("expected_files", []),
                     completed_steps_summary=orchestration_state.prior_results_summary(),
-                    project_context=(
-                        self.session_model.description if self.session_model else ""
-                    ),
+                    project_context=orchestration_state.project_context,
                     execution_profile=(
                         getattr(self.task_model, "execution_profile", None)
                         or getattr(

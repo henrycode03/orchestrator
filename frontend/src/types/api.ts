@@ -23,6 +23,9 @@ export interface Task {
   steps: string | null;
   current_step: number;
   error_message: string | null;
+  workspace_status?: string | null;
+  promotion_note?: string | null;
+  promoted_at?: string | null;
   created_at: string;
   updated_at: string | null;
   started_at: string | null;

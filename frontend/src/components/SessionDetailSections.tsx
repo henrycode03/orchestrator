@@ -410,6 +410,11 @@ export function SessionTasksPanel({
                 <p className="mt-1 text-xs text-slate-500">
                   Order: {task.plan_position ?? 'manual'} • Priority: {task.priority ?? 0}
                 </p>
+                {task.workspace_status && (
+                  <p className="mt-1 text-xs capitalize text-slate-500">
+                    Workspace: {task.workspace_status.replace(/_/g, ' ')}
+                  </p>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={task.status} size="sm" />

@@ -299,6 +299,7 @@ class PromptTemplates:
 12. Do NOT use background-process commands such as `&`, `nohup`, `disown`, or shell job control
 13. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
 14. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
+15. If the context mentions completed or promoted prior task artifacts, assume those files have already been hydrated into `{project_dir}` and extend them instead of recreating parallel implementations
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -359,6 +360,7 @@ class PromptTemplates:
 10. Do NOT use shell backgrounding such as `&`, `nohup`, `disown`, or long-lived dev servers unless the step explicitly requires process management
 11. Prefer direct interpreter invocations like `node file.js` or `python file.py`, not complex shell wrappers
 12. If verification needs a server, prefer a one-shot test command or explain that the provided verification command is not tool-safe instead of launching a background process
+13. If the context mentions hydrated baseline files from prior tasks, inspect and reuse them before creating new competing files or duplicate interfaces
 
 **Execution Profile Rules:**
 {execution_profile_rules}

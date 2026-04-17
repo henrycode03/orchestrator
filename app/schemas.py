@@ -68,6 +68,12 @@ class TaskUpdate(BaseModel):
     steps: Optional[str] = None
     current_step: Optional[int] = None
     error_message: Optional[str] = None
+    workspace_status: Optional[str] = None
+    promotion_note: Optional[str] = None
+
+
+class TaskPromotionRequest(BaseModel):
+    note: Optional[str] = None
 
 
 class TaskResponse(TaskBase):
@@ -81,6 +87,9 @@ class TaskResponse(TaskBase):
     steps: Optional[str] = None
     current_step: Optional[int] = 0
     error_message: Optional[str] = None
+    workspace_status: Optional[str] = "isolated"
+    promotion_note: Optional[str] = None
+    promoted_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None

@@ -10,10 +10,11 @@ import asyncio
 from pydantic import BaseModel
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
-from app.schemas import TaskCreate, TaskUpdate, TaskResponse
+from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
+from app.services.task_service import TaskService
 
 
 # Pydantic models for overwrite protection
@@ -38,7 +39,7 @@ router = APIRouter()
 
 # Constants
 MAX_PROMPT_LENGTH = 50000  # Max prompt length to avoid context window overflow
-DEFAULT_TASK_RETRY_TIMEOUT_SECONDS = 900
+DEFAULT_TASK_RETRY_TIMEOUT_SECONDS = 1800
 
 
 def _latest_session_success_for_task(
@@ -70,8 +71,9 @@ def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
         .join(SessionTask.session)
         .filter(
             SessionTask.task_id == task_id,
+            SessionTask.status == TaskStatus.RUNNING,
             SessionModel.deleted_at.is_(None),
-            SessionModel.status.in_(["pending", "running", "paused", "active"]),
+            SessionModel.status.in_(["pending", "running", "active"]),
         )
         .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
         .first()
@@ -86,12 +88,27 @@ def _queue_task_retry(
 ) -> dict:
     from app.models import Session as SessionModel
     from app.tasks.worker import execute_openclaw_task
+    from app.services.task_service import TaskService
 
     active_session_id = _get_active_task_session(db, task.id)
     if active_session_id:
         raise HTTPException(
             status_code=409,
             detail=f"Task already has an active session ({active_session_id}). Open the session to resume or stop it first.",
+        )
+
+    blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
+    if blocking_tasks:
+        blocking_summary = ", ".join(
+            f"#{item.plan_position} {item.title} ({item.status.value})"
+            for item in blocking_tasks[:3]
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Earlier ordered tasks must finish before retrying this one. "
+                f"Blocked by: {blocking_summary}"
+            ),
         )
 
     prompt = (task.description or task.title or "").strip()
@@ -184,6 +201,12 @@ def get_all_tasks(
             raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
 
     tasks = query.order_by(Task.created_at.desc()).offset(skip).limit(limit).all()
+    task_service = TaskService(db)
+    changed = False
+    for task in tasks:
+        changed = task_service.sync_workspace_status(task, commit=False) or changed
+    if changed:
+        db.commit()
     return tasks
 
 
@@ -212,19 +235,8 @@ def get_project_tasks(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    tasks = (
-        db.query(Task)
-        .filter(Task.project_id == project_id)
-        .order_by(
-            Task.plan_position.asc().nullslast(),
-            Task.priority.desc(),
-            Task.created_at.asc().nullslast(),
-            Task.id.asc(),
-        )
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    task_service = TaskService(db)
+    tasks = task_service.get_project_tasks(project_id)[skip : skip + limit]
     return tasks
 
 
@@ -391,7 +403,8 @@ async def execute_task_with_openclaw(
 @router.get("/tasks/{task_id}")
 def get_task(task_id: int, db: Session = Depends(get_db)):
     """Get a task by ID"""
-    task = db.query(Task).filter(Task.id == task_id).first()
+    task_service = TaskService(db)
+    task = task_service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -444,6 +457,48 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     return task_dict
 
 
+@router.get("/projects/{project_id}/workspace-overview")
+def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db)):
+    """Summarize task workspace promotion state for a project."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    task_service = TaskService(db)
+    tasks = task_service.get_project_tasks(project_id)
+    baseline = task_service.get_project_baseline_overview(project)
+    counts: Dict[str, int] = {}
+    for task in tasks:
+        key = getattr(task, "workspace_status", None) or "not_created"
+        counts[key] = counts.get(key, 0) + 1
+
+    promoted_tasks = [
+        {
+            "id": task.id,
+            "title": task.title,
+            "plan_position": task.plan_position,
+            "workspace_status": task.workspace_status,
+            "task_subfolder": task.task_subfolder,
+            "promoted_at": (
+                task.promoted_at.isoformat() if getattr(task, "promoted_at", None) else None
+            ),
+        }
+        for task in tasks
+        if getattr(task, "workspace_status", None) == "promoted"
+    ]
+
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "counts": counts,
+        "baseline": baseline,
+        "promoted_tasks": promoted_tasks,
+        "ready_task_ids": [
+            task.id for task in tasks if getattr(task, "workspace_status", None) == "ready"
+        ],
+    }
+
+
 @router.post("/tasks/{task_id}/retry")
 def retry_task(task_id: int, db: Session = Depends(get_db)):
     """Queue a fresh execution for a failed or timed-out task."""
@@ -458,6 +513,79 @@ def retry_task(task_id: int, db: Session = Depends(get_db)):
         )
 
     return _queue_task_retry(db, task)
+
+
+@router.post("/tasks/{task_id}/promote", response_model=TaskResponse)
+def promote_task_workspace(
+    task_id: int,
+    payload: TaskPromotionRequest,
+    db: Session = Depends(get_db),
+):
+    """Mark a task workspace as reviewed and promoted into the project baseline."""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status != TaskStatus.DONE:
+        raise HTTPException(
+            status_code=409, detail="Only completed tasks can be promoted"
+        )
+    if not task.task_subfolder:
+        raise HTTPException(
+            status_code=409, detail="Task has no workspace folder to promote"
+        )
+
+    project = db.query(Project).filter(Project.id == task.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    task.workspace_status = "promoted"
+    task.promoted_at = datetime.utcnow()
+    task.promotion_note = (payload.note or "").strip() or None
+    task.updated_at = datetime.utcnow()
+    baseline_result = TaskService(db).promote_task_into_baseline(project, task)
+    db.commit()
+    db.refresh(task)
+    db.add(
+        LogEntry(
+            task_id=task.id,
+            level="INFO",
+            message=(
+                f"Workspace promoted into project baseline ({baseline_result['files_copied']} files copied)"
+            ),
+        )
+    )
+    db.commit()
+    return task
+
+
+@router.post("/tasks/{task_id}/request-changes", response_model=TaskResponse)
+def request_task_workspace_changes(
+    task_id: int,
+    payload: TaskPromotionRequest,
+    db: Session = Depends(get_db),
+):
+    """Mark a completed task workspace as needing follow-up before promotion."""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not task.task_subfolder:
+        raise HTTPException(
+            status_code=409, detail="Task has no workspace folder to review"
+        )
+
+    note = (payload.note or "").strip()
+    if not note:
+        raise HTTPException(
+            status_code=400, detail="A review note is required when requesting changes"
+        )
+
+    task.workspace_status = "changes_requested"
+    task.promoted_at = None
+    task.promotion_note = note
+    task.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @router.put("/tasks/{task_id}", response_model=TaskResponse)

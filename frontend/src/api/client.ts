@@ -182,6 +182,36 @@ export const projectsAPI = {
 
   getSessions: (projectId: number) => apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
   getPlans: (projectId: number) => apiClient.get<Plan[]>(`/projects/${projectId}/plans`),
+  getWorkspaceOverview: (projectId: number) =>
+    apiClient.get<{
+      project_id: number;
+      project_name: string;
+      counts: Record<string, number>;
+      baseline: {
+        exists: boolean;
+        path?: string | null;
+        file_count: number;
+        promoted_task_count: number;
+      };
+      promoted_tasks: Array<{
+        id: number;
+        title: string;
+        plan_position?: number | null;
+        workspace_status?: string | null;
+        task_subfolder?: string | null;
+        promoted_at?: string | null;
+      }>;
+      ready_task_ids: number[];
+    }>(`/projects/${projectId}/workspace-overview`),
+  rebuildBaseline: (projectId: number) =>
+    apiClient.post<{
+      project_id: number;
+      project_name: string;
+      baseline_path: string;
+      promoted_task_count: number;
+      files_copied: number;
+      applied_tasks: Array<{ task_id: number; title: string; files_copied: number }>;
+    }>(`/projects/${projectId}/baseline/rebuild`),
 
   // Get logs for a project (filters by project_id, not session_id)
   getLogs: (
@@ -262,6 +292,10 @@ export const tasksAPI = {
     apiClient.put<Task>(`/tasks/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/tasks/${id}`),
+  promoteWorkspace: (id: number, note?: string) =>
+    apiClient.post<Task>(`/tasks/${id}/promote`, { note }),
+  requestWorkspaceChanges: (id: number, note: string) =>
+    apiClient.post<Task>(`/tasks/${id}/request-changes`, { note }),
 
   start: (id: number) => apiClient.post(`/tasks/${id}/start`),
 

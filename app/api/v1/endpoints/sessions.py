@@ -45,7 +45,7 @@ from app.auth import verify_token
 
 router = APIRouter()
 
-DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 900
+DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 
 
 # In-memory WebSocket connections for log streaming
@@ -203,6 +203,7 @@ def _queue_task_for_session(
 ) -> Dict[str, Any]:
     from app.models import Task
     from app.tasks.worker import execute_openclaw_task
+    from app.services.task_service import TaskService
 
     task = (
         db.query(Task)
@@ -211,6 +212,20 @@ def _queue_task_for_session(
     )
     if not task:
         raise HTTPException(status_code=404, detail="Task not found for this session")
+
+    blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
+    if blocking_tasks:
+        blocking_summary = ", ".join(
+            f"#{item.plan_position} {item.title} ({item.status.value})"
+            for item in blocking_tasks[:3]
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This task is blocked by earlier ordered work. "
+                f"Finish these first: {blocking_summary}"
+            ),
+        )
 
     task_workspace = _ensure_task_workspace(db, session, task.id)
     session_task_link = (
@@ -304,8 +319,38 @@ def _maybe_queue_next_automatic_task(
     task_service = TaskService(db)
     next_task = task_service.get_next_pending_task(session.project_id)
     if not next_task:
-        session.status = "stopped"
-        session.is_active = False
+        pending_blocked_task = (
+            db.query(Task)
+            .filter(Task.project_id == session.project_id, Task.status == TaskStatus.PENDING)
+            .order_by(
+                Task.plan_position.asc().nullslast(),
+                Task.priority.desc(),
+                Task.created_at.asc().nullslast(),
+                Task.id.asc(),
+            )
+            .first()
+        )
+        if pending_blocked_task:
+            session.status = "paused"
+            session.is_active = False
+            blocked_by = task_service.get_blocking_prior_tasks(pending_blocked_task)
+            if blocked_by:
+                blocking_summary = ", ".join(
+                    f"#{item.plan_position} {item.title} ({item.status.value})"
+                    for item in blocked_by[:3]
+                )
+                _set_session_alert(
+                    db,
+                    session,
+                    "warning",
+                    (
+                        "Automatic execution is paused because an earlier ordered task "
+                        f"is incomplete: {blocking_summary}"
+                    )[:2000],
+                )
+        else:
+            session.status = "stopped"
+            session.is_active = False
         db.commit()
         return None
 

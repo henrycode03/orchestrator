@@ -67,6 +67,9 @@ class Task(Base):
     steps = Column(Text, nullable=True)  # JSON string of step-by-step plan
     current_step = Column(Integer, default=0)
     error_message = Column(Text, nullable=True)
+    workspace_status = Column(String(30), default="isolated")
+    promotion_note = Column(Text, nullable=True)
+    promoted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     started_at = Column(DateTime(timezone=True), nullable=True)
