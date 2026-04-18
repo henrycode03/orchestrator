@@ -31,6 +31,9 @@ jobs:
       run: |
         flake8 app/ --config=.flake8
 
+    - name: Install black
+      run: pip install black==24.2.0
+
     - name: Run black check
       run: |
         black --check app/
