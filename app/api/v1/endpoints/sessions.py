@@ -681,8 +681,6 @@ async def generate_steps_from_description(
     db: Session = Depends(get_db),
 ):
     """Generate task steps using OpenClaw AI"""
-    from app.services.openclaw_service import OpenClawSessionService
-
     task_name = body.get("task_name", "Task")
     description = body.get("description", "")
 

@@ -424,8 +424,6 @@ def execute_openclaw_task(
         openclaw_service = OpenClawSessionService(db, session_id, task_id)
 
         # Get session context
-        import asyncio
-
         session_context = asyncio.run(openclaw_service.get_session_context())
 
         checkpoint_service = CheckpointService(db)
