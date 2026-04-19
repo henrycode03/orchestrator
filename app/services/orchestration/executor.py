@@ -86,6 +86,13 @@ class ExecutorService:
                         f"Do not shorten the workspace root. Retry with the real absolute "
                         f"task-workspace path `{project_dir}` or a file inside it, not `{raw_path}`."
                     )
+                elif not Path(raw_path).exists():
+                    hints.append(
+                        "The agent guessed a file path that does not exist inside the task workspace. "
+                        f"Before reading guessed files, enumerate the real tree from `{project_dir}` with "
+                        "`rg --files . | head -200` or `find . -maxdepth 4 -type f | sort | head -200`, "
+                        "then read only confirmed files."
+                    )
 
             raw_command = str(raw_params.get("command") or "").strip()
             if raw_command.startswith("cd ") and "&&" in raw_command:

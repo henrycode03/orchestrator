@@ -30,10 +30,28 @@ from app.services.orchestration import (
     PlannerService,
     ExecutorService,
     ValidatorService,
-    ValidationVerdict,
+    assess_step_execution,
+    coerce_execution_step_result as _coerce_execution_step_result,
+    determine_step_timeout,
+    repair_step_commands_with_self_correction as _repair_step_commands_with_self_correction,
+    repeated_tool_path_failure_decision,
+    step_needs_command_repair as _step_needs_command_repair,
+)
+from app.services.orchestration.persistence import (
+    record_live_log as _record_live_log,
+    record_validation_verdict as _record_validation_verdict,
+    restore_step_result as _restore_step_result,
+    save_orchestration_checkpoint as _save_orchestration_checkpoint,
+    set_session_alert as _set_session_alert,
+)
+from app.services.orchestration.runtime import (
+    build_workspace_discovery_step as _build_workspace_discovery_step,
+    get_state_manager_path as _get_state_manager_path,
+    restore_workspace_after_abort as _restore_workspace_after_abort,
+    snapshot_workspace_before_run as _snapshot_workspace_before_run,
+    write_project_state_snapshot as _write_project_state_snapshot,
 )
 from app.services.error_handler import error_handler
-from app.services.checkpoint_service import CheckpointService
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.task_service import TaskService
 from app.services.prompt_templates import (
@@ -49,18 +67,6 @@ class TaskWorkspaceViolationError(ValueError):
     """Raised when a planned command escapes the task workspace."""
 
     pass
-
-
-def _set_session_alert(
-    session: Optional[SessionModel],
-    level: Optional[str] = None,
-    message: Optional[str] = None,
-) -> None:
-    if not session:
-        return
-    session.last_alert_level = level
-    session.last_alert_message = message
-    session.last_alert_at = datetime.utcnow() if message else None
 
 
 def _get_next_pending_project_task(
@@ -94,121 +100,6 @@ def _is_quoted_route_literal(
         return False
 
     return f"'{token}'" in original_command or f'"{token}"' in original_command
-
-
-def _serialize_step_result(step_result: StepResult) -> Dict[str, Any]:
-    return {
-        "step_number": step_result.step_number,
-        "status": step_result.status,
-        "output": step_result.output,
-        "verification_output": step_result.verification_output,
-        "files_changed": step_result.files_changed,
-        "error_message": step_result.error_message,
-        "attempt": step_result.attempt,
-    }
-
-
-def _restore_step_result(data: Dict[str, Any]) -> StepResult:
-    return StepResult(
-        step_number=data.get("step_number", 0),
-        status=data.get("status", "failed"),
-        output=data.get("output", ""),
-        verification_output=data.get("verification_output", ""),
-        files_changed=data.get("files_changed", []) or [],
-        error_message=data.get("error_message", ""),
-        attempt=data.get("attempt", 1),
-    )
-
-
-def _save_orchestration_checkpoint(
-    db: Session,
-    session_id: int,
-    task_id: int,
-    prompt: str,
-    orchestration_state: OrchestrationState,
-    checkpoint_name: str = "autosave_latest",
-) -> None:
-    checkpoint_service = CheckpointService(db)
-    checkpoint_service.save_checkpoint(
-        session_id=session_id,
-        checkpoint_name=checkpoint_name,
-        context_data={
-            "task_id": task_id,
-            "task_description": prompt,
-            "project_name": orchestration_state.project_name,
-            "project_context": orchestration_state.project_context,
-            "task_subfolder": orchestration_state.task_subfolder,
-            "project_dir_override": (
-                str(orchestration_state.project_dir)
-                if orchestration_state._project_dir_override
-                else None
-            ),
-        },
-        orchestration_state={
-            "status": orchestration_state.status.value,
-            "plan": orchestration_state.plan,
-            "current_step_index": orchestration_state.current_step_index,
-            "debug_attempts": orchestration_state.debug_attempts,
-            "changed_files": orchestration_state.changed_files,
-            "validation_history": orchestration_state.validation_history,
-            "last_plan_validation": orchestration_state.last_plan_validation,
-            "last_completion_validation": orchestration_state.last_completion_validation,
-            "execution_results": [
-                _serialize_step_result(r) for r in orchestration_state.execution_results
-            ],
-        },
-        current_step_index=orchestration_state.current_step_index,
-        step_results=[
-            _serialize_step_result(r) for r in orchestration_state.execution_results
-        ],
-    )
-
-
-def _record_validation_verdict(
-    db: Session,
-    session_id: int,
-    task_id: int,
-    orchestration_state: OrchestrationState,
-    verdict: ValidationVerdict,
-    *,
-    step_number: Optional[int] = None,
-) -> None:
-    ValidatorService.persist_validation_result(
-        db,
-        task_id=task_id,
-        session_id=session_id,
-        stage=verdict.stage,
-        verdict=verdict,
-        step_number=step_number,
-    )
-    verdict_payload = verdict.to_dict()
-    orchestration_state.validation_history.append(verdict_payload)
-    if verdict.stage == "plan":
-        orchestration_state.last_plan_validation = verdict_payload
-    elif verdict.stage == "task_completion":
-        orchestration_state.last_completion_validation = verdict_payload
-
-
-def _record_live_log(
-    db: Session,
-    session_id: int,
-    task_id: Optional[int],
-    level: str,
-    message: str,
-    session_instance_id: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> None:
-    db.add(
-        LogEntry(
-            session_id=session_id,
-            task_id=task_id,
-            level=level,
-            message=message,
-            session_instance_id=session_instance_id,
-            log_metadata=json.dumps(metadata) if metadata else None,
-        )
-    )
-    db.commit()
 
 
 TOOL_FAILURE_PATTERNS = (
@@ -414,149 +305,33 @@ def _is_verification_style_task(
     )
 
 
+def _should_force_review_execution_profile(
+    execution_profile: str,
+    task_prompt: str,
+    title: Optional[str],
+    description: Optional[str],
+) -> bool:
+    if execution_profile in {"review_only", "test_only", "debug_only"}:
+        return False
+    combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
+    review_markers = (
+        "inspect",
+        "analysis",
+        "analyze",
+        "architecture",
+        "inventory",
+        "current project structure",
+        "current project architecture",
+        "codebase walkthrough",
+    )
+    return any(marker in combined for marker in review_markers)
+
+
 def _get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
     if not task or not getattr(task, "task_subfolder", None):
         return None
     report_path = project_root / task.task_subfolder / f"task_report_{task.id}.md"
     return report_path
-
-
-def _get_state_manager_path(project_root: Path) -> Path:
-    return project_root / ".openclaw" / "state_manager.json"
-
-
-def _build_project_state_snapshot(
-    db: Session,
-    project: Optional[Project],
-    current_task: Optional[Task],
-    session_id: Optional[int],
-) -> Dict[str, Any]:
-    if not project:
-        return {
-            "project_id": None,
-            "project_name": None,
-            "session_id": session_id,
-            "status": "unknown",
-            "updated_at": datetime.utcnow().isoformat(),
-            "tasks": [],
-        }
-
-    task_service = TaskService(db)
-    ordered_tasks = task_service.get_project_tasks(project.id)
-    inconsistent_pairs = []
-    highest_incomplete_position = None
-    for task in ordered_tasks:
-        if task.plan_position is None:
-            continue
-        if task.status != TaskStatus.DONE:
-            highest_incomplete_position = task.plan_position
-            break
-
-    if highest_incomplete_position is not None:
-        for task in ordered_tasks:
-            if (
-                task.plan_position is not None
-                and task.plan_position > highest_incomplete_position
-                and task.status == TaskStatus.DONE
-            ):
-                inconsistent_pairs.append(
-                    {
-                        "task_id": task.id,
-                        "plan_position": task.plan_position,
-                        "title": task.title,
-                    }
-                )
-
-    failed_or_cancelled = [
-        task
-        for task in ordered_tasks
-        if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}
-    ]
-    overall_status = "ready"
-    if failed_or_cancelled or inconsistent_pairs:
-        overall_status = "unsynced"
-    elif any(task.status == TaskStatus.RUNNING for task in ordered_tasks):
-        overall_status = "running"
-    elif any(task.status == TaskStatus.PENDING for task in ordered_tasks):
-        overall_status = "pending"
-
-    return {
-        "project_id": project.id,
-        "project_name": project.name,
-        "session_id": session_id,
-        "current_task_id": current_task.id if current_task else None,
-        "current_task_title": current_task.title if current_task else None,
-        "status": overall_status,
-        "updated_at": datetime.utcnow().isoformat(),
-        "failed_or_cancelled_task_ids": [task.id for task in failed_or_cancelled],
-        "inconsistent_completed_tasks": inconsistent_pairs,
-        "tasks": [
-            {
-                "task_id": task.id,
-                "title": task.title,
-                "plan_position": task.plan_position,
-                "status": task.status.value,
-                "workspace_status": getattr(task, "workspace_status", None),
-                "task_subfolder": getattr(task, "task_subfolder", None),
-            }
-            for task in ordered_tasks
-        ],
-    }
-
-
-def _write_project_state_snapshot(
-    db: Session,
-    project: Optional[Project],
-    current_task: Optional[Task],
-    session_id: Optional[int],
-) -> None:
-    if not project:
-        return
-    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
-    state_path = _get_state_manager_path(project_root)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _build_project_state_snapshot(db, project, current_task, session_id)
-    state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _workspace_snapshot_key(task_id: int) -> str:
-    return f"task-{task_id}-pre-run"
-
-
-def _snapshot_workspace_before_run(
-    task_service: TaskService,
-    project: Optional[Project],
-    task_id: int,
-    target_dir: Path,
-    *,
-    preserve_project_root_rules: bool,
-) -> Optional[Dict[str, Any]]:
-    if not project:
-        return None
-    return task_service.create_workspace_snapshot(
-        project,
-        target_dir,
-        snapshot_key=_workspace_snapshot_key(task_id),
-        preserve_project_root_rules=preserve_project_root_rules,
-    )
-
-
-def _restore_workspace_after_abort(
-    task_service: TaskService,
-    project: Optional[Project],
-    task_id: int,
-    target_dir: Path,
-    *,
-    preserve_project_root_rules: bool,
-) -> Optional[Dict[str, Any]]:
-    if not project:
-        return None
-    return task_service.restore_workspace_snapshot(
-        project,
-        target_dir,
-        snapshot_key=_workspace_snapshot_key(task_id),
-        preserve_project_root_rules=preserve_project_root_rules,
-    )
 
 
 def _run_virtual_merge_gate(
@@ -677,60 +452,6 @@ def _is_repeated_tool_path_failure(
     return prior_related >= 2
 
 
-def _step_needs_command_repair(step: Dict[str, Any]) -> bool:
-    commands = step.get("commands", [])
-    if not isinstance(commands, list):
-        return True
-    return not any(str(command or "").strip() for command in commands)
-
-
-def _build_step_repair_prompt(
-    task_prompt: str,
-    step: Dict[str, Any],
-    step_index: int,
-    project_dir: Path,
-    prior_results_summary: str,
-    project_context: str,
-) -> str:
-    return f"""Repair this execution step so it becomes machine-runnable JSON. Return JSON object only.
-
-Task:
-{task_prompt[:2000]}
-
-Current step index:
-{step_index + 1}
-
-Current step JSON:
-{json.dumps(step, indent=2)[:4000]}
-
-Project context:
-{project_context[:3000]}
-
-Prior completed results:
-{prior_results_summary[:2000]}
-
-Rules:
-1. Working directory is {project_dir}
-2. Use relative paths only
-3. Do not use .., ~, or absolute paths
-4. commands must be a non-empty JSON array of shell commands
-5. verification and rollback may be null
-6. expected_files must be a JSON array
-7. Keep the step intent the same
-8. Output JSON object only, no prose
-
-Example:
-{{
-  "step_number": 1,
-  "description": "Inspect project structure and locate implementation entry points",
-  "commands": ["rg --files . | head -100"],
-  "verification": "test -d . && echo ok",
-  "rollback": null,
-  "expected_files": []
-}}
-"""
-
-
 def _looks_like_truncated_multistep_plan(
     output_text: str, extracted_plan: Optional[List[Dict[str, Any]]]
 ) -> bool:
@@ -798,81 +519,6 @@ def _plan_contains_brittle_commands(
         return True
 
     return False
-
-
-def _repair_step_commands_with_self_correction(
-    openclaw_service: Any,
-    db: Session,
-    session_id: int,
-    task_id: int,
-    session_instance_id: Optional[str],
-    task_prompt: str,
-    step: Dict[str, Any],
-    step_index: int,
-    project_dir: Path,
-    prior_results_summary: str,
-    project_context: str,
-    logger_obj: logging.Logger,
-) -> Optional[Dict[str, Any]]:
-    repair_prompt = _build_step_repair_prompt(
-        task_prompt=task_prompt,
-        step=step,
-        step_index=step_index,
-        project_dir=project_dir,
-        prior_results_summary=prior_results_summary,
-        project_context=project_context,
-    )
-    repair_result = asyncio.run(
-        openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
-    )
-    repair_output = _extract_structured_text(repair_result.get("output", "{}"))
-    success, repair_data, strategy_info = error_handler.attempt_json_parsing(
-        repair_output, context="step_repair"
-    )
-    if not success or not isinstance(repair_data, dict):
-        logger_obj.warning(
-            "[ORCHESTRATION] Step %s self-correction failed to parse: %s",
-            step_index + 1,
-            strategy_info,
-        )
-        _record_live_log(
-            db,
-            session_id,
-            task_id,
-            "WARN",
-            f"[ORCHESTRATION] Step {step_index + 1} self-correction failed: {strategy_info}",
-            session_instance_id=session_instance_id,
-            metadata={"phase": "step_validation", "strategy": strategy_info},
-        )
-        return None
-
-    repaired_step = _normalize_step(
-        repair_data, project_dir, logger_obj, step_index + 1
-    )
-    if _step_needs_command_repair(repaired_step):
-        _record_live_log(
-            db,
-            session_id,
-            task_id,
-            "WARN",
-            (
-                f"[ORCHESTRATION] Step {step_index + 1} self-correction returned no runnable commands"
-            ),
-            session_instance_id=session_instance_id,
-            metadata={"phase": "step_validation"},
-        )
-        return None
-
-    _record_live_log(
-        db,
-        session_id,
-        task_id,
-        "INFO",
-        f"[ORCHESTRATION] Step {step_index + 1} repaired by self-correction",
-        session_instance_id=session_instance_id,
-        metadata={"phase": "step_validation", "strategy": strategy_info},
-    )
-    return repaired_step
 
 
 def _extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, Any]]]:
@@ -1017,63 +663,6 @@ def _extract_structured_text(value: Any) -> str:
                 return nested_text
 
     return json.dumps(value)
-
-
-def _coerce_execution_step_result(
-    raw_result: Dict[str, Any], expected_files: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """Recover a structured step result when the model returned prose instead of JSON."""
-    result = dict(raw_result or {})
-    output_text = _extract_structured_text(result.get("output", ""))
-
-    if isinstance(result.get("output"), dict):
-        return result
-
-    success, parsed_data, _strategy_info = error_handler.attempt_json_parsing(
-        output_text, context="execution"
-    )
-    if success and isinstance(parsed_data, dict):
-        merged = dict(result)
-        merged.update(parsed_data)
-        return merged
-
-    normalized = (output_text or "").strip()
-    lowered = normalized.lower()
-    if not normalized:
-        return result
-
-    success_markers = (
-        "status:** success",
-        "status: success",
-        "step complete",
-        "verification results:",
-        "files changed:",
-        "dependencies installed:",
-    )
-    failure_markers = (
-        "status:** failed",
-        "status: failed",
-        "error:",
-        "failed:",
-    )
-
-    coerced = dict(result)
-    if any(marker in lowered for marker in success_markers):
-        coerced["status"] = "success"
-        coerced["output"] = normalized
-        coerced.setdefault("verification_output", normalized[:1000])
-        coerced.setdefault("files_changed", list(expected_files or []))
-        coerced.setdefault("error", "")
-        return coerced
-
-    if any(marker in lowered for marker in failure_markers):
-        coerced["status"] = "failed"
-        coerced["output"] = normalized
-        coerced.setdefault("verification_output", normalized[:1000])
-        coerced.setdefault("error", normalized[:1000])
-        return coerced
-
-    return result
 
 
 def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
@@ -1256,27 +845,6 @@ def _normalize_expected_files(
                 f"{raw_file_path} ({exc})"
             )
     return normalized_files
-
-
-def _missing_expected_files(
-    project_dir: Path, expected_files: Optional[List[str]]
-) -> List[str]:
-    missing: List[str] = []
-    for expected in expected_files or []:
-        raw = str(expected or "").strip()
-        if not raw:
-            continue
-        expects_dir = raw.endswith("/")
-        candidate = (project_dir / raw.rstrip("/")).resolve()
-        if not candidate.is_relative_to(project_dir):
-            missing.append(raw)
-            continue
-        if expects_dir:
-            if not candidate.exists() or not candidate.is_dir():
-                missing.append(raw)
-        elif not candidate.exists():
-            missing.append(raw)
-    return missing
 
 
 def _normalize_step(
@@ -1566,28 +1134,6 @@ def _repair_planning_output_with_minimal_prompt(
     )
 
 
-def _is_long_running_verification_task(
-    execution_profile: str, step_description: str, task_prompt: str
-) -> bool:
-    combined = f"{execution_profile} {step_description} {task_prompt}".lower()
-    verification_markers = (
-        "verify",
-        "verification",
-        "refine",
-        "integration",
-        "end-to-end",
-        "e2e",
-        "test",
-        "qa",
-        "audit",
-        "review",
-        "build",
-    )
-    return execution_profile in {"test_only", "review_only"} or any(
-        marker in combined for marker in verification_markers
-    )
-
-
 def _should_retry_planning_with_minimal_prompt(
     planning_result: Dict[str, Any], output_text: str = ""
 ) -> bool:
@@ -1687,6 +1233,21 @@ def execute_openclaw_task(
             or getattr(session, "default_execution_profile", None)
             or "full_lifecycle"
         )
+        if _should_force_review_execution_profile(
+            execution_profile,
+            prompt,
+            task.title if task else None,
+            task.description if task else None,
+        ):
+            execution_profile = "review_only"
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Task intent is inspection/review-oriented; using review_only execution profile",
+                metadata={
+                    "phase": "profile_selection",
+                    "execution_profile": execution_profile,
+                },
+            )
 
         # Get the project associated with this session
         project = (
@@ -2720,6 +2281,9 @@ def execute_openclaw_task(
                         prior_results_summary=orchestration_state.prior_results_summary(),
                         project_context=orchestration_state.project_context,
                         logger_obj=logger,
+                        extract_structured_text=_extract_structured_text,
+                        normalize_step=_normalize_step,
+                        record_live_log=_record_live_log,
                     )
                     if repaired_step is not None:
                         orchestration_state.plan[step_index] = repaired_step
@@ -2791,15 +2355,13 @@ def execute_openclaw_task(
 
             # Give each step a workable minimum budget so larger scaffold/build
             # steps do not fail prematurely on otherwise healthy runs.
-            if _is_long_running_verification_task(
-                execution_profile, step_description, prompt
-            ):
-                step_timeout_seconds = max(600, min(timeout_seconds, 1800))
-            else:
-                step_timeout_seconds = max(
-                    300,
-                    timeout_seconds // max(1, min(len(orchestration_state.plan), 3)),
-                )
+            step_timeout_seconds = determine_step_timeout(
+                timeout_seconds=timeout_seconds,
+                total_steps=len(orchestration_state.plan),
+                execution_profile=execution_profile,
+                step_description=step_description,
+                task_prompt=prompt,
+            )
 
             # Execute step
             step_started_at = datetime.utcnow()
@@ -2809,7 +2371,11 @@ def execute_openclaw_task(
                     timeout_seconds=step_timeout_seconds,
                 )
             )
-            step_result = _coerce_execution_step_result(step_result, expected_files)
+            step_result = _coerce_execution_step_result(
+                step_result,
+                expected_files=expected_files,
+                extract_structured_text=_extract_structured_text,
+            )
 
             # Count attempts for this step (from debug_attempts history)
             step_debug_attempts = [
@@ -2821,57 +2387,39 @@ def execute_openclaw_task(
             current_attempt = len(step_debug_attempts) + 1
             max_attempts = 3  # Maximum retry attempts per step
 
-            # Record result
-            step_output = step_result.get("output", "")
-            step_status = (
-                "success" if step_result.get("status") != "failed" else "failed"
+            assessment = assess_step_execution(
+                db=db,
+                session_id=session_id,
+                task_id=task_id,
+                project_dir=orchestration_state.project_dir,
+                step=step,
+                step_result=step_result,
+                step_started_at=step_started_at,
+                validation_profile=validation_profile,
             )
-            missing_files: List[str] = []
+            step_output = assessment.step_output
+            step_status = assessment.step_status
+            missing_files = assessment.missing_files
+            tool_failures = assessment.tool_failures
+            correction_hints = assessment.correction_hints
+            step_result["error"] = assessment.error_message
 
-            if step_status == "success":
-                missing_files = _missing_expected_files(
-                    orchestration_state.project_dir, expected_files
+            if missing_files:
+                missing_summary = ", ".join(missing_files[:6])
+                emit_live(
+                    "WARN",
+                    (
+                        f"[ORCHESTRATION] Step {step_index + 1} reported success but "
+                        f"did not materialize expected files: {missing_summary}"
+                    ),
+                    metadata={
+                        "phase": "executing",
+                        "step_index": step_index + 1,
+                        "missing_expected_files": missing_files[:20],
+                    },
                 )
-                if missing_files:
-                    step_status = "failed"
-                    missing_summary = ", ".join(missing_files[:6])
-                    step_result["error"] = (
-                        "Step reported success but expected files are missing: "
-                        f"{missing_summary}"
-                    )
-                    emit_live(
-                        "WARN",
-                        (
-                            f"[ORCHESTRATION] Step {step_index + 1} reported success but "
-                            f"did not materialize expected files: {missing_summary}"
-                        ),
-                        metadata={
-                            "phase": "executing",
-                            "step_index": step_index + 1,
-                            "missing_expected_files": missing_files[:20],
-                        },
-                    )
 
-            tool_failures = ExecutorService.recent_step_tool_failures(
-                db,
-                session_id,
-                task_id,
-                step_started_at,
-            )
-            if step_status == "success" and tool_failures:
-                step_status = "failed"
-                failure_summary = " | ".join(tool_failures[:3])
-                correction_hints = ExecutorService.tool_failure_correction_hints(
-                    tool_failures, orchestration_state.project_dir
-                )
-                step_result["error"] = (
-                    "Step reported success but task logs contain tool failures: "
-                    f"{failure_summary}"
-                )
-                if correction_hints:
-                    step_result["error"] += " | Retry hints: " + " | ".join(
-                        correction_hints[:3]
-                    )
+            if tool_failures:
                 emit_live(
                     "WARN",
                     (
@@ -2886,30 +2434,17 @@ def execute_openclaw_task(
                     },
                 )
 
-            if step_status == "success":
-                step_validation = ValidatorService.validate_step_success(
-                    project_dir=orchestration_state.project_dir,
-                    step=step,
-                    step_output=step_output,
-                    missing_expected_files=missing_files,
-                    tool_failures=tool_failures,
-                    validation_profile=validation_profile,
-                )
+            if assessment.validation_verdict:
                 _record_validation_verdict(
                     db,
                     session_id,
                     task_id,
                     orchestration_state,
-                    step_validation,
+                    assessment.validation_verdict,
                     step_number=step_index + 1,
                 )
                 db.commit()
-                if not step_validation.accepted:
-                    step_status = "failed"
-                    step_result["error"] = (
-                        "Step failed implementation validation: "
-                        + " | ".join(step_validation.reasons[:3])
-                    )
+                if not assessment.validation_verdict.accepted:
                     emit_live(
                         "WARN",
                         (
@@ -2919,8 +2454,8 @@ def execute_openclaw_task(
                         metadata={
                             "phase": "step_validation",
                             "step_index": step_index + 1,
-                            "validation_status": step_validation.status,
-                            "reasons": step_validation.reasons[:10],
+                            "validation_status": assessment.validation_verdict.status,
+                            "reasons": assessment.validation_verdict.reasons[:10],
                         },
                     )
 
@@ -2966,30 +2501,68 @@ def execute_openclaw_task(
                 if ExecutorService.is_repeated_tool_path_failure(
                     orchestration_state.debug_attempts, step_record.error_message
                 ):
-                    manual_gate_message = (
-                        f"Step {step_index + 1} hit repeated workspace/tool-path "
-                        "failures. Manual review is required before execution can continue."
+                    decision = repeated_tool_path_failure_decision(
+                        step_index=step_index,
+                        execution_profile=execution_profile,
+                        validation_profile=validation_profile,
+                        expected_files=expected_files,
+                        step=step,
+                        project_dir=orchestration_state.project_dir,
+                        error_message=step_record.error_message,
                     )
-                    logger.warning("[ORCHESTRATION] %s", manual_gate_message)
-                    emit_live(
-                        "ERROR",
-                        f"[ORCHESTRATION] {manual_gate_message}",
-                        metadata={
-                            "phase": "debugging",
-                            "step_index": step_index + 1,
-                            "manual_review_required": True,
-                            "reason": "repeated_tool_path_failure",
-                        },
-                    )
-                    orchestration_state.status = OrchestrationStatus.ABORTED
-                    orchestration_state.abort_reason = manual_gate_message
-                    task.status = TaskStatus.FAILED
-                    task.error_message = manual_gate_message
-                    db.commit()
-                    _set_session_alert(session, "error", manual_gate_message)
-                    restore_workspace_snapshot_if_needed("repeated tool/path failures")
-                    _write_project_state_snapshot(db, project, task, session_id)
-                    return {"status": "failed", "reason": "manual_review_required"}
+                    if decision.action == "rewrite_step":
+                        rewritten_step = decision.rewritten_step or step
+                        orchestration_state.plan[step_index] = rewritten_step
+                        step = rewritten_step
+                        task.steps = json.dumps(orchestration_state.plan)
+                        orchestration_state.debug_attempts.append(
+                            {
+                                "attempt": len(orchestration_state.debug_attempts) + 1,
+                                "fix_type": "command_fix",
+                                "fix": "Rewrote inspection step into workspace discovery commands after repeated guessed-path failures",
+                                "analysis": step_record.error_message[:500],
+                                "confidence": "HIGH",
+                                "error": step_record.error_message,
+                            }
+                        )
+                        _save_orchestration_checkpoint(
+                            db, session_id, task_id, prompt, orchestration_state
+                        )
+                        db.commit()
+                        emit_live(
+                            "WARN",
+                            f"[ORCHESTRATION] {decision.message}",
+                            metadata={
+                                "phase": "debugging",
+                                "step_index": step_index + 1,
+                                "reason": "repeated_tool_path_failure_rewritten_step",
+                            },
+                        )
+                        continue
+                    else:
+                        manual_gate_message = decision.message
+                        logger.warning("[ORCHESTRATION] %s", manual_gate_message)
+                        emit_live(
+                            "ERROR",
+                            f"[ORCHESTRATION] {manual_gate_message}",
+                            metadata={
+                                "phase": "debugging",
+                                "step_index": step_index + 1,
+                                "manual_review_required": True,
+                                "reason": "repeated_tool_path_failure",
+                            },
+                        )
+                        orchestration_state.status = OrchestrationStatus.ABORTED
+                        orchestration_state.abort_reason = manual_gate_message
+                        task.status = TaskStatus.FAILED
+                        task.error_message = manual_gate_message
+                        db.commit()
+                        _set_session_alert(session, "error", manual_gate_message)
+                        restore_workspace_snapshot_if_needed(
+                            "repeated tool/path failures"
+                        )
+                        _write_project_state_snapshot(db, project, task, session_id)
+                        return {"status": "failed", "reason": "manual_review_required"}
 
                 # Check if we've exceeded max attempts
                 if current_attempt >= max_attempts:

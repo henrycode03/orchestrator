@@ -376,6 +376,8 @@ class PromptTemplates:
 16. When using a file-read or file-write tool, pass the full absolute path inside `{project_dir}` such as `{project_dir}/src/index.ts`
 17. Do not pass `{project_dir}` itself or any `task-*` directory to a file-read tool; read a specific file inside it
 18. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
+19. If the task is architecture, inspection, or review oriented, discover files first with shell commands like `rg --files .`, `find . -maxdepth 4 -type f`, `ls`, `sed`, or `head` before using a file-read tool on a guessed path
+20. If a guessed file path does not exist, do not guess a second path immediately; enumerate the real tree first and then read only confirmed files
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -419,6 +421,7 @@ class PromptTemplates:
 5. Keep fixes retry-friendly and compatible with partial progress already made inside `{project_dir}`
 6. If failure was caused by a background process, `cd ... && ...`, or complex interpreter wrapper, replace it with a direct tool-safe command
 7. If the failure mentions `raw_params` or shows a file path resolved under the wrong workspace root, fix that first by using the full absolute file-tool path inside `{project_dir}`
+8. If the failure is `read failed: ENOENT` for a guessed source path, do not guess another path blindly; first enumerate the actual workspace files with `rg --files .` or `find . -maxdepth 4 -type f`, then read only confirmed files
 
 **Output (JSON):**
 {{
@@ -1143,6 +1146,9 @@ Examples:
             "review_only": [
                 "Inspect, analyze, and report findings without changing code unless explicitly asked.",
                 "Prefer read-only commands and concise review output over implementation.",
+                "Prefer shell-based inspection commands such as ls, find, rg, sed, cat, and head before using file-read tools.",
+                "Do not create expected output files for architecture or inspection work unless the task explicitly asks for a written artifact.",
+                "Never guess source file paths from architecture assumptions; enumerate the workspace first, then inspect confirmed files only.",
             ],
         }
         selected = profile_rules.get(execution_profile, profile_rules["full_lifecycle"])

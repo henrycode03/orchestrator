@@ -1,0 +1,193 @@
+"""Execution-flow decision helpers for orchestration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy.orm import Session
+
+from .executor import ExecutorService
+from .runtime import build_workspace_discovery_step
+from .types import ValidationVerdict
+from .validator import ValidatorService
+
+
+@dataclass
+class StepExecutionAssessment:
+    step_status: str
+    step_output: str
+    error_message: str
+    missing_files: List[str]
+    tool_failures: List[str]
+    correction_hints: List[str]
+    validation_verdict: Optional[ValidationVerdict] = None
+
+
+@dataclass
+class ToolPathFailureDecision:
+    action: str  # rewrite_step | manual_review | none
+    message: str = ""
+    rewritten_step: Optional[Dict[str, Any]] = None
+
+
+def is_long_running_verification_task(
+    execution_profile: str, step_description: str, task_prompt: str
+) -> bool:
+    combined = f"{execution_profile} {step_description} {task_prompt}".lower()
+    verification_markers = (
+        "verify",
+        "verification",
+        "refine",
+        "integration",
+        "end-to-end",
+        "e2e",
+        "test",
+        "qa",
+        "audit",
+        "review",
+        "build",
+    )
+    return execution_profile in {"test_only", "review_only"} or any(
+        marker in combined for marker in verification_markers
+    )
+
+
+def determine_step_timeout(
+    *,
+    timeout_seconds: int,
+    total_steps: int,
+    execution_profile: str,
+    step_description: str,
+    task_prompt: str,
+) -> int:
+    if is_long_running_verification_task(
+        execution_profile, step_description, task_prompt
+    ):
+        return max(600, min(timeout_seconds, 1800))
+    return max(300, timeout_seconds // max(1, min(total_steps, 3)))
+
+
+def missing_expected_files(project_dir: Path, expected_files: List[str]) -> List[str]:
+    missing: List[str] = []
+    for raw_path in expected_files or []:
+        path_text = str(raw_path or "").strip().strip("\"'")
+        if not path_text:
+            continue
+        if not (project_dir / path_text).exists():
+            missing.append(path_text)
+    return missing
+
+
+def assess_step_execution(
+    *,
+    db: Session,
+    session_id: int,
+    task_id: int,
+    project_dir: Path,
+    step: Dict[str, Any],
+    step_result: Dict[str, Any],
+    step_started_at: datetime,
+    validation_profile: str,
+) -> StepExecutionAssessment:
+    step_output = str(step_result.get("output", ""))
+    step_status = "success" if step_result.get("status") != "failed" else "failed"
+    error_message = str(step_result.get("error", ""))
+    missing_files: List[str] = []
+    tool_failures: List[str] = []
+    correction_hints: List[str] = []
+    validation_verdict: Optional[ValidationVerdict] = None
+
+    expected_files = step.get("expected_files", []) or []
+
+    if step_status == "success":
+        missing_files = missing_expected_files(project_dir, expected_files)
+        if missing_files:
+            step_status = "failed"
+            missing_summary = ", ".join(missing_files[:6])
+            error_message = (
+                "Step reported success but expected files are missing: "
+                f"{missing_summary}"
+            )
+
+    tool_failures = ExecutorService.recent_step_tool_failures(
+        db,
+        session_id,
+        task_id,
+        step_started_at,
+    )
+    if step_status == "success" and tool_failures:
+        step_status = "failed"
+        failure_summary = " | ".join(tool_failures[:3])
+        correction_hints = ExecutorService.tool_failure_correction_hints(
+            tool_failures, project_dir
+        )
+        error_message = (
+            "Step reported success but task logs contain tool failures: "
+            f"{failure_summary}"
+        )
+        if correction_hints:
+            error_message += " | Retry hints: " + " | ".join(correction_hints[:3])
+
+    if step_status == "success":
+        validation_verdict = ValidatorService.validate_step_success(
+            project_dir=project_dir,
+            step=step,
+            step_output=step_output,
+            missing_expected_files=missing_files,
+            tool_failures=tool_failures,
+            validation_profile=validation_profile,
+        )
+        if not validation_verdict.accepted:
+            step_status = "failed"
+            error_message = "Step failed implementation validation: " + " | ".join(
+                validation_verdict.reasons[:3]
+            )
+
+    return StepExecutionAssessment(
+        step_status=step_status,
+        step_output=step_output,
+        error_message=error_message,
+        missing_files=missing_files,
+        tool_failures=tool_failures,
+        correction_hints=correction_hints,
+        validation_verdict=validation_verdict,
+    )
+
+
+def repeated_tool_path_failure_decision(
+    *,
+    step_index: int,
+    execution_profile: str,
+    validation_profile: str,
+    expected_files: List[str],
+    step: Dict[str, Any],
+    project_dir: Path,
+    error_message: str,
+) -> ToolPathFailureDecision:
+    read_only_step = (
+        execution_profile in {"review_only", "test_only"}
+        or validation_profile != "implementation"
+        or not expected_files
+    )
+    if read_only_step:
+        return ToolPathFailureDecision(
+            action="rewrite_step",
+            message=(
+                f"Step {step_index + 1} hit repeated workspace/tool-path failures, "
+                "so the step was rewritten into a workspace-discovery inspection step "
+                "instead of forcing manual review"
+            ),
+            rewritten_step=build_workspace_discovery_step(
+                step, project_dir, error_message
+            ),
+        )
+    return ToolPathFailureDecision(
+        action="manual_review",
+        message=(
+            f"Step {step_index + 1} hit repeated workspace/tool-path failures. "
+            "Manual review is required before execution can continue."
+        ),
+    )

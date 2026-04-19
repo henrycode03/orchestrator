@@ -37,6 +37,19 @@ class ValidatorService:
             for marker in ("verify", "verification", "review", "audit", "refine", "qa")
         ):
             return "verification"
+        if any(
+            marker in combined
+            for marker in (
+                "inspect",
+                "analysis",
+                "analyze",
+                "architecture",
+                "inventory",
+                "current project structure",
+                "current project architecture",
+            )
+        ):
+            return "verification"
         if any(marker in combined for marker in ("integration", "end-to-end", "e2e")):
             return "integration"
         if any(
