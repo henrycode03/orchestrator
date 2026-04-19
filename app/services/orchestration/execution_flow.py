@@ -91,6 +91,7 @@ def assess_step_execution(
     step_result: Dict[str, Any],
     step_started_at: datetime,
     validation_profile: str,
+    relaxed_mode: bool = False,
 ) -> StepExecutionAssessment:
     step_output = str(step_result.get("output", ""))
     step_status = "success" if step_result.get("status") != "failed" else "failed"
@@ -139,6 +140,7 @@ def assess_step_execution(
             missing_expected_files=missing_files,
             tool_failures=tool_failures,
             validation_profile=validation_profile,
+            relaxed_mode=relaxed_mode,
         )
         if not validation_verdict.accepted:
             step_status = "failed"
@@ -166,6 +168,7 @@ def repeated_tool_path_failure_decision(
     step: Dict[str, Any],
     project_dir: Path,
     error_message: str,
+    relaxed_mode: bool = False,
 ) -> ToolPathFailureDecision:
     read_only_step = (
         execution_profile in {"review_only", "test_only"}
@@ -179,6 +182,17 @@ def repeated_tool_path_failure_decision(
                 f"Step {step_index + 1} hit repeated workspace/tool-path failures, "
                 "so the step was rewritten into a workspace-discovery inspection step "
                 "instead of forcing manual review"
+            ),
+            rewritten_step=build_workspace_discovery_step(
+                step, project_dir, error_message
+            ),
+        )
+    if relaxed_mode:
+        return ToolPathFailureDecision(
+            action="rewrite_step",
+            message=(
+                f"Step {step_index + 1} hit repeated workspace/tool-path failures, "
+                "so relaxed mode rewrote it into a workspace-discovery step before giving up"
             ),
             rewritten_step=build_workspace_discovery_step(
                 step, project_dir, error_message

@@ -96,6 +96,8 @@ class OrchestrationState:
     phase_history: List[Dict[str, Any]] = field(default_factory=list)
     last_plan_validation: Optional[Dict[str, Any]] = None
     last_completion_validation: Optional[Dict[str, Any]] = None
+    relaxed_mode: bool = False
+    completion_repair_attempts: int = 0
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -379,6 +381,8 @@ class PromptTemplates:
 18. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
 19. If the task is architecture, inspection, or review oriented, discover files first with shell commands like `rg --files .`, `find . -maxdepth 4 -type f`, `ls`, `sed`, or `head` before using a file-read tool on a guessed path
 20. If a guessed file path does not exist, do not guess a second path immediately; enumerate the real tree first and then read only confirmed files
+21. Treat step descriptions as human instructions, not filenames. Do NOT invent files like `step-01-*.md` or `step-03-*.md` unless the task explicitly created them
+22. Do NOT try to read a markdown file derived from the step title or description unless that exact file was confirmed to exist in the workspace first
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -423,6 +427,7 @@ class PromptTemplates:
 6. If failure was caused by a background process, `cd ... && ...`, or complex interpreter wrapper, replace it with a direct tool-safe command
 7. If the failure mentions `raw_params` or shows a file path resolved under the wrong workspace root, fix that first by using the full absolute file-tool path inside `{project_dir}`
 8. If the failure is `read failed: ENOENT` for a guessed source path, do not guess another path blindly; first enumerate the actual workspace files with `rg --files .` or `find . -maxdepth 4 -type f`, then read only confirmed files
+9. Never assume a step description corresponds to a markdown file on disk; strings like `step-03-test-config-and-scripts.md` are guessed paths unless the workspace listing proves they exist
 
 **Output (JSON):**
 {{
@@ -837,13 +842,18 @@ Examples:
 
         proj_dir = project_dir or f"{ws_root}/{slug}"
 
+        compact_task_description = " ".join((task_description or "").split())[:1600]
+        compact_project_context = (
+            project_context or "No additional context provided."
+        )[:2200]
+
         context = {
-            "task_description": task_description,
+            "task_description": compact_task_description,
             "execution_profile": execution_profile,
             "execution_profile_rules": cls.describe_execution_profile(
                 execution_profile
             ),
-            "project_context": project_context or "No additional context provided.",
+            "project_context": compact_project_context,
             "workspace_root": ws_root,
             "project_dir": proj_dir,
         }

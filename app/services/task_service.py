@@ -298,6 +298,33 @@ class TaskService:
             }
 
         target_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_files = [
+            path
+            for path in snapshot_dir.rglob("*")
+            if path.is_file()
+            and not any(
+                part in HYDRATION_EXCLUDED_NAMES
+                for part in path.relative_to(snapshot_dir).parts
+            )
+        ]
+        current_workspace_files = [
+            path
+            for path in target_dir.rglob("*")
+            if path.is_file()
+            and not any(
+                part in HYDRATION_EXCLUDED_NAMES
+                for part in path.relative_to(target_dir).parts
+            )
+        ]
+        if not snapshot_files and current_workspace_files:
+            return {
+                "restored": False,
+                "reason": "empty_snapshot_preserved_existing_workspace",
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(target_dir),
+                "files_restored": 0,
+                "current_workspace_files": len(current_workspace_files),
+            }
         reserved_names = (
             self._reserved_project_names(project)
             if preserve_project_root_rules
@@ -320,9 +347,7 @@ class TaskService:
                 child.unlink(missing_ok=True)
 
         files_restored = 0
-        for snapshot_path in snapshot_dir.rglob("*"):
-            if snapshot_path.is_dir():
-                continue
+        for snapshot_path in snapshot_files:
             relative = snapshot_path.relative_to(snapshot_dir)
             destination = target_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)

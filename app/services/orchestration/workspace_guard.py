@@ -121,6 +121,21 @@ def looks_like_plain_english_instruction(command: str) -> bool:
     )
 
 
+def _looks_like_path_traversal_token(token: str) -> bool:
+    """Return True only for shell-token path traversal, not embedded source code."""
+
+    stripped = (token or "").strip().strip("\"'")
+    if not stripped:
+        return False
+    if any(char.isspace() for char in stripped):
+        return False
+    if any(char in stripped for char in "(){};,`"):
+        return False
+    if stripped in {"..", "../", "./.."}:
+        return True
+    return bool(re.fullmatch(r"\.\.(?:/[A-Za-z0-9._@:+-]+)+/?", stripped))
+
+
 def normalize_command(command: str, project_dir: Path) -> str:
     normalized = (command or "").strip()
     if not normalized:
@@ -134,11 +149,6 @@ def normalize_command(command: str, project_dir: Path) -> str:
     if "~" in traversal_check_target:
         raise TaskWorkspaceViolationError(
             f"Home-directory paths are not allowed: {normalized}"
-        )
-
-    if re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", traversal_check_target):
-        raise TaskWorkspaceViolationError(
-            f"Parent-directory traversal is not allowed: {normalized}"
         )
 
     current = normalized
@@ -157,13 +167,19 @@ def normalize_command(command: str, project_dir: Path) -> str:
     abs_path_matches = []
     path_scan_target = strip_heredoc_bodies(current)
     segment_command: Optional[str] = None
-    for token in shlex.split(path_scan_target, posix=True):
+    split_tokens = shlex.split(path_scan_target, posix=True)
+    for token in split_tokens:
         if token in {"&&", "||", "|", ";"}:
             segment_command = None
             continue
 
         if segment_command is None:
             segment_command = token
+
+        if _looks_like_path_traversal_token(token):
+            raise TaskWorkspaceViolationError(
+                f"Parent-directory traversal is not allowed: {normalized}"
+            )
 
         if not token.startswith("/"):
             continue
@@ -182,8 +198,9 @@ def normalize_command(command: str, project_dir: Path) -> str:
         current = current.replace(abs_path, replacement)
 
     current_traversal_target = strip_heredoc_bodies(current)
-    if "~" in current_traversal_target or re.search(
-        r"(^|[\s'\"=/])\.\.(?:/|$)", current_traversal_target
+    current_tokens = shlex.split(current_traversal_target, posix=True)
+    if "~" in current_traversal_target or any(
+        _looks_like_path_traversal_token(token) for token in current_tokens
     ):
         raise TaskWorkspaceViolationError(
             f"Command still contains unsafe path traversal: {current}"

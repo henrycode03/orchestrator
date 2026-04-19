@@ -16,6 +16,7 @@ from app.services.orchestration.execution_flow import (
     determine_step_timeout,
     repeated_tool_path_failure_decision,
 )
+from app.services.orchestration.policy import DEBUG_TIMEOUT_SECONDS, MAX_STEP_ATTEMPTS
 from app.services.orchestration.executor import ExecutorService
 from app.services.orchestration.persistence import (
     record_validation_verdict,
@@ -254,7 +255,9 @@ def execute_step_loop(
             if da.get("attempt") is not None and da.get("step_index", -1) == step_index
         ]
         current_attempt = len(step_debug_attempts) + 1
-        max_attempts = 3
+        max_attempts = MAX_STEP_ATTEMPTS + (
+            1 if orchestration_state.relaxed_mode else 0
+        )
 
         assessment = assess_step_execution(
             db=db,
@@ -265,6 +268,7 @@ def execute_step_loop(
             step_result=step_result,
             step_started_at=step_started_at,
             validation_profile=validation_profile,
+            relaxed_mode=orchestration_state.relaxed_mode,
         )
         step_output = assessment.step_output
         step_status = assessment.step_status
@@ -312,7 +316,19 @@ def execute_step_loop(
                 step_number=step_index + 1,
             )
             db.commit()
-            if not assessment.validation_verdict.accepted:
+            if assessment.validation_verdict.warning:
+                emit_live(
+                    "WARN",
+                    f"[ORCHESTRATION] Step {step_index + 1} completed with validator warnings",
+                    metadata={
+                        "phase": "step_validation",
+                        "step_index": step_index + 1,
+                        "validation_status": assessment.validation_verdict.status,
+                        "reasons": assessment.validation_verdict.reasons[:10],
+                        "relaxed_mode": orchestration_state.relaxed_mode,
+                    },
+                )
+            elif not assessment.validation_verdict.accepted:
                 emit_live(
                     "WARN",
                     f"[ORCHESTRATION] Step {step_index + 1} failed validation after execution",
@@ -375,6 +391,7 @@ def execute_step_loop(
                 step=step,
                 project_dir=orchestration_state.project_dir,
                 error_message=step_record.error_message,
+                relaxed_mode=orchestration_state.relaxed_mode,
             )
             if decision.action == "rewrite_step":
                 rewritten_step = decision.rewritten_step or step
@@ -401,6 +418,7 @@ def execute_step_loop(
                         "phase": "debugging",
                         "step_index": step_index + 1,
                         "reason": "repeated_tool_path_failure_rewritten_step",
+                        "relaxed_mode": orchestration_state.relaxed_mode,
                     },
                 )
                 continue
@@ -426,6 +444,37 @@ def execute_step_loop(
             restore_workspace_snapshot_if_needed("repeated tool/path failures")
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "manual_review_required"}
+
+        if current_attempt >= max_attempts and not orchestration_state.relaxed_mode:
+            orchestration_state.relaxed_mode = True
+            orchestration_state.debug_attempts.append(
+                {
+                    "attempt": len(orchestration_state.debug_attempts) + 1,
+                    "fix_type": "relaxed_mode",
+                    "fix": "Enabled relaxed orchestration mode after repeated step failures",
+                    "analysis": step_record.error_message[:500],
+                    "confidence": "MEDIUM",
+                    "error": step_record.error_message,
+                    "step_index": step_index,
+                }
+            )
+            save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            db.commit()
+            emit_live(
+                "WARN",
+                (
+                    f"[ORCHESTRATION] Step {step_index + 1} hit the normal retry limit; "
+                    "switching to relaxed mode for one more repair attempt"
+                ),
+                metadata={
+                    "phase": "debugging",
+                    "step_index": step_index + 1,
+                    "relaxed_mode": True,
+                },
+            )
+            max_attempts = MAX_STEP_ATTEMPTS + 1
 
         if current_attempt >= max_attempts:
             emit_live(
@@ -465,7 +514,9 @@ def execute_step_loop(
         )
 
         debug_result = asyncio.run(
-            openclaw_service.execute_task(debug_prompt, timeout_seconds=180)
+            openclaw_service.execute_task(
+                debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
+            )
         )
 
         try:
@@ -497,7 +548,9 @@ def execute_step_loop(
                     project_dir=str(orchestration_state.project_dir),
                 )
                 revise_result = asyncio.run(
-                    openclaw_service.execute_task(revise_prompt, timeout_seconds=180)
+                    openclaw_service.execute_task(
+                        revise_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
+                    )
                 )
                 revise_output = revise_result.get("output", "{}")
                 success, revise_data, strategy_info = (

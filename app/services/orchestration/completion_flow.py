@@ -7,6 +7,12 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from app.models import SessionTask, Task, TaskStatus
+from app.services.error_handler import error_handler
+from app.services.orchestration.execution_flow import (
+    assess_step_execution,
+    determine_step_timeout,
+)
+from app.services.orchestration.parsing import extract_structured_text
 from app.services.orchestration.persistence import (
     record_validation_verdict,
     save_orchestration_checkpoint,
@@ -14,10 +20,324 @@ from app.services.orchestration.persistence import (
 )
 from app.services.orchestration.policy import SUMMARY_TIMEOUT_SECONDS
 from app.services.orchestration.runtime import write_project_state_snapshot
+from app.services.orchestration.step_support import coerce_execution_step_result
 from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.prompt_templates import OrchestrationStatus, StepResult
+
+
+def _build_completion_repair_prompt(
+    *,
+    task_prompt: str,
+    completion_validation: Any,
+    project_dir: Any,
+    prior_results_summary: str,
+    project_context: str,
+    next_step_number: int,
+) -> str:
+    return f"""Return one minimal JSON repair step to fix completion validation issues. Output JSON object only.
+
+Task:
+{task_prompt[:2000]}
+
+Working directory:
+{project_dir}
+
+Completion validation issues:
+{json.dumps(completion_validation.reasons[:10], indent=2)}
+
+Prior completed results:
+{prior_results_summary[:2000]}
+
+Project context:
+{project_context[:2500]}
+
+Rules:
+1. Return a single JSON object with keys: step_number, description, commands, verification, rollback, expected_files
+2. Keep the fix atomic and minimal
+3. Use relative shell paths only
+4. Do not use `..`, `~`, or absolute paths in commands
+5. Do not create documentation files unless explicitly required
+6. Do not create a new top-level project folder
+7. Prefer fixing misplaced files, missing core files, or weak structure over rewriting the whole project
+8. commands must be a non-empty JSON array
+9. expected_files must list the files this repair should materialize or normalize
+
+Output example:
+{{
+  "step_number": {next_step_number},
+  "description": "Move generated test files into the workspace root and verify they load",
+  "commands": ["mkdir -p tests", "mv nested/tests/*.spec.js tests/"],
+  "verification": "test -f tests/event-chain.spec.js",
+  "rollback": null,
+  "expected_files": ["tests/event-chain.spec.js"]
+}}
+"""
+
+
+def _normalize_completion_repair_step(
+    raw_step: Dict[str, Any], next_step_number: int
+) -> Dict[str, Any]:
+    commands = raw_step.get("commands", [])
+    if isinstance(commands, str):
+        commands = [commands]
+    if not isinstance(commands, list):
+        commands = []
+
+    expected_files = raw_step.get("expected_files", [])
+    if isinstance(expected_files, str):
+        expected_files = [expected_files]
+    if not isinstance(expected_files, list):
+        expected_files = []
+
+    return {
+        "step_number": raw_step.get("step_number") or next_step_number,
+        "description": str(
+            raw_step.get("description") or "Apply minimal completion repair"
+        ),
+        "commands": [
+            str(command).strip() for command in commands if str(command).strip()
+        ],
+        "verification": raw_step.get("verification"),
+        "rollback": raw_step.get("rollback"),
+        "expected_files": [
+            str(path).strip() for path in expected_files if str(path).strip()
+        ],
+    }
+
+
+def _extract_completion_repair_step(
+    parsed_data: Any, next_step_number: int
+) -> Optional[Dict[str, Any]]:
+    if isinstance(parsed_data, dict):
+        step_like_keys = {
+            "step_number",
+            "description",
+            "commands",
+            "verification",
+            "rollback",
+            "expected_files",
+        }
+        if step_like_keys.intersection(parsed_data.keys()):
+            return _normalize_completion_repair_step(parsed_data, next_step_number)
+
+        for key in (
+            "step",
+            "repair_step",
+            "completion_repair_step",
+            "payload",
+            "result",
+        ):
+            candidate = parsed_data.get(key)
+            if isinstance(candidate, dict):
+                extracted = _extract_completion_repair_step(candidate, next_step_number)
+                if extracted:
+                    return extracted
+
+    if isinstance(parsed_data, list):
+        for item in parsed_data:
+            extracted = _extract_completion_repair_step(item, next_step_number)
+            if extracted:
+                return extracted
+
+    return None
+
+
+def _attempt_completion_repair(
+    *,
+    ctx: OrchestrationRunContext,
+    completion_validation: Any,
+    save_orchestration_checkpoint_fn: Callable[..., None],
+) -> Dict[str, Any]:
+    orchestration_state = ctx.orchestration_state
+    emit_live = ctx.emit_live
+    logger = ctx.logger
+    task = ctx.task
+    db = ctx.db
+    session = ctx.session
+
+    if orchestration_state.completion_repair_attempts >= 1:
+        return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
+
+    orchestration_state.completion_repair_attempts += 1
+    next_step_number = len(orchestration_state.plan) + 1
+
+    emit_live(
+        "WARN",
+        "[ORCHESTRATION] Completion validation is repairable; generating one minimal repair step",
+        metadata={
+            "phase": "completion_repair",
+            "attempt": orchestration_state.completion_repair_attempts,
+            "reasons": completion_validation.reasons[:10],
+        },
+    )
+
+    repair_prompt = _build_completion_repair_prompt(
+        task_prompt=ctx.prompt,
+        completion_validation=completion_validation,
+        project_dir=orchestration_state.project_dir,
+        prior_results_summary=orchestration_state.prior_results_summary(),
+        project_context=orchestration_state.project_context,
+        next_step_number=next_step_number,
+    )
+    repair_plan_result = asyncio.run(
+        ctx.openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
+    )
+    repair_output = extract_structured_text(repair_plan_result.get("output", "{}"))
+    success, repair_data, strategy_info = error_handler.attempt_json_parsing(
+        repair_output, context="completion_repair"
+    )
+    if not success:
+        fallback_output = extract_structured_text(repair_plan_result)
+        if fallback_output and fallback_output != repair_output:
+            success, repair_data, strategy_info = error_handler.attempt_json_parsing(
+                fallback_output, context="completion_repair"
+            )
+
+    if not success:
+        logger.warning(
+            "[ORCHESTRATION] Completion repair step generation failed to parse: %s",
+            strategy_info,
+        )
+        return {
+            "status": "failed",
+            "reason": f"repair_step_parse_failed:{strategy_info}",
+        }
+
+    repair_step = _extract_completion_repair_step(repair_data, next_step_number)
+    if repair_step is None:
+        logger.warning(
+            "[ORCHESTRATION] Completion repair parse succeeded but no usable step object was found"
+        )
+        return {
+            "status": "failed",
+            "reason": "repair_step_missing_step_object",
+        }
+
+    if not repair_step.get("commands"):
+        return {"status": "failed", "reason": "repair_step_missing_commands"}
+
+    orchestration_state.plan.append(repair_step)
+    task.steps = json.dumps(orchestration_state.plan)
+    task.current_step = next_step_number
+    save_orchestration_checkpoint_fn(
+        db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
+    )
+    db.commit()
+
+    emit_live(
+        "INFO",
+        f"[ORCHESTRATION] Executing completion repair step {next_step_number}: {repair_step['description']}",
+        metadata={
+            "phase": "completion_repair",
+            "step_index": next_step_number,
+            "strategy": strategy_info,
+        },
+    )
+
+    from app.services import PromptTemplates
+
+    execution_prompt = PromptTemplates.build_execution_prompt(
+        step_description=repair_step["description"],
+        step_commands=repair_step["commands"],
+        project_dir=str(orchestration_state.project_dir),
+        verification_command=repair_step.get("verification"),
+        rollback_command=repair_step.get("rollback"),
+        expected_files=repair_step.get("expected_files", []),
+        completed_steps_summary=orchestration_state.prior_results_summary(),
+        project_context=orchestration_state.project_context,
+        execution_profile=ctx.execution_profile,
+    )
+    step_timeout_seconds = determine_step_timeout(
+        timeout_seconds=ctx.timeout_seconds,
+        total_steps=len(orchestration_state.plan),
+        execution_profile=ctx.execution_profile,
+        step_description=repair_step["description"],
+        task_prompt=ctx.prompt,
+    )
+    step_started_at = datetime.utcnow()
+    repair_exec_result = asyncio.run(
+        ctx.openclaw_service.execute_task(
+            execution_prompt,
+            timeout_seconds=step_timeout_seconds,
+        )
+    )
+    repair_exec_result = coerce_execution_step_result(
+        repair_exec_result,
+        expected_files=repair_step.get("expected_files", []),
+        extract_structured_text=extract_structured_text,
+    )
+    assessment = assess_step_execution(
+        db=db,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        project_dir=orchestration_state.project_dir,
+        step=repair_step,
+        step_result=repair_exec_result,
+        step_started_at=step_started_at,
+        validation_profile=ctx.validation_profile,
+        relaxed_mode=orchestration_state.relaxed_mode,
+    )
+    if assessment.validation_verdict:
+        record_validation_verdict(
+            db,
+            ctx.session_id,
+            ctx.task_id,
+            orchestration_state,
+            assessment.validation_verdict,
+            step_number=next_step_number,
+        )
+        db.commit()
+
+    step_record = StepResult(
+        step_number=next_step_number,
+        status=assessment.step_status,
+        output=assessment.step_output[:1000],
+        verification_output=repair_exec_result.get("verification_output", ""),
+        files_changed=repair_exec_result.get(
+            "files_changed", repair_step.get("expected_files", [])
+        ),
+        error_message=assessment.error_message,
+        attempt=1,
+    )
+
+    if assessment.step_status == "success":
+        orchestration_state.record_success(step_record)
+        task.current_step = len(orchestration_state.plan)
+        save_orchestration_checkpoint_fn(
+            db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
+        )
+        db.commit()
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Completion repair step {next_step_number} completed successfully",
+            metadata={"phase": "completion_repair", "step_index": next_step_number},
+        )
+        return {"status": "success", "step": repair_step}
+
+    orchestration_state.record_failure(step_record)
+    task.error_message = assessment.error_message[:2000]
+    if session:
+        set_session_alert(
+            session,
+            "error",
+            f"Completion repair failed: {assessment.error_message[:1800]}",
+        )
+    save_orchestration_checkpoint_fn(
+        db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
+    )
+    db.commit()
+    emit_live(
+        "ERROR",
+        f"[ORCHESTRATION] Completion repair step {next_step_number} failed",
+        metadata={
+            "phase": "completion_repair",
+            "step_index": next_step_number,
+            "error": assessment.error_message[:1000],
+        },
+    )
+    return {"status": "failed", "reason": assessment.error_message}
 
 
 def finalize_successful_task(
@@ -45,6 +365,7 @@ def finalize_successful_task(
     prompt = ctx.prompt
     execution_profile = ctx.execution_profile
     validation_profile = ctx.validation_profile
+    runs_in_canonical_baseline = ctx.runs_in_canonical_baseline
     orchestration_state = ctx.orchestration_state
     emit_live = ctx.emit_live
     logger = ctx.logger
@@ -85,6 +406,7 @@ def finalize_successful_task(
         ),
         title=task.title if task else None,
         description=task.description if task else None,
+        relaxed_mode=orchestration_state.relaxed_mode,
     )
     record_validation_verdict(
         db,
@@ -94,6 +416,78 @@ def finalize_successful_task(
         completion_validation,
     )
     db.commit()
+
+    if completion_validation.repairable:
+        repair_result = _attempt_completion_repair(
+            ctx=ctx,
+            completion_validation=completion_validation,
+            save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
+        )
+        if repair_result.get("status") == "success":
+            completion_validation = ValidatorService.validate_task_completion(
+                project_dir=orchestration_state.project_dir,
+                plan=orchestration_state.plan,
+                task_prompt=prompt,
+                execution_profile=execution_profile,
+                workspace_consistency=task_service.analyze_workspace_consistency(
+                    orchestration_state.project_dir
+                ),
+                title=task.title if task else None,
+                description=task.description if task else None,
+                relaxed_mode=orchestration_state.relaxed_mode,
+            )
+            record_validation_verdict(
+                db,
+                session_id,
+                task_id,
+                orchestration_state,
+                completion_validation,
+            )
+            db.commit()
+        else:
+            completion_error = "Completion repair failed: " + str(
+                repair_result.get("reason") or "unknown reason"
+            )
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = completion_error
+            task.status = TaskStatus.FAILED
+            task.completed_at = datetime.utcnow()
+            task.error_message = completion_error
+            task.current_step = len(orchestration_state.plan)
+            task.workspace_status = "blocked"
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = task.completed_at
+            if session:
+                session.status = "paused"
+                session.is_active = False
+                set_session_alert(session, "error", completion_error[:2000])
+            db.commit()
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Completion repair failed",
+                metadata={
+                    "phase": "completion_repair",
+                    "reason": repair_result.get("reason"),
+                },
+            )
+            save_orchestration_checkpoint_fn(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {"status": "failed", "reason": "completion_repair_failed"}
+
+    if completion_validation.warning:
+        emit_live(
+            "WARN",
+            "[ORCHESTRATION] Task completion passed with validator warnings",
+            metadata={
+                "phase": "task_validation",
+                "validation_status": completion_validation.status,
+                "reasons": completion_validation.reasons[:10],
+                "relaxed_mode": orchestration_state.relaxed_mode,
+            },
+        )
 
     if not completion_validation.accepted:
         completion_error = "Completion validation failed: " + "; ".join(
@@ -154,6 +548,7 @@ def finalize_successful_task(
             ),
             consistency_issues=baseline_materialization.get("consistency_issues", []),
             consistency_details=baseline_materialization.get("consistency"),
+            relaxed_mode=orchestration_state.relaxed_mode,
         )
         record_validation_verdict(
             db,
@@ -163,6 +558,18 @@ def finalize_successful_task(
             baseline_publish_validation,
         )
         db.commit()
+        if baseline_publish_validation.warning:
+            emit_live(
+                "WARN",
+                "[ORCHESTRATION] Baseline publish passed with validator warnings",
+                metadata={
+                    "phase": "baseline_publish",
+                    "validation_status": baseline_publish_validation.status,
+                    "reasons": baseline_publish_validation.reasons[:10],
+                    "relaxed_mode": orchestration_state.relaxed_mode,
+                },
+            )
+
         if not baseline_publish_validation.accepted:
             baseline_error = "Baseline publish validation failed: " + "; ".join(
                 baseline_publish_validation.reasons[:5]

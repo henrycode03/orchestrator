@@ -7,9 +7,35 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.services.orchestration.policy import (
+    MINIMAL_PLANNING_TIMEOUT_SECONDS,
+    PLANNING_REPAIR_TIMEOUT_SECONDS,
+    ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
+)
+
 
 class PlannerService:
     """Planning-stage fallback and repair helpers."""
+
+    @staticmethod
+    def looks_salvageable_planning_output(output_text: str) -> bool:
+        """Heuristic for whether a failed planning response still contains useful plan content."""
+
+        text = (output_text or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        planning_markers = (
+            '"step_number"',
+            '"commands"',
+            '"expected_files"',
+            '"description"',
+            "finalassistantvisibletext",
+            "```json",
+            "[",
+            "{",
+        )
+        return any(marker in lowered for marker in planning_markers)
 
     @staticmethod
     def should_retry_with_minimal_prompt(
@@ -32,21 +58,34 @@ class PlannerService:
     ) -> bool:
         combined = f"{task_prompt or ''}\n{project_context or ''}"
         lowered_context = (project_context or "").lower()
+        lowered_task = (task_prompt or "").lower()
         dense_context_markers = (
             "hydrated baseline sources available directly in this workspace",
             "canonical baseline available",
             "earlier ordered tasks already completed and can be reused",
             "promoted workspaces already accepted into the project baseline",
         )
+        compact_task_markers = (
+            "regression test",
+            "test suite",
+            "integration test",
+            "spec file",
+            "unit test",
+            "inspection",
+            "architecture",
+            "analyze",
+            "review",
+        )
         return (
-            len(combined) > 12000
-            or len(project_context or "") > 6000
+            len(combined) > 8000
+            or len(project_context or "") > 3500
             or any(marker in lowered_context for marker in dense_context_markers)
+            or any(marker in lowered_task for marker in compact_task_markers)
         )
 
     @staticmethod
     def build_minimal_planning_prompt(task_description: str, project_dir: Path) -> str:
-        concise_task = " ".join((task_description or "").split())[:2000]
+        concise_task = " ".join((task_description or "").split())[:1200]
         return f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
 
 Task:
@@ -64,6 +103,32 @@ Rules:
 9. Prefer mkdir/touch/package-manager/editor-friendly commands and one-file-at-a-time edits
 10. Output JSON array only
 """
+
+    @staticmethod
+    def build_ultra_minimal_planning_prompt(
+        task_description: str, project_dir: Path
+    ) -> str:
+        concise_task = " ".join((task_description or "").split())[:700]
+        return f"""Return JSON array only. No prose.
+
+Task:
+{concise_task}
+
+Working directory: {project_dir}
+
+Requirements:
+1. 2 to 5 steps only
+2. Use short relative shell commands only
+3. No heredocs, no long inline source dumps, no absolute paths, no .., no ~
+4. Each step must contain exactly these keys:
+   step_number, description, commands, verification, rollback, expected_files
+5. Keep each command short and machine-runnable
+"""
+
+    @staticmethod
+    def _looks_like_timeout_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "timed out" in message or "timeout" in message
 
     @staticmethod
     def build_planning_repair_prompt(
@@ -134,12 +199,40 @@ Rules:
                 "reason": reason[:240],
             },
         )
-        return asyncio.run(
-            openclaw_service.execute_task(
-                cls.build_minimal_planning_prompt(task_description, project_dir),
-                timeout_seconds=min(timeout_seconds, 180),
+        try:
+            return asyncio.run(
+                openclaw_service.execute_task(
+                    cls.build_minimal_planning_prompt(task_description, project_dir),
+                    timeout_seconds=min(
+                        timeout_seconds, MINIMAL_PLANNING_TIMEOUT_SECONDS
+                    ),
+                )
             )
-        )
+        except Exception as exc:
+            if not cls._looks_like_timeout_error(exc):
+                raise
+            logger.warning(
+                "[ORCHESTRATION] Minimal planning prompt timed out; retrying with ultra-minimal prompt"
+            )
+            emit_live(
+                "WARN",
+                "[ORCHESTRATION] Minimal planning timed out; retrying with ultra-minimal prompt",
+                metadata={
+                    "phase": "planning",
+                    "retry": "ultra_minimal_prompt",
+                    "reason": str(exc)[:240],
+                },
+            )
+            return asyncio.run(
+                openclaw_service.execute_task(
+                    cls.build_ultra_minimal_planning_prompt(
+                        task_description, project_dir
+                    ),
+                    timeout_seconds=min(
+                        timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
+                    ),
+                )
+            )
 
     @classmethod
     def repair_output(
@@ -167,14 +260,42 @@ Rules:
                 "reason": reason[:240],
             },
         )
-        return asyncio.run(
-            openclaw_service.execute_task(
-                cls.build_planning_repair_prompt(
-                    task_description,
-                    malformed_output,
-                    project_dir,
-                    rejection_reasons=rejection_reasons,
-                ),
-                timeout_seconds=min(timeout_seconds, 120),
+        try:
+            return asyncio.run(
+                openclaw_service.execute_task(
+                    cls.build_planning_repair_prompt(
+                        task_description,
+                        malformed_output,
+                        project_dir,
+                        rejection_reasons=rejection_reasons,
+                    ),
+                    timeout_seconds=min(
+                        timeout_seconds, PLANNING_REPAIR_TIMEOUT_SECONDS
+                    ),
+                )
             )
-        )
+        except Exception as exc:
+            if not cls._looks_like_timeout_error(exc):
+                raise
+            logger.warning(
+                "[ORCHESTRATION] Planning repair prompt timed out; retrying with ultra-minimal prompt"
+            )
+            emit_live(
+                "WARN",
+                "[ORCHESTRATION] Planning repair timed out; retrying with ultra-minimal prompt",
+                metadata={
+                    "phase": "planning",
+                    "retry": "ultra_minimal_prompt",
+                    "reason": str(exc)[:240],
+                },
+            )
+            return asyncio.run(
+                openclaw_service.execute_task(
+                    cls.build_ultra_minimal_planning_prompt(
+                        task_description, project_dir
+                    ),
+                    timeout_seconds=min(
+                        timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
+                    ),
+                )
+            )

@@ -14,7 +14,7 @@ from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 
 def execute_planning_phase(
@@ -34,6 +34,10 @@ def execute_planning_phase(
         level="INFO",
         phase="planning",
         message="[ORCHESTRATION] Phase 1: PLANNING - generating step plan",
+        details={
+            "project_context_chars": len(ctx.orchestration_state.project_context or ""),
+            "task_chars": len(ctx.prompt or ""),
+        },
     )
 
     planning_prompt = ctx.openclaw_service and __build_planning_prompt(
@@ -41,6 +45,7 @@ def execute_planning_phase(
         orchestration_state=ctx.orchestration_state,
         execution_profile=ctx.execution_profile,
     )
+    planning_prompt_tokens = estimate_token_count(planning_prompt or "")
 
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
     start_with_minimal_planning_prompt = (
@@ -50,6 +55,8 @@ def execute_planning_phase(
         )
     )
     if workspace_review.get("has_existing_files"):
+        start_with_minimal_planning_prompt = True
+    if planning_prompt_tokens > 2200:
         start_with_minimal_planning_prompt = True
     used_minimal_planning_prompt = start_with_minimal_planning_prompt
 
@@ -65,6 +72,7 @@ def execute_planning_phase(
                 "project_context_length": len(
                     ctx.orchestration_state.project_context or ""
                 ),
+                "estimated_prompt_tokens": planning_prompt_tokens,
             },
         )
         planning_result = PlannerService.retry_with_minimal_prompt(
@@ -86,7 +94,7 @@ def execute_planning_phase(
     initial_output_text = extract_structured_text(planning_result.get("output", ""))
     if PlannerService.should_retry_with_minimal_prompt(
         planning_result, initial_output_text
-    ):
+    ) and not PlannerService.looks_salvageable_planning_output(initial_output_text):
         ctx.logger.warning(
             "[ORCHESTRATION] Planning failed on the first pass; retrying with minimal prompt"
         )
@@ -126,8 +134,12 @@ def execute_planning_phase(
                 output_text, context="planning"
             )
 
-            if PlannerService.should_retry_with_minimal_prompt(
-                planning_result, output_text
+            if (
+                PlannerService.should_retry_with_minimal_prompt(
+                    planning_result, output_text
+                )
+                and not success
+                and not PlannerService.looks_salvageable_planning_output(output_text)
             ):
                 raise TimeoutError(
                     f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
@@ -143,6 +155,19 @@ def execute_planning_phase(
                 continue
 
             if not success and not used_planning_repair_prompt:
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="WARN",
+                    phase="planning",
+                    message="[ORCHESTRATION] Planning response was malformed or truncated; starting repair pass",
+                    details={
+                        "reason": f"json_parse_failed_after_minimal: {strategy_info}"[
+                            :240
+                        ],
+                        "output_chars": len(output_text or ""),
+                    },
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,

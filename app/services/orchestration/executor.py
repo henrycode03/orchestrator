@@ -93,6 +93,12 @@ class ExecutorService:
                         "`rg --files . | head -200` or `find . -maxdepth 4 -type f | sort | head -200`, "
                         "then read only confirmed files."
                     )
+                    if re.search(r"/step-\d+.*\.md$", raw_path, re.IGNORECASE):
+                        hints.append(
+                            "Do not treat step descriptions as markdown files. "
+                            "A path like `step-03-...md` is probably a guessed artifact; enumerate the workspace first "
+                            "and only read it if it is actually present."
+                        )
 
             raw_command = str(raw_params.get("command") or "").strip()
             if raw_command.startswith("cd ") and "&&" in raw_command:

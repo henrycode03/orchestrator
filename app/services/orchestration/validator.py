@@ -16,10 +16,38 @@ from .types import ValidationVerdict
 
 SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx"}
 DOC_NAMES = {"readme.md", "notes.md", "summary.md"}
+ROOT_LEVEL_EXPECTED_DIRS = {
+    "src",
+    "tests",
+    "test",
+    "fixtures",
+    "config",
+    "docs",
+    "scripts",
+    "lib",
+    "app",
+    "spec",
+    ".github",
+}
 
 
 class ValidatorService:
     """Deterministic plan and completion validation."""
+
+    @staticmethod
+    def _select_status(
+        *,
+        warnings: List[str],
+        repairable: List[str],
+        rejected: List[str],
+    ) -> str:
+        if rejected:
+            return "rejected"
+        if repairable:
+            return "repair_required"
+        if warnings:
+            return "warning"
+        return "accepted"
 
     @staticmethod
     def infer_validation_profile(
@@ -287,6 +315,31 @@ class ValidatorService:
                 bad_steps.append(step.get("step_number"))
         return [step for step in bad_steps if step is not None]
 
+    @staticmethod
+    def _plan_creates_nested_project_root(plan: List[Dict[str, Any]]) -> List[int]:
+        """Detect plans that recreate a whole project under a new top-level folder."""
+
+        bad_steps: List[int] = []
+        for step in plan:
+            expected_files = [
+                str(path or "").strip()
+                for path in (step.get("expected_files", []) or [])
+                if str(path or "").strip()
+            ]
+            top_levels = {
+                Path(path_text).parts[0]
+                for path_text in expected_files
+                if len(Path(path_text).parts) > 1
+            }
+            suspicious = {
+                top
+                for top in top_levels
+                if top not in ROOT_LEVEL_EXPECTED_DIRS and not top.startswith(".")
+            }
+            if len(suspicious) == 1 and len(expected_files) >= 3:
+                bad_steps.append(step.get("step_number"))
+        return [step for step in bad_steps if step is not None]
+
     @classmethod
     def validate_plan(
         cls,
@@ -302,15 +355,19 @@ class ValidatorService:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
-        reasons: List[str] = []
+        warnings: List[str] = []
+        repairable: List[str] = []
+        rejected: List[str] = []
         details: Dict[str, Any] = {"plan_length": len(plan)}
 
         if cls._plan_contains_brittle_commands(plan, output_text):
-            reasons.append("Plan contains brittle heredoc-heavy or malformed commands")
+            repairable.append(
+                "Plan contains brittle heredoc-heavy or malformed commands"
+            )
 
         non_runnable_steps = cls._plan_contains_non_runnable_commands(plan)
         if non_runnable_steps:
-            reasons.append(
+            repairable.append(
                 "Plan contains non-runnable pseudo-commands such as `edit` or prose instructions "
                 f"(steps: {non_runnable_steps[:5]})"
             )
@@ -318,11 +375,19 @@ class ValidatorService:
 
         nested_workspace_steps = cls._plan_nests_task_workspace(plan, project_dir)
         if nested_workspace_steps:
-            reasons.append(
+            repairable.append(
                 "Plan incorrectly recreates the current task workspace as a nested folder "
                 f"(steps: {nested_workspace_steps[:5]})"
             )
             details["nested_workspace_steps"] = nested_workspace_steps
+
+        nested_project_root_steps = cls._plan_creates_nested_project_root(plan)
+        if nested_project_root_steps:
+            repairable.append(
+                "Plan appears to generate the deliverable inside a new nested project folder "
+                f"instead of the task workspace root (steps: {nested_project_root_steps[:5]})"
+            )
+            details["nested_project_root_steps"] = nested_project_root_steps
 
         if profile == "implementation":
             weak_verification_steps = [
@@ -331,38 +396,30 @@ class ValidatorService:
                 if cls._verification_is_weak(step.get("verification"))
             ]
             if weak_verification_steps:
-                reasons.append(
+                warnings.append(
                     "Plan uses weak verification for implementation-heavy work "
                     f"(steps: {weak_verification_steps[:5]})"
                 )
                 details["weak_verification_steps"] = weak_verification_steps
 
             if cls._plan_contains_placeholder_intent(plan):
-                reasons.append(
+                rejected.append(
                     "Plan appears to generate placeholder or stub implementations"
                 )
 
         if cls._plan_contains_stack_conflict(plan, task_prompt):
-            reasons.append("Plan mixes inconsistent implementation stacks for one task")
+            repairable.append(
+                "Plan mixes inconsistent implementation stacks for one task"
+            )
             details["stack_conflict"] = True
 
-        if not reasons:
-            return ValidationVerdict(
-                stage="plan",
-                status="accepted",
-                profile=profile,
-                reasons=[],
-                details=details,
-            )
-
-        status = "repair_required"
-        if any("placeholder" in reason.lower() for reason in reasons):
-            status = "rejected"
         return ValidationVerdict(
             stage="plan",
-            status=status,
+            status=cls._select_status(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             profile=profile,
-            reasons=reasons,
+            reasons=warnings + repairable + rejected,
             details=details,
         )
 
@@ -379,6 +436,33 @@ class ValidatorService:
             if candidate.exists() and candidate.is_file():
                 candidates.append(candidate)
         return candidates
+
+    @staticmethod
+    def _find_nested_expected_file_matches(
+        project_dir: Path, file_paths: Iterable[str]
+    ) -> Dict[str, List[str]]:
+        """Look one project-folder level deeper for misplaced generated files."""
+
+        nested_matches: Dict[str, List[str]] = {}
+        top_level_dirs = (
+            [
+                child
+                for child in project_dir.iterdir()
+                if child.is_dir() and child.name not in ROOT_LEVEL_EXPECTED_DIRS
+            ]
+            if project_dir.exists()
+            else []
+        )
+
+        for raw_path in file_paths:
+            relative = str(raw_path or "").strip().rstrip("/")
+            if not relative:
+                continue
+            for candidate_root in top_level_dirs:
+                nested_candidate = (candidate_root / relative).resolve()
+                if nested_candidate.exists() and nested_candidate.is_file():
+                    nested_matches.setdefault(candidate_root.name, []).append(relative)
+        return nested_matches
 
     @staticmethod
     def _detect_placeholder_content(path: Path) -> List[str]:
@@ -434,26 +518,31 @@ class ValidatorService:
         missing_expected_files: List[str],
         tool_failures: List[str],
         validation_profile: str,
+        relaxed_mode: bool = False,
     ) -> ValidationVerdict:
-        reasons: List[str] = []
+        warnings: List[str] = []
+        repairable: List[str] = []
+        rejected: List[str] = []
         details: Dict[str, Any] = {}
 
         if missing_expected_files:
-            reasons.append(
+            repairable.append(
                 f"Expected files are missing: {', '.join(missing_expected_files[:6])}"
             )
             details["missing_expected_files"] = missing_expected_files[:20]
 
         if tool_failures:
-            reasons.append(
+            repairable.append(
                 "Task logs contain tool failures during the successful step window"
             )
             details["tool_failures"] = tool_failures[:10]
 
-        if validation_profile == "implementation" and cls._verification_is_weak(
-            step.get("verification")
+        if (
+            not relaxed_mode
+            and validation_profile == "implementation"
+            and cls._verification_is_weak(step.get("verification"))
         ):
-            reasons.append(
+            warnings.append(
                 "Step verification is too weak for implementation-heavy work"
             )
 
@@ -465,15 +554,16 @@ class ValidatorService:
         for candidate in candidate_files:
             placeholder_reasons.extend(cls._detect_placeholder_content(candidate))
         if placeholder_reasons and validation_profile == "implementation":
-            reasons.extend(placeholder_reasons[:6])
+            rejected.extend(placeholder_reasons[:6])
             details["placeholder_reasons"] = placeholder_reasons[:20]
 
-        status = "accepted" if not reasons else "rejected"
         return ValidationVerdict(
             stage="step_completion",
-            status=status,
+            status=cls._select_status(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             profile=validation_profile,
-            reasons=reasons,
+            reasons=warnings + repairable + rejected,
             details=details | {"step_output_preview": step_output[:240]},
         )
 
@@ -488,19 +578,25 @@ class ValidatorService:
         workspace_consistency: Optional[Dict[str, Any]] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        relaxed_mode: bool = False,
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
         expected_core_files = cls._core_expected_files(plan)
         candidate_files = cls._iter_candidate_files(project_dir, expected_core_files)
+        nested_matches = cls._find_nested_expected_file_matches(
+            project_dir, expected_core_files
+        )
 
         missing_core = [
             path_text
             for path_text in expected_core_files
             if not (project_dir / path_text).resolve().exists()
         ]
-        reasons: List[str] = []
+        warnings: List[str] = []
+        repairable: List[str] = []
+        rejected: List[str] = []
         details: Dict[str, Any] = {
             "expected_core_files": expected_core_files[:20],
             "validated_files": [
@@ -509,20 +605,46 @@ class ValidatorService:
         }
 
         if missing_core:
-            reasons.append(
+            repairable.append(
                 f"Core implementation files are missing: {', '.join(missing_core[:6])}"
             )
             details["missing_core_files"] = missing_core[:20]
+
+        if nested_matches:
+            details["nested_expected_file_matches"] = {
+                key: value[:10] for key, value in nested_matches.items()
+            }
+            dominant_root = max(
+                nested_matches.items(),
+                key=lambda item: len(item[1]),
+                default=(None, []),
+            )[0]
+            if dominant_root:
+                if relaxed_mode:
+                    warnings.append(
+                        "Implementation appears to have been generated inside nested folder "
+                        f"`{dominant_root}/` instead of the task workspace root"
+                    )
+                else:
+                    repairable.append(
+                        "Implementation appears to have been generated inside nested folder "
+                        f"`{dominant_root}/` instead of the task workspace root"
+                    )
 
         placeholder_reasons: List[str] = []
         for candidate in candidate_files:
             placeholder_reasons.extend(cls._detect_placeholder_content(candidate))
         if placeholder_reasons and profile == "implementation":
-            reasons.extend(placeholder_reasons[:10])
+            rejected.extend(placeholder_reasons[:10])
             details["placeholder_reasons"] = placeholder_reasons[:20]
 
         if profile == "implementation" and not candidate_files:
-            reasons.append("No core implementation source files were produced")
+            if relaxed_mode and nested_matches:
+                warnings.append(
+                    "No core implementation files were found at the workspace root, but nested generated files were detected"
+                )
+            else:
+                rejected.append("No core implementation source files were produced")
 
         workspace_consistency = workspace_consistency or {}
         plan_stack = cls._infer_stack_from_plan(plan)
@@ -533,7 +655,8 @@ class ValidatorService:
 
         if profile == "implementation":
             if workspace_consistency.get("nested_duplicate_dirs"):
-                reasons.append(
+                target = warnings if relaxed_mode else repairable
+                target.append(
                     "Workspace contains nested duplicate implementation directories: "
                     + ", ".join(
                         workspace_consistency.get("nested_duplicate_dirs", [])[:4]
@@ -541,21 +664,24 @@ class ValidatorService:
                 )
             if workspace_consistency.get("mixed_stack") and not allows_multiple_stacks:
                 if plan_stack in {"node", "python"}:
-                    reasons.append(
+                    target = warnings if relaxed_mode else repairable
+                    target.append(
                         "Workspace mixes Python and Node/JS artifacts even though the accepted plan targets a single "
                         f"{plan_stack} stack"
                     )
                 else:
-                    reasons.append(
+                    target = warnings if relaxed_mode else repairable
+                    target.append(
                         "Workspace contains mixed Python and Node/JS implementation artifacts for one task"
                     )
 
-        status = "accepted" if not reasons else "rejected"
         return ValidationVerdict(
             stage="task_completion",
-            status=status,
+            status=cls._select_status(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             profile=profile,
-            reasons=reasons,
+            reasons=warnings + repairable + rejected,
             details=details,
         )
 
@@ -569,39 +695,45 @@ class ValidatorService:
         missing_prior_expected_files: List[Dict[str, Any]],
         consistency_issues: Optional[List[str]] = None,
         consistency_details: Optional[Dict[str, Any]] = None,
+        relaxed_mode: bool = False,
     ) -> ValidationVerdict:
-        reasons: List[str] = []
+        warnings: List[str] = []
+        repairable: List[str] = []
+        rejected: List[str] = []
         details: Dict[str, Any] = {
             "baseline_path": baseline_path,
             "baseline_file_count": baseline_file_count,
         }
 
         if baseline_file_count <= 0:
-            reasons.append("Canonical baseline is empty after publish")
+            repairable.append("Canonical baseline is empty after publish")
 
         if missing_task_expected_files:
-            reasons.append(
+            repairable.append(
                 "Published baseline is missing current task files: "
                 + ", ".join(missing_task_expected_files[:6])
             )
             details["missing_task_expected_files"] = missing_task_expected_files[:20]
 
         if missing_prior_expected_files:
-            reasons.append(
+            repairable.append(
                 "Canonical baseline is missing previously completed task files"
             )
             details["missing_prior_expected_files"] = missing_prior_expected_files[:20]
         if consistency_issues:
-            reasons.extend(consistency_issues[:4])
+            target = warnings if relaxed_mode else repairable
+            target.extend(consistency_issues[:4])
             details["consistency_issues"] = consistency_issues[:10]
         if consistency_details:
             details["consistency"] = consistency_details
 
         return ValidationVerdict(
             stage="baseline_publish",
-            status="accepted" if not reasons else "rejected",
+            status=ValidatorService._select_status(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             profile=validation_profile,
-            reasons=reasons,
+            reasons=warnings + repairable + rejected,
             details=details,
         )
 

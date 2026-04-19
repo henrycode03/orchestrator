@@ -17,7 +17,19 @@ class ValidationVerdict:
 
     @property
     def accepted(self) -> bool:
-        return self.status == "accepted"
+        return self.status in {"accepted", "warning"}
+
+    @property
+    def warning(self) -> bool:
+        return self.status == "warning"
+
+    @property
+    def repairable(self) -> bool:
+        return self.status == "repair_required"
+
+    @property
+    def rejected(self) -> bool:
+        return self.status == "rejected"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -45,6 +57,7 @@ class OrchestrationRunContext:
     timeout_seconds: int
     execution_profile: str
     validation_profile: str
+    runs_in_canonical_baseline: bool
     orchestration_state: Any
     openclaw_service: Any
     task_service: Any

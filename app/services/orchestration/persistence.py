@@ -85,6 +85,8 @@ def save_orchestration_checkpoint(
             "phase_history": orchestration_state.phase_history,
             "last_plan_validation": orchestration_state.last_plan_validation,
             "last_completion_validation": orchestration_state.last_completion_validation,
+            "relaxed_mode": orchestration_state.relaxed_mode,
+            "completion_repair_attempts": orchestration_state.completion_repair_attempts,
             "execution_results": [
                 serialize_step_result(r) for r in orchestration_state.execution_results
             ],

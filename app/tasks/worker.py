@@ -59,6 +59,7 @@ from app.services.orchestration.runtime import (
     write_project_state_snapshot as _write_project_state_snapshot,
 )
 from app.services.error_handler import error_handler
+from app.services.checkpoint_service import CheckpointService
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.task_service import TaskService
 from app.services.prompt_templates import (
@@ -308,7 +309,7 @@ def execute_openclaw_task(
             )
 
         workspace_snapshot_result: Optional[Dict[str, Any]] = None
-        if project and not is_resume_execution:
+        if project:
             workspace_snapshot_result = _snapshot_workspace_before_run(
                 task_service,
                 project,
@@ -327,6 +328,7 @@ def execute_openclaw_task(
                         "phase": "workspace_snapshot",
                         "snapshot_path": workspace_snapshot_result.get("snapshot_path"),
                         "source_exists": workspace_snapshot_result.get("source_exists"),
+                        "is_resume_execution": is_resume_execution,
                     },
                 )
 
@@ -360,6 +362,34 @@ def execute_openclaw_task(
                         "reason": reason,
                         "snapshot_path": restore_result.get("snapshot_path"),
                         "target_path": restore_result.get("target_path"),
+                    },
+                )
+            elif (
+                restore_result
+                and restore_result.get("reason")
+                == "empty_snapshot_preserved_existing_workspace"
+            ):
+                logger.warning(
+                    "[ORCHESTRATION] Skipped destructive restore for task %s after %s because snapshot was empty and workspace already had files",
+                    task_id,
+                    reason,
+                )
+                emit_live(
+                    "WARN",
+                    (
+                        "[ORCHESTRATION] Skipped restoring an empty pre-run snapshot "
+                        f"after {reason} to preserve the current workspace "
+                        f"({restore_result.get('current_workspace_files', 0)} files)"
+                    ),
+                    metadata={
+                        "phase": "workspace_restore",
+                        "reason": reason,
+                        "snapshot_path": restore_result.get("snapshot_path"),
+                        "target_path": restore_result.get("target_path"),
+                        "current_workspace_files": restore_result.get(
+                            "current_workspace_files", 0
+                        ),
+                        "restore_skipped": True,
                     },
                 )
             return restore_result
@@ -479,6 +509,12 @@ def execute_openclaw_task(
             )
             orchestration_state.last_completion_validation = checkpoint_state.get(
                 "last_completion_validation"
+            )
+            orchestration_state.relaxed_mode = bool(
+                checkpoint_state.get("relaxed_mode", False)
+            )
+            orchestration_state.completion_repair_attempts = int(
+                checkpoint_state.get("completion_repair_attempts", 0) or 0
             )
             orchestration_state.execution_results = [
                 _restore_step_result(item)
@@ -619,6 +655,7 @@ def execute_openclaw_task(
             timeout_seconds=timeout_seconds,
             execution_profile=execution_profile,
             validation_profile=validation_profile,
+            runs_in_canonical_baseline=runs_in_canonical_baseline,
             orchestration_state=orchestration_state,
             openclaw_service=openclaw_service,
             task_service=task_service,
@@ -633,6 +670,7 @@ def execute_openclaw_task(
             project=project,
             current_task=task,
             execution_profile=execution_profile,
+            get_state_manager_path_fn=_get_state_manager_path,
         )
         if gate_error:
             orchestration_state.status = OrchestrationStatus.ABORTED
@@ -785,6 +823,11 @@ def execute_openclaw_task(
                             validation_profile
                             if "validation_profile" in locals()
                             else "implementation"
+                        ),
+                        runs_in_canonical_baseline=(
+                            runs_in_canonical_baseline
+                            if "runs_in_canonical_baseline" in locals()
+                            else False
                         ),
                         orchestration_state=orchestration_state,
                         openclaw_service=None,
