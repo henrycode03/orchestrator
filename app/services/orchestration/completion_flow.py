@@ -12,28 +12,17 @@ from app.services.orchestration.persistence import (
     save_orchestration_checkpoint,
     set_session_alert,
 )
+from app.services.orchestration.policy import SUMMARY_TIMEOUT_SECONDS
 from app.services.orchestration.runtime import write_project_state_snapshot
+from app.services.orchestration.telemetry import emit_phase_event
+from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus
 
 
 def finalize_successful_task(
     *,
-    db: Any,
-    openclaw_service: Any,
-    task_service: Any,
-    session: Any,
-    project: Any,
-    task: Any,
-    session_task_link: Optional[SessionTask],
-    session_id: int,
-    task_id: int,
-    prompt: str,
-    execution_profile: str,
-    validation_profile: str,
-    orchestration_state: Any,
-    emit_live: Callable[..., None],
-    logger: logging.Logger,
+    ctx: OrchestrationRunContext,
     write_project_state_snapshot_fn: Callable[..., None] = write_project_state_snapshot,
     save_orchestration_checkpoint_fn: Callable[
         ..., None
@@ -44,11 +33,29 @@ def finalize_successful_task(
     build_task_report_payload_fn: Optional[Callable[..., Dict[str, Any]]] = None,
     render_task_report_fn: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    db = ctx.db
+    openclaw_service = ctx.openclaw_service
+    task_service = ctx.task_service
+    session = ctx.session
+    project = ctx.project
+    task = ctx.task
+    session_task_link = ctx.session_task_link
+    session_id = ctx.session_id
+    task_id = ctx.task_id
+    prompt = ctx.prompt
+    execution_profile = ctx.execution_profile
+    validation_profile = ctx.validation_profile
+    orchestration_state = ctx.orchestration_state
+    emit_live = ctx.emit_live
+    logger = ctx.logger
+
     logger.info("[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion")
-    emit_live(
-        "INFO",
-        "[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion",
-        metadata={"phase": "task_summary"},
+    emit_phase_event(
+        orchestration_state,
+        emit_live,
+        level="INFO",
+        phase="task_summary",
+        message="[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion",
     )
 
     from app.services import PromptTemplates
@@ -63,7 +70,9 @@ def finalize_successful_task(
         execution_profile=execution_profile,
     )
     summary_result = asyncio.run(
-        openclaw_service.execute_task(summary_prompt, timeout_seconds=60)
+        openclaw_service.execute_task(
+            summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
+        )
     )
 
     completion_validation = ValidatorService.validate_task_completion(

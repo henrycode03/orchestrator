@@ -69,6 +69,16 @@ def _authenticate_websocket(websocket: WebSocket, db: Session) -> Optional[User]
     return user
 
 
+def _prepare_initial_log_batch(
+    recent_logs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalize initial log order and cursor for websocket replay safety."""
+
+    ordered_logs = list(reversed(recent_logs))
+    last_log_id = max((log.get("id", 0) for log in ordered_logs), default=0)
+    return ordered_logs, last_log_id
+
+
 async def stream_session_logs(
     websocket: WebSocket, session_id: int, db: Session
 ) -> None:
@@ -131,7 +141,7 @@ async def stream_session_logs(
         )
         recent_logs = fallback_logs
 
-    recent_logs = list(reversed(recent_logs))
+    recent_logs, last_log_id = _prepare_initial_log_batch(recent_logs)
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
 
@@ -147,8 +157,6 @@ async def stream_session_logs(
             logger.error(
                 "Heartbeat sender error for session %s: %s", session_id, str(exc)
             )
-
-    last_log_id = max((log["id"] for log in recent_logs), default=0)
 
     try:
         heartbeat_task = asyncio.create_task(heartbeat_sender())

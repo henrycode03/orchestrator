@@ -27,6 +27,8 @@ from app.services import (
     build_task_subfolder_name,
 )
 from app.services.orchestration import (
+    STALE_RUN_GUARD_SECONDS,
+    OrchestrationRunContext,
     TaskWorkspaceViolationError,
     ValidatorService,
     build_task_report_payload as _build_task_report_payload,
@@ -383,7 +385,7 @@ def execute_openclaw_task(
         # load the saved orchestration state.
         if task.started_at and not is_resume_execution:
             time_since_start = datetime.utcnow() - task.started_at
-            if time_since_start.total_seconds() > 300:  # 5 minutes
+            if time_since_start.total_seconds() > STALE_RUN_GUARD_SECONDS:
                 logger.warning(
                     f"[ORCHESTRATION] Task {task_id} already running for {time_since_start}, marking as failed"
                 )
@@ -468,6 +470,9 @@ def execute_openclaw_task(
             )
             orchestration_state.validation_history = (
                 checkpoint_state.get("validation_history", []) or []
+            )
+            orchestration_state.phase_history = (
+                checkpoint_state.get("phase_history", []) or []
             )
             orchestration_state.last_plan_validation = checkpoint_state.get(
                 "last_plan_validation"
@@ -602,6 +607,27 @@ def execute_openclaw_task(
             description=task.description if task else None,
         )
 
+        run_ctx = OrchestrationRunContext(
+            db=db,
+            session=session,
+            project=project,
+            task=task,
+            session_task_link=session_task_link,
+            session_id=session_id,
+            task_id=task_id,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+            execution_profile=execution_profile,
+            validation_profile=validation_profile,
+            orchestration_state=orchestration_state,
+            openclaw_service=openclaw_service,
+            task_service=task_service,
+            logger=logger,
+            emit_live=emit_live,
+            error_handler=error_handler,
+            restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
+        )
+
         gate_error = _run_virtual_merge_gate(
             db=db,
             project=project,
@@ -703,25 +729,12 @@ def execute_openclaw_task(
 
         if not resumed_from_checkpoint and not orchestration_state.plan:
             planning_phase_result = execute_planning_phase(
-                db=db,
-                session=session,
-                task=task,
-                session_id=session_id,
-                task_id=task_id,
-                prompt=prompt,
-                timeout_seconds=timeout_seconds,
-                execution_profile=execution_profile,
-                orchestration_state=orchestration_state,
-                openclaw_service=openclaw_service,
+                ctx=run_ctx,
                 workspace_review=workspace_review,
-                logger=logger,
-                emit_live=emit_live,
-                error_handler=error_handler,
                 extract_structured_text=_extract_structured_text,
                 extract_plan_steps=_extract_plan_steps,
                 looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
                 normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-                restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
                 workspace_violation_error_cls=TaskWorkspaceViolationError,
             )
             if planning_phase_result.get("status") != "completed":
@@ -732,27 +745,10 @@ def execute_openclaw_task(
         )
 
         return execute_step_loop(
-            db=db,
-            session=session,
-            project=project,
-            task=task,
-            session_task_link=session_task_link,
-            session_id=session_id,
-            task_id=task_id,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            execution_profile=execution_profile,
-            validation_profile=validation_profile,
-            orchestration_state=orchestration_state,
-            openclaw_service=openclaw_service,
-            task_service=task_service,
-            emit_live=emit_live,
-            logger=logger,
-            error_handler=error_handler,
+            ctx=run_ctx,
             extract_structured_text=_extract_structured_text,
             normalize_step=_normalize_step,
             normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-            restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
             workspace_violation_error_cls=TaskWorkspaceViolationError,
             write_project_state_snapshot_fn=_write_project_state_snapshot,
             get_next_pending_project_task_fn=_get_next_pending_project_task,
@@ -766,23 +762,47 @@ def execute_openclaw_task(
     except Exception as exc:
         handle_task_failure(
             self_task=self,
-            db=db,
-            session=session,
-            project=project,
-            task=task,
-            session_task_link=session_task_link,
-            session_id=session_id,
-            task_id=task_id,
-            prompt=prompt,
-            exc=exc,
-            orchestration_state=orchestration_state,
-            restore_workspace_snapshot_if_needed=(
-                restore_workspace_snapshot_if_needed
-                if "restore_workspace_snapshot_if_needed" in locals()
-                else None
+            ctx=(
+                run_ctx
+                if "run_ctx" in locals()
+                else (
+                    OrchestrationRunContext(
+                        db=db,
+                        session=session,
+                        project=project,
+                        task=task,
+                        session_task_link=session_task_link,
+                        session_id=session_id,
+                        task_id=task_id,
+                        prompt=prompt,
+                        timeout_seconds=timeout_seconds,
+                        execution_profile=(
+                            execution_profile
+                            if "execution_profile" in locals()
+                            else "full_lifecycle"
+                        ),
+                        validation_profile=(
+                            validation_profile
+                            if "validation_profile" in locals()
+                            else "implementation"
+                        ),
+                        orchestration_state=orchestration_state,
+                        openclaw_service=None,
+                        task_service=None,
+                        logger=logger,
+                        emit_live=lambda *_args, **_kwargs: None,
+                        error_handler=error_handler,
+                        restore_workspace_snapshot_if_needed=(
+                            restore_workspace_snapshot_if_needed
+                            if "restore_workspace_snapshot_if_needed" in locals()
+                            else None
+                        ),
+                    )
+                    if session and task
+                    else None
+                )
             ),
-            logger=logger,
-            error_handler=error_handler,
+            exc=exc,
             get_latest_session_task_link_fn=_get_latest_session_task_link,
         )
 

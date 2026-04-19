@@ -25,10 +25,14 @@ This package holds the internal orchestration pipeline used by the worker.
   - task-intent classification and virtual merge gate rules
 - `reporting.py`
   - task report payload/render helpers
+- `policy.py`
+  - shared orchestration thresholds and timeout caps
 - `persistence.py`
   - checkpoint, validation, and live-log persistence helpers
 - `runtime.py`
   - workspace snapshot/state-manager/runtime support
+- `telemetry.py`
+  - structured phase-event recording for resume/debug observability
 - `validator.py`
   - deterministic plan/step/completion validation
 - `planner.py`
@@ -36,10 +40,12 @@ This package holds the internal orchestration pipeline used by the worker.
 - `executor.py`
   - tool-failure inspection helpers
 - `types.py`
-  - shared orchestration dataclasses
+  - shared orchestration dataclasses, including `OrchestrationRunContext`
 
 ## Package Conventions
 
 - Keep `worker.py` as the Celery entrypoint and coordinator, not the place for dense orchestration logic.
 - Prefer adding new orchestration behavior to one of these modules instead of growing the worker again.
 - Use `__init__.py` as the stable import surface for the worker and nearby orchestration callers.
+- Pass shared runtime state through `OrchestrationRunContext` instead of expanding flow signatures one keyword at a time.
+- Record major phase transitions with `telemetry.py` so checkpoint resumes can explain what happened before a failure or retry.

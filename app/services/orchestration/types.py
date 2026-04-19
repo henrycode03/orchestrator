@@ -1,7 +1,7 @@
 """Shared orchestration types."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -28,3 +28,33 @@ class ValidationVerdict:
             "details": dict(self.details),
             "used_small_model": self.used_small_model,
         }
+
+
+@dataclass
+class OrchestrationRunContext:
+    """Shared runtime context for orchestration flows."""
+
+    db: Any
+    session: Any
+    project: Any
+    task: Any
+    session_task_link: Any
+    session_id: int
+    task_id: int
+    prompt: str
+    timeout_seconds: int
+    execution_profile: str
+    validation_profile: str
+    orchestration_state: Any
+    openclaw_service: Any
+    task_service: Any
+    logger: Any
+    emit_live: Callable[..., None]
+    error_handler: Any
+    restore_workspace_snapshot_if_needed: Optional[Callable[[str], Any]] = None
+
+    @property
+    def session_instance_id(self) -> Optional[str]:
+        if not self.session:
+            return None
+        return getattr(self.session, "instance_id", None)

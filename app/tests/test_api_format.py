@@ -5,11 +5,11 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-client = TestClient(app)
+main_client = TestClient(app)
 
 
 def test_health_check_contract():
-    response = client.get("/health")
+    response = main_client.get("/health")
 
     assert response.status_code in {200, 503}
     payload = response.json()
@@ -19,15 +19,15 @@ def test_health_check_contract():
 
 
 def test_projects_list_returns_array_contract():
-    response = client.get("/api/v1/projects")
+    response = main_client.get("/api/v1/projects")
 
     assert response.status_code == 200
     payload = response.json()
     assert isinstance(payload, list)
 
 
-def test_project_create_and_detail_contract():
-    create_response = client.post(
+def test_project_create_and_detail_contract(authenticated_client):
+    create_response = authenticated_client.post(
         "/api/v1/projects",
         json={
             "name": "Regression Test Project",
@@ -41,7 +41,7 @@ def test_project_create_and_detail_contract():
     assert "id" in project
     assert "created_at" in project
 
-    detail_response = client.get(f"/api/v1/projects/{project['id']}")
+    detail_response = authenticated_client.get(f"/api/v1/projects/{project['id']}")
     assert detail_response.status_code == 200
     detail = detail_response.json()
     assert detail["id"] == project["id"]
@@ -51,7 +51,7 @@ def test_project_create_and_detail_contract():
 
 
 def test_missing_project_returns_detail_message():
-    response = client.get("/api/v1/projects/999999")
+    response = main_client.get("/api/v1/projects/999999")
 
     assert response.status_code == 404
     payload = response.json()

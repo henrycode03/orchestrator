@@ -27,33 +27,18 @@ from app.services.orchestration.step_support import (
     repair_step_commands_with_self_correction,
     step_needs_command_repair,
 )
+from app.services.orchestration.telemetry import emit_phase_event
+from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 
 def execute_step_loop(
     *,
-    db: Any,
-    session: Any,
-    project: Any,
-    task: Any,
-    session_task_link: Any,
-    session_id: int,
-    task_id: int,
-    prompt: str,
-    timeout_seconds: int,
-    execution_profile: str,
-    validation_profile: str,
-    orchestration_state: Any,
-    openclaw_service: Any,
-    task_service: Any,
-    logger: logging.Logger,
-    emit_live: Callable[..., None],
-    error_handler: Any,
+    ctx: OrchestrationRunContext,
     extract_structured_text: Callable[[Any], str],
     normalize_step: Callable[..., Dict[str, Any]],
     normalize_plan_with_live_logging: Callable[..., Any],
-    restore_workspace_snapshot_if_needed: Callable[[str], Optional[Dict[str, Any]]],
     workspace_violation_error_cls: type[Exception],
     get_next_pending_project_task_fn: Callable[..., Any],
     get_latest_session_task_link_fn: Callable[..., Any],
@@ -63,14 +48,36 @@ def execute_step_loop(
     write_project_state_snapshot_fn: Callable[..., None],
     record_live_log_fn: Callable[..., None],
 ) -> Dict[str, Any]:
+    db = ctx.db
+    session = ctx.session
+    project = ctx.project
+    task = ctx.task
+    session_task_link = ctx.session_task_link
+    session_id = ctx.session_id
+    task_id = ctx.task_id
+    prompt = ctx.prompt
+    timeout_seconds = ctx.timeout_seconds
+    execution_profile = ctx.execution_profile
+    validation_profile = ctx.validation_profile
+    orchestration_state = ctx.orchestration_state
+    openclaw_service = ctx.openclaw_service
+    task_service = ctx.task_service
+    logger = ctx.logger
+    emit_live = ctx.emit_live
+    error_handler = ctx.error_handler
+    restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
+
     logger.info(
         "[ORCHESTRATION] Phase 2: EXECUTING - executing %s steps",
         len(orchestration_state.plan),
     )
-    emit_live(
-        "INFO",
-        f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps",
-        metadata={"phase": "executing", "steps": len(orchestration_state.plan)},
+    emit_phase_event(
+        orchestration_state,
+        emit_live,
+        level="INFO",
+        phase="executing",
+        message=f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps",
+        details={"steps": len(orchestration_state.plan)},
     )
 
     for step_index in range(
@@ -190,11 +197,13 @@ def execute_step_loop(
             len(orchestration_state.plan),
             step_description[:80],
         )
-        emit_live(
-            "INFO",
-            f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description}",
-            metadata={
-                "phase": "executing",
+        emit_phase_event(
+            orchestration_state,
+            emit_live,
+            level="INFO",
+            phase="executing",
+            message=f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description}",
+            details={
                 "step_index": step_index + 1,
                 "step_total": len(orchestration_state.plan),
             },
@@ -625,21 +634,7 @@ def execute_step_loop(
             return {"status": "failed", "reason": "debug_parse_error"}
 
     return finalize_successful_task(
-        db=db,
-        openclaw_service=openclaw_service,
-        task_service=task_service,
-        session=session,
-        project=project,
-        task=task,
-        session_task_link=session_task_link,
-        session_id=session_id,
-        task_id=task_id,
-        prompt=prompt,
-        execution_profile=execution_profile,
-        validation_profile=validation_profile,
-        orchestration_state=orchestration_state,
-        emit_live=emit_live,
-        logger=logger,
+        ctx=ctx,
         write_project_state_snapshot_fn=write_project_state_snapshot_fn,
         get_next_pending_project_task_fn=get_next_pending_project_task_fn,
         get_latest_session_task_link_fn=get_latest_session_task_link_fn,

@@ -1,35 +1,27 @@
 """Task failure and abort handling flow."""
 
 import logging
+import json
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from app.models import TaskStatus
+from app.models import LogEntry, TaskStatus
 from app.services.orchestration.persistence import (
     record_live_log,
     save_orchestration_checkpoint,
     set_session_alert,
 )
 from app.services.orchestration.runtime import write_project_state_snapshot
+from app.services.orchestration.telemetry import record_phase_event
+from app.services.orchestration.types import OrchestrationRunContext
 from app.services.prompt_templates import OrchestrationStatus
 
 
 def handle_task_failure(
     *,
     self_task: Any,
-    db: Any,
-    session: Any,
-    project: Any,
-    task: Any,
-    session_task_link: Any,
-    session_id: int,
-    task_id: int,
-    prompt: str,
+    ctx: Optional[OrchestrationRunContext],
     exc: Exception,
-    orchestration_state: Any,
-    restore_workspace_snapshot_if_needed: Optional[Callable[[str], None]],
-    logger: logging.Logger,
-    error_handler: Any,
     get_latest_session_task_link_fn: Callable[..., Any],
     write_project_state_snapshot_fn: Callable[..., None] = write_project_state_snapshot,
     save_orchestration_checkpoint_fn: Callable[
@@ -37,6 +29,21 @@ def handle_task_failure(
     ] = save_orchestration_checkpoint,
     record_live_log_fn: Callable[..., None] = record_live_log,
 ) -> None:
+    db = ctx.db if ctx else None
+    session = ctx.session if ctx else None
+    project = ctx.project if ctx else None
+    task = ctx.task if ctx else None
+    session_task_link = ctx.session_task_link if ctx else None
+    session_id = ctx.session_id if ctx else None
+    task_id = ctx.task_id if ctx else None
+    prompt = ctx.prompt if ctx else ""
+    orchestration_state = ctx.orchestration_state if ctx else None
+    restore_workspace_snapshot_if_needed = (
+        ctx.restore_workspace_snapshot_if_needed if ctx else None
+    )
+    logger = ctx.logger if ctx else logging.getLogger(__name__)
+    error_handler = ctx.error_handler if ctx else None
+
     should_retry = error_handler.should_retry(exc, "task_execution")
     is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
 
@@ -81,6 +88,13 @@ def handle_task_failure(
         if orchestration_state:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = str(exc)
+            record_phase_event(
+                orchestration_state,
+                phase="failure",
+                status="error",
+                message=f"[ORCHESTRATION] Task {task_id} failed: {exc}",
+                details={"retryable": should_retry, "is_timeout": is_timeout},
+            )
             save_orchestration_checkpoint_fn(
                 db,
                 session_id,

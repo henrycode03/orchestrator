@@ -23,6 +23,15 @@ from .parsing import (
     extract_structured_text,
     looks_like_truncated_multistep_plan,
 )
+from .policy import (
+    DEBUG_TIMEOUT_SECONDS,
+    MAX_STEP_ATTEMPTS,
+    PLANNING_TIMEOUT_MAX_SECONDS,
+    PLANNING_TIMEOUT_MIN_SECONDS,
+    STALE_RUN_GUARD_SECONDS,
+    SUMMARY_TIMEOUT_SECONDS,
+    clamp_planning_timeout,
+)
 from .persistence import (
     record_live_log,
     record_validation_verdict,
@@ -53,7 +62,8 @@ from .task_rules import (
     run_virtual_merge_gate,
     should_force_review_execution_profile,
 )
-from .types import ValidationVerdict
+from .telemetry import emit_phase_event, record_phase_event
+from .types import OrchestrationRunContext, ValidationVerdict
 from .validator import ValidatorService
 from .workspace_guard import (
     TaskWorkspaceViolationError,
@@ -94,10 +104,20 @@ __all__ = [
     "extract_plan_steps",
     "extract_structured_text",
     "looks_like_truncated_multistep_plan",
+    "PLANNING_TIMEOUT_MIN_SECONDS",
+    "PLANNING_TIMEOUT_MAX_SECONDS",
+    "STALE_RUN_GUARD_SECONDS",
+    "MAX_STEP_ATTEMPTS",
+    "DEBUG_TIMEOUT_SECONDS",
+    "SUMMARY_TIMEOUT_SECONDS",
+    "clamp_planning_timeout",
     "get_task_report_path",
     "is_verification_style_task",
     "run_virtual_merge_gate",
     "should_force_review_execution_profile",
+    "record_phase_event",
+    "emit_phase_event",
+    "OrchestrationRunContext",
     "build_task_report_payload",
     "render_task_report",
     "execute_planning_phase",

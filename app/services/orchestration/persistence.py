@@ -82,6 +82,7 @@ def save_orchestration_checkpoint(
             "debug_attempts": orchestration_state.debug_attempts,
             "changed_files": orchestration_state.changed_files,
             "validation_history": orchestration_state.validation_history,
+            "phase_history": orchestration_state.phase_history,
             "last_plan_validation": orchestration_state.last_plan_validation,
             "last_completion_validation": orchestration_state.last_completion_validation,
             "execution_results": [

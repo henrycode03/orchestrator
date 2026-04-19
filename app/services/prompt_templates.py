@@ -93,6 +93,7 @@ class OrchestrationState:
     )  # per-step retry history
     changed_files: List[str] = field(default_factory=list)
     validation_history: List[Dict[str, Any]] = field(default_factory=list)
+    phase_history: List[Dict[str, Any]] = field(default_factory=list)
     last_plan_validation: Optional[Dict[str, Any]] = None
     last_completion_validation: Optional[Dict[str, Any]] = None
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
