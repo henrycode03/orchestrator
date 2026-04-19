@@ -3,11 +3,13 @@
 import json
 import re
 import shutil
-from pathlib import Path
-from typing import Optional
-from sqlalchemy.orm import Session
 from datetime import datetime
-from app.models import Task, TaskStatus, Project
+from pathlib import Path
+from typing import Any, Optional
+
+from sqlalchemy.orm import Session
+
+from app.models import Project, Task, TaskStatus
 from app.services.project_isolation_service import resolve_project_workspace_path
 
 
@@ -57,6 +59,127 @@ class TaskService:
 
     def get_project_root(self, project: Project) -> Path:
         return resolve_project_workspace_path(project.workspace_path, project.name)
+
+    def analyze_workspace_consistency(
+        self,
+        target_dir: Path,
+        *,
+        ignored_top_level_dirs: Optional[set[str]] = None,
+    ) -> dict[str, Any]:
+        """Inspect a workspace for mixed stacks or nested duplicate implementations."""
+        target_dir = target_dir.resolve()
+        ignored_top_level_dirs = set(ignored_top_level_dirs or set())
+
+        if not target_dir.exists():
+            return {
+                "exists": False,
+                "dominant_stack": "none",
+                "mixed_stack": False,
+                "python_source_count": 0,
+                "node_source_count": 0,
+                "python_markers": [],
+                "node_markers": [],
+                "nested_duplicate_dirs": [],
+                "issues": [],
+            }
+
+        python_files: list[str] = []
+        node_files: list[str] = []
+        python_markers: list[str] = []
+        node_markers: list[str] = []
+        nested_duplicate_dirs: list[str] = []
+
+        marker_files = {
+            "requirements.txt": "python",
+            "pyproject.toml": "python",
+            "setup.py": "python",
+            "package.json": "node",
+            "tsconfig.json": "node",
+            "pnpm-lock.yaml": "node",
+            "package-lock.json": "node",
+        }
+
+        for path in target_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(target_dir)
+            if not relative.parts:
+                continue
+            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                continue
+            if TASK_REPORT_RE.match(path.name):
+                continue
+            if relative.parts[0] in ignored_top_level_dirs:
+                continue
+
+            relative_text = str(relative)
+            suffix = path.suffix.lower()
+
+            marker_stack = marker_files.get(path.name.lower())
+            if marker_stack == "python" and len(python_markers) < 10:
+                python_markers.append(relative_text)
+            elif marker_stack == "node" and len(node_markers) < 10:
+                node_markers.append(relative_text)
+
+            if suffix == ".py":
+                python_files.append(relative_text)
+            elif suffix in {".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}:
+                node_files.append(relative_text)
+
+        for child in target_dir.iterdir():
+            if not child.is_dir():
+                continue
+            if (
+                child.name in HYDRATION_EXCLUDED_NAMES
+                or child.name in ignored_top_level_dirs
+            ):
+                continue
+            if child.name != target_dir.name:
+                continue
+            nested_source_files = [
+                path
+                for path in child.rglob("*")
+                if path.is_file()
+                and path.suffix.lower()
+                in {".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}
+            ]
+            if nested_source_files:
+                nested_duplicate_dirs.append(child.name)
+
+        mixed_stack = bool(python_files and node_files)
+        if mixed_stack:
+            dominant_stack = "mixed"
+        elif node_files or node_markers:
+            dominant_stack = "node"
+        elif python_files or python_markers:
+            dominant_stack = "python"
+        else:
+            dominant_stack = "none"
+
+        issues: list[str] = []
+        if mixed_stack:
+            issues.append(
+                "Workspace contains both Python and Node/JS implementation artifacts"
+            )
+        if nested_duplicate_dirs:
+            issues.append(
+                "Workspace contains a nested duplicate task directory: "
+                + ", ".join(nested_duplicate_dirs[:4])
+            )
+
+        return {
+            "exists": True,
+            "dominant_stack": dominant_stack,
+            "mixed_stack": mixed_stack,
+            "python_source_count": len(python_files),
+            "node_source_count": len(node_files),
+            "python_markers": python_markers[:10],
+            "node_markers": node_markers[:10],
+            "python_files": python_files[:20],
+            "node_files": node_files[:20],
+            "nested_duplicate_dirs": nested_duplicate_dirs[:10],
+            "issues": issues,
+        }
 
     def _parse_task_steps(self, task: Task) -> list[dict]:
         raw_steps = getattr(task, "steps", None)
@@ -328,6 +451,134 @@ class TaskService:
         context = "\n".join(lines)
         return context[:max_chars]
 
+    def review_existing_workspace(
+        self,
+        project: Optional[Project],
+        current_task: Optional[Task],
+        target_dir: Path,
+        max_chars: int = 2500,
+    ) -> dict:
+        """Summarize existing task workspace content and obvious implementation risks."""
+        target_dir = target_dir.resolve()
+        if not target_dir.exists():
+            return {
+                "has_existing_files": False,
+                "file_count": 0,
+                "summary": "Existing workspace review: task workspace is empty.",
+            }
+
+        files: list[Path] = []
+        for path in target_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(target_dir)
+            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                continue
+            files.append(path)
+
+        files.sort(key=lambda item: str(item.relative_to(target_dir)))
+        if not files:
+            return {
+                "has_existing_files": False,
+                "file_count": 0,
+                "summary": "Existing workspace review: no materialized source files yet.",
+            }
+
+        key_files: list[str] = []
+        issues: list[str] = []
+        source_count = 0
+        placeholder_count = 0
+
+        for path in files:
+            relative_text = str(path.relative_to(target_dir))
+            suffix = path.suffix.lower()
+            if suffix in {".py", ".js", ".ts", ".tsx", ".jsx"}:
+                source_count += 1
+            if len(key_files) < 12 and (
+                suffix
+                in {
+                    ".py",
+                    ".js",
+                    ".ts",
+                    ".tsx",
+                    ".jsx",
+                    ".json",
+                    ".yaml",
+                    ".yml",
+                    ".toml",
+                }
+                or path.name.lower()
+                in {"package.json", "requirements.txt", "pyproject.toml", "main.py"}
+            ):
+                key_files.append(relative_text)
+            if suffix not in {".py", ".js", ".ts", ".tsx", ".jsx"}:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            lowered = content.lower()
+            if (
+                "todo" in lowered
+                or "placeholder" in lowered
+                or "notimplemented" in lowered
+            ):
+                placeholder_count += 1
+                if len(issues) < 6:
+                    issues.append(f"{relative_text} contains TODO/placeholder markers")
+            if "\npass\n" in content or content.strip().endswith("pass"):
+                placeholder_count += 1
+                if len(issues) < 6:
+                    issues.append(f"{relative_text} still contains `pass` placeholders")
+            if "__main__" in content and "if __name__ == __main__" in content:
+                if len(issues) < 6:
+                    issues.append(f"{relative_text} has a broken Python __main__ check")
+
+        consistency = self.analyze_workspace_consistency(target_dir)
+
+        lines = [
+            "Existing workspace review:",
+            f"- task workspace: {target_dir}",
+            f"- file count: {len(files)}",
+            f"- source file count: {source_count}",
+        ]
+        if current_task and getattr(current_task, "task_subfolder", None) and project:
+            lines.append(
+                "- note: the project root is the canonical merged baseline and "
+                f"`{current_task.task_subfolder}` is the isolated task workspace; overlapping files are expected after publish"
+            )
+        if key_files:
+            lines.append("- key existing files: " + ", ".join(key_files[:12]))
+        if issues:
+            lines.append("- existing implementation risks: " + "; ".join(issues[:6]))
+        elif source_count > 0:
+            lines.append(
+                "- existing implementation detected; extend or fix current files instead of creating parallel replacements"
+            )
+        else:
+            lines.append(
+                "- workspace currently looks scaffold-heavy; create missing implementation carefully"
+            )
+        if consistency.get("mixed_stack"):
+            lines.append(
+                "- workspace currently mixes Python and Node/JS implementation files; unify around the dominant intended stack instead of leaving both"
+            )
+        if consistency.get("nested_duplicate_dirs"):
+            lines.append(
+                "- nested duplicate task directories detected: "
+                + ", ".join(consistency.get("nested_duplicate_dirs", [])[:4])
+            )
+
+        summary = "\n".join(lines)
+        return {
+            "has_existing_files": True,
+            "file_count": len(files),
+            "source_file_count": source_count,
+            "placeholder_issue_count": placeholder_count,
+            "consistency": consistency,
+            "summary": summary[:max_chars],
+        }
+
     def hydrate_task_workspace(
         self,
         project: Optional[Project],
@@ -505,6 +756,37 @@ class TaskService:
     def auto_publish_task_into_baseline(self, project: Project, task: Task) -> dict:
         """Publish a completed task into the canonical merged project workspace."""
         return self.promote_task_into_baseline(project, task)
+
+    def validate_task_baseline_materialization(
+        self, project: Project, task: Task
+    ) -> dict:
+        baseline_dir = self.get_project_baseline_dir(project)
+        expected_files = self.get_task_expected_files(task)
+        missing_expected_files = [
+            relative_path
+            for relative_path in expected_files
+            if not (baseline_dir / relative_path).exists()
+        ]
+        overview = self.get_project_baseline_overview(project)
+        ignored_top_level_dirs = {
+            existing_task.task_subfolder
+            for existing_task in self.get_project_tasks(project.id)
+            if getattr(existing_task, "task_subfolder", None)
+        }
+        ignored_top_level_dirs.update(HYDRATION_EXCLUDED_NAMES)
+        ignored_top_level_dirs.add(LEGACY_BASELINE_DIR_NAME)
+        consistency = self.analyze_workspace_consistency(
+            baseline_dir,
+            ignored_top_level_dirs=ignored_top_level_dirs,
+        )
+        return {
+            "baseline_path": overview["path"],
+            "baseline_file_count": overview["file_count"],
+            "expected_files": expected_files,
+            "missing_expected_files": missing_expected_files,
+            "consistency": consistency,
+            "consistency_issues": consistency.get("issues", []),
+        }
 
     def rebuild_project_baseline(self, project: Project) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)

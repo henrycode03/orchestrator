@@ -79,6 +79,25 @@ class EnhancedErrorHandler:
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 5 fixed failed: {e}")
 
+        # Strategy 6: Extract double-encoded or field-wrapped JSON payloads
+        embedded = self._extract_embedded_json_payload(text)
+        if embedded:
+            try:
+                return True, json.loads(embedded), "Extracted embedded JSON payload"
+            except json.JSONDecodeError as e:
+                logger.debug(f"[JSON-PARSE] Strategy 6 direct failed: {e}")
+
+            fixed = self._fix_common_json_errors(embedded)
+            if fixed != embedded:
+                try:
+                    return (
+                        True,
+                        json.loads(fixed),
+                        "Extracted and fixed embedded JSON payload",
+                    )
+                except json.JSONDecodeError as e:
+                    logger.debug(f"[JSON-PARSE] Strategy 6 fixed failed: {e}")
+
         # All strategies failed
         error_msg = f"Failed to parse {context} after {self.max_retries} attempts"
         logger.error(f"[JSON-PARSE] All strategies failed. Last attempt: {text[:200]}")
@@ -183,6 +202,53 @@ class EnhancedErrorHandler:
             # Check if we've found a complete JSON structure
             if brace_count == 0 and bracket_count == 0 and i > json_start:
                 return text[json_start : i + 1]
+
+        return None
+
+    def _extract_embedded_json_payload(self, text: str) -> Optional[str]:
+        """Recover JSON that was embedded as an escaped string inside another payload."""
+        if not text:
+            return None
+
+        field_patterns = [
+            r'"finalAssistantVisibleText"\s*:\s*"((?:\\.|[^"])*)"',
+            r'"text"\s*:\s*"((?:\\.|[^"])*)"',
+            r'"output_text"\s*:\s*"((?:\\.|[^"])*)"',
+        ]
+        for pattern in field_patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if not match:
+                continue
+            extracted = match.group(1)
+            try:
+                decoded = json.loads(f'"{extracted}"')
+            except json.JSONDecodeError:
+                continue
+            cleaned = self._clean_markdown_fences(decoded)
+            found = self._find_json_in_text(cleaned)
+            if found:
+                return found
+            stripped = cleaned.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                return stripped
+
+        stripped = text.strip()
+        if (
+            len(stripped) >= 2
+            and stripped[0] == stripped[-1] == '"'
+            and any(token in stripped for token in ('\\"', "\\n", "\\t"))
+        ):
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                return None
+            cleaned = self._clean_markdown_fences(decoded)
+            found = self._find_json_in_text(cleaned)
+            if found:
+                return found
+            stripped_cleaned = cleaned.strip()
+            if stripped_cleaned.startswith("{") or stripped_cleaned.startswith("["):
+                return stripped_cleaned
 
         return None
 

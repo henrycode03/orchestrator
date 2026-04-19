@@ -92,6 +92,9 @@ class OrchestrationState:
         default_factory=list
     )  # per-step retry history
     changed_files: List[str] = field(default_factory=list)
+    validation_history: List[Dict[str, Any]] = field(default_factory=list)
+    last_plan_validation: Optional[Dict[str, Any]] = None
+    last_completion_validation: Optional[Dict[str, Any]] = None
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -871,21 +874,33 @@ Examples:
         Returns:
             Execution prompt string ready for LLM call.
         """
+        step_description_text = (step_description or "")[:500]
+        command_lines = [
+            f"- {str(cmd or '')[:400]}" for cmd in (step_commands or [])[:12]
+        ]
+        verification_text = str(verification_command or "None provided")[:300]
+        rollback_text = str(rollback_command or "None provided")[:300]
+        expected_file_lines = [
+            f"- {str(f or '')[:200]}" for f in (expected_files or [])[:20]
+        ]
+        completed_summary_text = (completed_steps_summary or "No steps completed yet.")[
+            :1400
+        ]
+        project_context_text = (project_context or "No additional context.")[:1800]
+
         context = {
-            "step_description": step_description,
+            "step_description": step_description_text,
             "execution_profile": execution_profile,
             "execution_profile_rules": cls.describe_execution_profile(
                 execution_profile
             ),
             "project_dir": project_dir or "Current task workspace",
-            "step_commands": "\n".join(f"- {cmd}" for cmd in step_commands),
-            "verification_command": verification_command or "None provided",
-            "rollback_command": rollback_command or "None provided",
-            "expected_files": "\n".join(f"- {f}" for f in (expected_files or []))
-            or "None",
-            "completed_steps_summary": completed_steps_summary
-            or "No steps completed yet.",
-            "project_context": project_context or "No additional context.",
+            "step_commands": "\n".join(command_lines) or "- No commands provided",
+            "verification_command": verification_text,
+            "rollback_command": rollback_text,
+            "expected_files": "\n".join(expected_file_lines) or "None",
+            "completed_steps_summary": completed_summary_text,
+            "project_context": project_context_text,
         }
 
         return cls.render("step_execution", **context)
@@ -924,21 +939,23 @@ Examples:
         ws_root = workspace_root or str(get_effective_workspace_root())
         prior_attempts_text = (
             "\n".join(
-                f"Attempt {a['attempt']}: {a['error']}"
-                for a in (prior_debug_attempts or [])
+                f"Attempt {a['attempt']}: {str(a['error'])[:240]}"
+                for a in (prior_debug_attempts or [])[-3:]
             )
             or "No prior attempts."
         )
 
         # Pre-process values that need slicing or conditional logic
-        truncated_output = command_output[:2000] if command_output else "No output"
+        truncated_output = command_output[:1200] if command_output else "No output"
         truncated_verification = (
-            verification_output[:200] if verification_output else "None"
+            verification_output[:160] if verification_output else "None"
         )
+        truncated_error = (error_message or "")[:500]
+        truncated_description = (step_description or "")[:400]
 
         context = {
-            "step_description": step_description,
-            "error_message": error_message,
+            "step_description": truncated_description,
+            "error_message": truncated_error,
             "command_output": truncated_output,
             "verification_output": truncated_verification,
             "attempt_number": attempt_number,

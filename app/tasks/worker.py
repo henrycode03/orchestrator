@@ -26,6 +26,12 @@ from app.models import (
 )
 from app.database import get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
+from app.services.orchestration import (
+    PlannerService,
+    ExecutorService,
+    ValidatorService,
+    ValidationVerdict,
+)
 from app.services.error_handler import error_handler
 from app.services.checkpoint_service import CheckpointService
 from app.services.project_isolation_service import resolve_project_workspace_path
@@ -144,6 +150,9 @@ def _save_orchestration_checkpoint(
             "current_step_index": orchestration_state.current_step_index,
             "debug_attempts": orchestration_state.debug_attempts,
             "changed_files": orchestration_state.changed_files,
+            "validation_history": orchestration_state.validation_history,
+            "last_plan_validation": orchestration_state.last_plan_validation,
+            "last_completion_validation": orchestration_state.last_completion_validation,
             "execution_results": [
                 _serialize_step_result(r) for r in orchestration_state.execution_results
             ],
@@ -153,6 +162,31 @@ def _save_orchestration_checkpoint(
             _serialize_step_result(r) for r in orchestration_state.execution_results
         ],
     )
+
+
+def _record_validation_verdict(
+    db: Session,
+    session_id: int,
+    task_id: int,
+    orchestration_state: OrchestrationState,
+    verdict: ValidationVerdict,
+    *,
+    step_number: Optional[int] = None,
+) -> None:
+    ValidatorService.persist_validation_result(
+        db,
+        task_id=task_id,
+        session_id=session_id,
+        stage=verdict.stage,
+        verdict=verdict,
+        step_number=step_number,
+    )
+    verdict_payload = verdict.to_dict()
+    orchestration_state.validation_history.append(verdict_payload)
+    if verdict.stage == "plan":
+        orchestration_state.last_plan_validation = verdict_payload
+    elif verdict.stage == "task_completion":
+        orchestration_state.last_completion_validation = verdict_payload
 
 
 def _record_live_log(
@@ -985,6 +1019,63 @@ def _extract_structured_text(value: Any) -> str:
     return json.dumps(value)
 
 
+def _coerce_execution_step_result(
+    raw_result: Dict[str, Any], expected_files: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Recover a structured step result when the model returned prose instead of JSON."""
+    result = dict(raw_result or {})
+    output_text = _extract_structured_text(result.get("output", ""))
+
+    if isinstance(result.get("output"), dict):
+        return result
+
+    success, parsed_data, _strategy_info = error_handler.attempt_json_parsing(
+        output_text, context="execution"
+    )
+    if success and isinstance(parsed_data, dict):
+        merged = dict(result)
+        merged.update(parsed_data)
+        return merged
+
+    normalized = (output_text or "").strip()
+    lowered = normalized.lower()
+    if not normalized:
+        return result
+
+    success_markers = (
+        "status:** success",
+        "status: success",
+        "step complete",
+        "verification results:",
+        "files changed:",
+        "dependencies installed:",
+    )
+    failure_markers = (
+        "status:** failed",
+        "status: failed",
+        "error:",
+        "failed:",
+    )
+
+    coerced = dict(result)
+    if any(marker in lowered for marker in success_markers):
+        coerced["status"] = "success"
+        coerced["output"] = normalized
+        coerced.setdefault("verification_output", normalized[:1000])
+        coerced.setdefault("files_changed", list(expected_files or []))
+        coerced.setdefault("error", "")
+        return coerced
+
+    if any(marker in lowered for marker in failure_markers):
+        coerced["status"] = "failed"
+        coerced["output"] = normalized
+        coerced.setdefault("verification_output", normalized[:1000])
+        coerced.setdefault("error", normalized[:1000])
+        return coerced
+
+    return result
+
+
 def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
     raw = (path_text or "").strip().strip("\"'")
     if not raw:
@@ -1010,10 +1101,68 @@ def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
     return "." if relative == "." else relative
 
 
+def _looks_like_plain_english_instruction(command: str) -> bool:
+    text = (command or "").strip()
+    if not text:
+        return False
+
+    if any(symbol in text for symbol in ("&&", "||", "|", ";", "$(", "`", ">", "<")):
+        return False
+
+    tokens = text.split()
+    if len(tokens) < 3:
+        return False
+
+    first = tokens[0]
+    if first != first.capitalize():
+        return False
+
+    known_shell_starts = {
+        "python",
+        "python3",
+        "node",
+        "npm",
+        "pnpm",
+        "yarn",
+        "bash",
+        "sh",
+        "cd",
+        "mkdir",
+        "rm",
+        "mv",
+        "cp",
+        "cat",
+        "echo",
+        "grep",
+        "rg",
+        "test",
+        "curl",
+        "wget",
+        "git",
+        "pytest",
+        "uv",
+        "make",
+        "cargo",
+        "go",
+        "java",
+        "javac",
+    }
+    if first.lower() in known_shell_starts:
+        return False
+
+    return any(
+        word.lower() in {"verify", "check", "ensure", "confirm", "validate", "exposes"}
+        for word in tokens[:3]
+    )
+
+
 def _normalize_command(command: str, project_dir: Path) -> str:
     normalized = (command or "").strip()
     if not normalized:
         raise TaskWorkspaceViolationError("Empty command is not allowed")
+
+    if _looks_like_plain_english_instruction(normalized):
+        return normalized
 
     # Ignore heredoc bodies when validating outer shell traversal. Paths inside
     # generated file contents like `../src/...` are source text, not shell traversal.
@@ -1836,6 +1985,15 @@ def execute_openclaw_task(
             orchestration_state.changed_files = (
                 checkpoint_state.get("changed_files", []) or []
             )
+            orchestration_state.validation_history = (
+                checkpoint_state.get("validation_history", []) or []
+            )
+            orchestration_state.last_plan_validation = checkpoint_state.get(
+                "last_plan_validation"
+            )
+            orchestration_state.last_completion_validation = checkpoint_state.get(
+                "last_completion_validation"
+            )
             orchestration_state.execution_results = [
                 _restore_step_result(item)
                 for item in checkpoint_state.get(
@@ -1854,6 +2012,60 @@ def execute_openclaw_task(
                     session.instance_id,
                     "Checkpoint restore",
                 )
+                resume_plan_verdict = ValidatorService.validate_plan(
+                    orchestration_state.plan,
+                    output_text=json.dumps(orchestration_state.plan),
+                    task_prompt=prompt,
+                    execution_profile=execution_profile,
+                    project_dir=orchestration_state.project_dir,
+                    title=task.title if task else None,
+                    description=task.description if task else None,
+                )
+                _record_validation_verdict(
+                    db,
+                    session_id,
+                    task_id,
+                    orchestration_state,
+                    resume_plan_verdict,
+                )
+                db.commit()
+                if not resume_plan_verdict.accepted:
+                    resume_error = (
+                        "Checkpoint plan failed validation on resume: "
+                        + "; ".join(resume_plan_verdict.reasons[:3])
+                    )
+                    logger.warning(
+                        "[ORCHESTRATION] %s Falling back to a fresh replan from the current workspace.",
+                        resume_error,
+                    )
+                    emit_live(
+                        "WARN",
+                        "[ORCHESTRATION] Resume checkpoint plan failed validation; falling back to a fresh replan from the current workspace",
+                        metadata={
+                            "phase": "resume",
+                            "reason": "invalid_resume_plan",
+                            "validation_status": resume_plan_verdict.status,
+                            "reasons": resume_plan_verdict.reasons[:10],
+                        },
+                    )
+                    orchestration_state.plan = []
+                    orchestration_state.current_step_index = 0
+                    orchestration_state.debug_attempts = []
+                    orchestration_state.execution_results = []
+                    orchestration_state.changed_files = []
+                    orchestration_state.status = OrchestrationStatus.PLANNING
+                    orchestration_state.abort_reason = ""
+                    task.steps = None
+                    task.current_step = 0
+                    task.error_message = None
+                    if session_task_link:
+                        session_task_link.status = TaskStatus.RUNNING
+                        session_task_link.started_at = task.started_at
+                        session_task_link.completed_at = None
+                    session.status = "running"
+                    session.is_active = True
+                    _set_session_alert(session, "warn", resume_error[:2000])
+                    db.commit()
 
             resumed_from_checkpoint = bool(orchestration_state.plan)
             if resumed_from_checkpoint:
@@ -1879,7 +2091,35 @@ def execute_openclaw_task(
                 f"{refreshed_project_context}\n"
                 f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
             )[:5000]
+        workspace_review = task_service.review_existing_workspace(
+            project=project,
+            current_task=task,
+            target_dir=orchestration_state.project_dir,
+        )
+        if workspace_review.get("has_existing_files"):
+            refreshed_project_context = (
+                f"{refreshed_project_context}\n"
+                f"{workspace_review.get('summary', '')}"
+            )[:7000]
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Reviewed existing task workspace before planning",
+                metadata={
+                    "phase": "workspace_review",
+                    "file_count": workspace_review.get("file_count", 0),
+                    "source_file_count": workspace_review.get("source_file_count", 0),
+                    "placeholder_issue_count": workspace_review.get(
+                        "placeholder_issue_count", 0
+                    ),
+                },
+            )
         orchestration_state.project_context = refreshed_project_context
+        validation_profile = ValidatorService.infer_validation_profile(
+            prompt,
+            execution_profile,
+            title=task.title if task else None,
+            description=task.description if task else None,
+        )
 
         gate_error = _run_virtual_merge_gate(
             db=db,
@@ -1923,16 +2163,56 @@ def execute_openclaw_task(
                         session.instance_id,
                         "Stored task plan",
                     )
-                    logger.info(
-                        "[ORCHESTRATION] Reusing stored plan for task %s with %s steps",
+                    stored_plan_verdict = ValidatorService.validate_plan(
+                        orchestration_state.plan,
+                        output_text=json.dumps(orchestration_state.plan),
+                        task_prompt=prompt,
+                        execution_profile=execution_profile,
+                        project_dir=orchestration_state.project_dir,
+                        title=task.title if task else None,
+                        description=task.description if task else None,
+                    )
+                    _record_validation_verdict(
+                        db,
+                        session_id,
                         task_id,
-                        len(orchestration_state.plan),
+                        orchestration_state,
+                        stored_plan_verdict,
                     )
-                    emit_live(
-                        "INFO",
-                        f"[ORCHESTRATION] Reusing saved plan with {len(orchestration_state.plan)} steps",
-                        metadata={"phase": "planning", "source": "stored_task_plan"},
-                    )
+                    db.commit()
+                    if not stored_plan_verdict.accepted:
+                        logger.warning(
+                            "[ORCHESTRATION] Stored plan for task %s failed validation: %s",
+                            task_id,
+                            "; ".join(stored_plan_verdict.reasons[:3]),
+                        )
+                        emit_live(
+                            "WARN",
+                            "[ORCHESTRATION] Saved plan failed validation; discarding and replanning",
+                            metadata={
+                                "phase": "planning",
+                                "source": "stored_task_plan",
+                                "validation_status": stored_plan_verdict.status,
+                                "reasons": stored_plan_verdict.reasons[:10],
+                            },
+                        )
+                        orchestration_state.plan = []
+                        task.steps = None
+                        db.commit()
+                    else:
+                        logger.info(
+                            "[ORCHESTRATION] Reusing stored plan for task %s with %s steps",
+                            task_id,
+                            len(orchestration_state.plan),
+                        )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Reusing saved plan with {len(orchestration_state.plan)} steps",
+                            metadata={
+                                "phase": "planning",
+                                "source": "stored_task_plan",
+                            },
+                        )
             except Exception as stored_plan_error:
                 logger.warning(
                     "[ORCHESTRATION] Failed to reuse stored plan for task %s: %s",
@@ -1963,11 +2243,13 @@ def execute_openclaw_task(
             # stricter minimal prompt to avoid long context stalls.
             planning_timeout_seconds = max(180, min(timeout_seconds, 300))
             start_with_minimal_planning_prompt = (
-                _should_start_with_minimal_planning_prompt(
+                PlannerService.should_start_with_minimal_prompt(
                     prompt,
                     orchestration_state.project_context,
                 )
             )
+            if workspace_review.get("has_existing_files"):
+                start_with_minimal_planning_prompt = True
             used_minimal_planning_prompt = start_with_minimal_planning_prompt
 
             if start_with_minimal_planning_prompt:
@@ -1982,7 +2264,7 @@ def execute_openclaw_task(
                         ),
                     },
                 )
-                planning_result = _retry_planning_with_minimal_prompt(
+                planning_result = PlannerService.retry_with_minimal_prompt(
                     openclaw_service=openclaw_service,
                     task_description=prompt,
                     project_dir=orchestration_state.project_dir,
@@ -2001,7 +2283,7 @@ def execute_openclaw_task(
             initial_output_text = _extract_structured_text(
                 planning_result.get("output", "")
             )
-            if _should_retry_planning_with_minimal_prompt(
+            if PlannerService.should_retry_with_minimal_prompt(
                 planning_result, initial_output_text
             ):
                 logger.warning(
@@ -2018,7 +2300,7 @@ def execute_openclaw_task(
                         ],
                     },
                 )
-                planning_result = _retry_planning_with_minimal_prompt(
+                planning_result = PlannerService.retry_with_minimal_prompt(
                     openclaw_service=openclaw_service,
                     task_description=prompt,
                     project_dir=orchestration_state.project_dir,
@@ -2076,7 +2358,7 @@ def execute_openclaw_task(
                         )
                     )
 
-                    if _should_retry_planning_with_minimal_prompt(
+                    if PlannerService.should_retry_with_minimal_prompt(
                         planning_result, output_text
                     ):
                         raise TimeoutError(
@@ -2084,7 +2366,7 @@ def execute_openclaw_task(
                         )
 
                     if not success and not used_minimal_planning_prompt:
-                        planning_result = _retry_planning_with_minimal_prompt(
+                        planning_result = PlannerService.retry_with_minimal_prompt(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
                             project_dir=orchestration_state.project_dir,
@@ -2097,7 +2379,7 @@ def execute_openclaw_task(
                         continue
 
                     if not success and not used_planning_repair_prompt:
-                        planning_result = _repair_planning_output_with_minimal_prompt(
+                        planning_result = PlannerService.repair_output(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
                             malformed_output=output_text,
@@ -2136,7 +2418,7 @@ def execute_openclaw_task(
 
                     extracted_plan = _extract_plan_steps(plan_data)
                     if extracted_plan is None and not used_minimal_planning_prompt:
-                        planning_result = _retry_planning_with_minimal_prompt(
+                        planning_result = PlannerService.retry_with_minimal_prompt(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
                             project_dir=orchestration_state.project_dir,
@@ -2149,7 +2431,7 @@ def execute_openclaw_task(
                         continue
 
                     if extracted_plan is None and not used_planning_repair_prompt:
-                        planning_result = _repair_planning_output_with_minimal_prompt(
+                        planning_result = PlannerService.repair_output(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
                             malformed_output=output_text,
@@ -2168,7 +2450,7 @@ def execute_openclaw_task(
                         )
                         and not used_minimal_planning_prompt
                     ):
-                        planning_result = _retry_planning_with_minimal_prompt(
+                        planning_result = PlannerService.retry_with_minimal_prompt(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
                             project_dir=orchestration_state.project_dir,
@@ -2186,7 +2468,7 @@ def execute_openclaw_task(
                         )
                         and not used_planning_repair_prompt
                     ):
-                        planning_result = _repair_planning_output_with_minimal_prompt(
+                        planning_result = PlannerService.repair_output(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
                             malformed_output=output_text,
@@ -2239,50 +2521,6 @@ def execute_openclaw_task(
                             f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                         )
 
-                    if (
-                        _plan_contains_brittle_commands(extracted_plan, output_text)
-                        and not used_planning_repair_prompt
-                    ):
-                        planning_result = _repair_planning_output_with_minimal_prompt(
-                            openclaw_service=openclaw_service,
-                            task_description=prompt,
-                            malformed_output=output_text,
-                            project_dir=orchestration_state.project_dir,
-                            timeout_seconds=planning_timeout_seconds,
-                            logger=logger,
-                            emit_live=emit_live,
-                            reason="brittle_heredoc_heavy_plan",
-                        )
-                        used_planning_repair_prompt = True
-                        continue
-
-                    if _plan_contains_brittle_commands(extracted_plan, output_text):
-                        orchestration_state.status = OrchestrationStatus.ABORTED
-                        orchestration_state.abort_reason = (
-                            "Planning output produced brittle heredoc-heavy commands"
-                        )
-                        emit_live(
-                            "ERROR",
-                            "[ORCHESTRATION] Planning output used brittle heredoc-heavy commands",
-                            metadata={
-                                "phase": "planning",
-                                "reason": "brittle_planning_commands",
-                            },
-                        )
-                        task.status = TaskStatus.FAILED
-                        task.error_message = (
-                            "Planning produced brittle heredoc-heavy commands. "
-                            f"Raw output: {output_text[:500]}"
-                        )
-                        db.commit()
-                        restore_workspace_snapshot_if_needed(
-                            "planning brittle command failure"
-                        )
-                        return {
-                            "status": "failed",
-                            "reason": "planning_brittle_commands",
-                        }
-
                     orchestration_state.plan = _normalize_plan_with_live_logging(
                         db,
                         session_id,
@@ -2293,6 +2531,66 @@ def execute_openclaw_task(
                         session.instance_id,
                         "Planning output",
                     )
+                    plan_verdict = ValidatorService.validate_plan(
+                        orchestration_state.plan,
+                        output_text=output_text,
+                        task_prompt=prompt,
+                        execution_profile=execution_profile,
+                        project_dir=orchestration_state.project_dir,
+                        title=task.title if task else None,
+                        description=task.description if task else None,
+                    )
+                    _record_validation_verdict(
+                        db,
+                        session_id,
+                        task_id,
+                        orchestration_state,
+                        plan_verdict,
+                    )
+                    db.commit()
+                    if not plan_verdict.accepted and not used_planning_repair_prompt:
+                        planning_result = PlannerService.repair_output(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            malformed_output=output_text,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason="plan_validation_failed: "
+                            + "; ".join(plan_verdict.reasons[:3]),
+                            rejection_reasons=plan_verdict.reasons,
+                        )
+                        used_planning_repair_prompt = True
+                        continue
+                    if not plan_verdict.accepted:
+                        orchestration_state.status = OrchestrationStatus.ABORTED
+                        orchestration_state.abort_reason = (
+                            "Planning output failed validation: "
+                            + "; ".join(plan_verdict.reasons[:3])
+                        )
+                        emit_live(
+                            "ERROR",
+                            "[ORCHESTRATION] Planning output failed validation",
+                            metadata={
+                                "phase": "planning",
+                                "reason": "planning_validation_failed",
+                                "validation_status": plan_verdict.status,
+                                "reasons": plan_verdict.reasons[:10],
+                            },
+                        )
+                        task.status = TaskStatus.FAILED
+                        task.error_message = "Planning failed validation: " + "; ".join(
+                            plan_verdict.reasons[:5]
+                        )
+                        db.commit()
+                        restore_workspace_snapshot_if_needed(
+                            "planning validation failure"
+                        )
+                        return {
+                            "status": "failed",
+                            "reason": "planning_validation_failed",
+                        }
                     logger.info(
                         f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan (using {strategy_info})"
                     )
@@ -2511,6 +2809,7 @@ def execute_openclaw_task(
                     timeout_seconds=step_timeout_seconds,
                 )
             )
+            step_result = _coerce_execution_step_result(step_result, expected_files)
 
             # Count attempts for this step (from debug_attempts history)
             step_debug_attempts = [
@@ -2527,6 +2826,7 @@ def execute_openclaw_task(
             step_status = (
                 "success" if step_result.get("status") != "failed" else "failed"
             )
+            missing_files: List[str] = []
 
             if step_status == "success":
                 missing_files = _missing_expected_files(
@@ -2552,7 +2852,7 @@ def execute_openclaw_task(
                         },
                     )
 
-            tool_failures = _recent_step_tool_failures(
+            tool_failures = ExecutorService.recent_step_tool_failures(
                 db,
                 session_id,
                 task_id,
@@ -2561,7 +2861,7 @@ def execute_openclaw_task(
             if step_status == "success" and tool_failures:
                 step_status = "failed"
                 failure_summary = " | ".join(tool_failures[:3])
-                correction_hints = _tool_failure_correction_hints(
+                correction_hints = ExecutorService.tool_failure_correction_hints(
                     tool_failures, orchestration_state.project_dir
                 )
                 step_result["error"] = (
@@ -2585,6 +2885,44 @@ def execute_openclaw_task(
                         "correction_hints": correction_hints[:10],
                     },
                 )
+
+            if step_status == "success":
+                step_validation = ValidatorService.validate_step_success(
+                    project_dir=orchestration_state.project_dir,
+                    step=step,
+                    step_output=step_output,
+                    missing_expected_files=missing_files,
+                    tool_failures=tool_failures,
+                    validation_profile=validation_profile,
+                )
+                _record_validation_verdict(
+                    db,
+                    session_id,
+                    task_id,
+                    orchestration_state,
+                    step_validation,
+                    step_number=step_index + 1,
+                )
+                db.commit()
+                if not step_validation.accepted:
+                    step_status = "failed"
+                    step_result["error"] = (
+                        "Step failed implementation validation: "
+                        + " | ".join(step_validation.reasons[:3])
+                    )
+                    emit_live(
+                        "WARN",
+                        (
+                            f"[ORCHESTRATION] Step {step_index + 1} failed validation "
+                            "after execution"
+                        ),
+                        metadata={
+                            "phase": "step_validation",
+                            "step_index": step_index + 1,
+                            "validation_status": step_validation.status,
+                            "reasons": step_validation.reasons[:10],
+                        },
+                    )
 
             step_record = StepResult(
                 step_number=step_index + 1,
@@ -2625,7 +2963,7 @@ def execute_openclaw_task(
                     metadata={"phase": "debugging", "step_index": step_index + 1},
                 )
 
-                if _is_repeated_tool_path_failure(
+                if ExecutorService.is_repeated_tool_path_failure(
                     orchestration_state.debug_attempts, step_record.error_message
                 ):
                     manual_gate_message = (
@@ -2763,6 +3101,50 @@ def execute_openclaw_task(
                             session.instance_id,
                             "Plan revision",
                         )
+                        revised_plan_verdict = ValidatorService.validate_plan(
+                            orchestration_state.plan,
+                            output_text=revise_output,
+                            task_prompt=prompt,
+                            execution_profile=execution_profile,
+                            project_dir=orchestration_state.project_dir,
+                            title=task.title if task else None,
+                            description=task.description if task else None,
+                        )
+                        _record_validation_verdict(
+                            db,
+                            session_id,
+                            task_id,
+                            orchestration_state,
+                            revised_plan_verdict,
+                        )
+                        db.commit()
+                        if not revised_plan_verdict.accepted:
+                            revised_plan_error = (
+                                "Revised plan failed validation: "
+                                + "; ".join(revised_plan_verdict.reasons[:3])
+                            )
+                            orchestration_state.status = OrchestrationStatus.ABORTED
+                            orchestration_state.abort_reason = revised_plan_error
+                            task.status = TaskStatus.FAILED
+                            task.error_message = revised_plan_error
+                            emit_live(
+                                "ERROR",
+                                "[ORCHESTRATION] Revised plan failed validation",
+                                metadata={
+                                    "phase": "plan_revision",
+                                    "validation_status": revised_plan_verdict.status,
+                                    "reasons": revised_plan_verdict.reasons[:10],
+                                },
+                            )
+                            db.commit()
+                            restore_workspace_snapshot_if_needed(
+                                "revised plan validation failure"
+                            )
+                            _write_project_state_snapshot(db, project, task, session_id)
+                            return {
+                                "status": "failed",
+                                "reason": "revised_plan_validation_failed",
+                            }
                         logger.info(f"[REVISION-PARSE] Using strategy: {strategy_info}")
                         logger.info(
                             f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps"
@@ -2868,6 +3250,135 @@ def execute_openclaw_task(
             openclaw_service.execute_task(summary_prompt, timeout_seconds=60)
         )
 
+        completion_validation = ValidatorService.validate_task_completion(
+            project_dir=orchestration_state.project_dir,
+            plan=orchestration_state.plan,
+            task_prompt=prompt,
+            execution_profile=execution_profile,
+            workspace_consistency=task_service.analyze_workspace_consistency(
+                orchestration_state.project_dir
+            ),
+            title=task.title if task else None,
+            description=task.description if task else None,
+        )
+        _record_validation_verdict(
+            db,
+            session_id,
+            task_id,
+            orchestration_state,
+            completion_validation,
+        )
+        db.commit()
+
+        if not completion_validation.accepted:
+            completion_error = "Completion validation failed: " + "; ".join(
+                completion_validation.reasons[:5]
+            )
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = completion_error
+            task.status = TaskStatus.FAILED
+            task.completed_at = datetime.utcnow()
+            task.error_message = completion_error
+            task.current_step = len(orchestration_state.plan)
+            task.workspace_status = "blocked"
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = task.completed_at
+            if session:
+                session.status = "paused"
+                session.is_active = False
+                _set_session_alert(session, "error", completion_error[:2000])
+            db.commit()
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Task completion failed validation",
+                metadata={
+                    "phase": "task_validation",
+                    "validation_status": completion_validation.status,
+                    "profile": completion_validation.profile,
+                    "reasons": completion_validation.reasons[:10],
+                },
+            )
+            _save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            _write_project_state_snapshot(db, project, task, session_id)
+            return {"status": "failed", "reason": "completion_validation_failed"}
+
+        baseline_publish_result = None
+        baseline_publish_validation = None
+        if project and task.task_subfolder and not runs_in_canonical_baseline:
+            baseline_publish_result = task_service.auto_publish_task_into_baseline(
+                project, task
+            )
+            baseline_materialization = (
+                task_service.validate_task_baseline_materialization(project, task)
+            )
+            baseline_overview = task_service.validate_project_baseline(
+                project, current_task=task
+            )
+            baseline_publish_validation = ValidatorService.validate_baseline_publish(
+                validation_profile=validation_profile,
+                baseline_path=baseline_materialization.get("baseline_path") or "",
+                baseline_file_count=baseline_materialization.get(
+                    "baseline_file_count", 0
+                ),
+                missing_task_expected_files=baseline_materialization.get(
+                    "missing_expected_files", []
+                ),
+                missing_prior_expected_files=baseline_overview.get(
+                    "missing_expected_files", []
+                ),
+                consistency_issues=baseline_materialization.get(
+                    "consistency_issues", []
+                ),
+                consistency_details=baseline_materialization.get("consistency"),
+            )
+            _record_validation_verdict(
+                db,
+                session_id,
+                task_id,
+                orchestration_state,
+                baseline_publish_validation,
+            )
+            db.commit()
+            if not baseline_publish_validation.accepted:
+                baseline_error = "Baseline publish validation failed: " + "; ".join(
+                    baseline_publish_validation.reasons[:5]
+                )
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = baseline_error
+                task.status = TaskStatus.FAILED
+                task.completed_at = datetime.utcnow()
+                task.error_message = baseline_error
+                task.current_step = len(orchestration_state.plan)
+                task.workspace_status = "blocked"
+                if session_task_link:
+                    session_task_link.status = TaskStatus.FAILED
+                    session_task_link.completed_at = task.completed_at
+                if session:
+                    session.status = "paused"
+                    session.is_active = False
+                    _set_session_alert(session, "error", baseline_error[:2000])
+                db.commit()
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Baseline publish failed validation",
+                    metadata={
+                        "phase": "baseline_publish",
+                        "validation_status": baseline_publish_validation.status,
+                        "reasons": baseline_publish_validation.reasons[:10],
+                    },
+                )
+                _save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
+                _write_project_state_snapshot(db, project, task, session_id)
+                return {
+                    "status": "failed",
+                    "reason": "baseline_publish_validation_failed",
+                }
+
         # Mark task as done
         task.status = TaskStatus.DONE
         task.completed_at = datetime.utcnow()
@@ -2878,12 +3389,6 @@ def execute_openclaw_task(
         if session_task_link:
             session_task_link.status = TaskStatus.DONE
             session_task_link.completed_at = task.completed_at
-
-        baseline_publish_result = None
-        if project and task.task_subfolder and not runs_in_canonical_baseline:
-            baseline_publish_result = task_service.auto_publish_task_into_baseline(
-                project, task
-            )
 
         _set_session_alert(session, None, None)
 
