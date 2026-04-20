@@ -32,7 +32,11 @@ from app.services.orchestration.step_support import (
 from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationStatus, StepResult
+from app.services.prompt_templates import (
+    OrchestrationStatus,
+    PromptTemplates,
+    StepResult,
+)
 
 
 def execute_step_loop(
@@ -345,7 +349,7 @@ def execute_step_loop(
             step_number=step_index + 1,
             status=step_status,
             output=step_output[:1000],
-            verification_output=step_result.get("verification_output", ""),
+            verification_output=assessment.verification_output,
             files_changed=step_result.get("files_changed", expected_files),
             error_message=step_result.get("error", ""),
             attempt=current_attempt,

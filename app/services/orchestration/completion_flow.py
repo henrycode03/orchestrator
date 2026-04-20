@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
@@ -27,7 +28,10 @@ from app.services.orchestration.persistence import (
     save_orchestration_checkpoint,
     set_session_alert,
 )
-from app.services.orchestration.policy import SUMMARY_TIMEOUT_SECONDS
+from app.services.orchestration.policy import (
+    COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
+    SUMMARY_TIMEOUT_SECONDS,
+)
 from app.services.orchestration.runtime import write_project_state_snapshot
 from app.services.orchestration.step_support import coerce_execution_step_result
 from app.services.orchestration.telemetry import emit_phase_event
@@ -191,6 +195,82 @@ def _extract_reported_changed_files(output_text: str, project_dir: Path) -> list
                 seen.add(candidate)
                 reported.append(candidate)
     return reported
+
+
+def _detect_completion_verification_command(
+    project_dir: Path,
+) -> tuple[Optional[str], Optional[str]]:
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            package_data = json.loads(package_json.read_text(encoding="utf-8"))
+        except Exception:
+            package_data = {}
+        scripts = (
+            package_data.get("scripts", {}) if isinstance(package_data, dict) else {}
+        )
+        has_tests = any(
+            candidate.exists()
+            for candidate in [
+                project_dir / "tests",
+                project_dir / "test",
+                project_dir / "src" / "tests",
+            ]
+        )
+        if (
+            has_tests
+            and isinstance(scripts, dict)
+            and str(scripts.get("test") or "").strip()
+        ):
+            if (project_dir / "pnpm-lock.yaml").exists():
+                return "pnpm test", "package.json test script via pnpm"
+            if (project_dir / "yarn.lock").exists():
+                return "yarn test", "package.json test script via yarn"
+            return "npm test", "package.json test script via npm"
+
+    if any(
+        candidate.exists()
+        for candidate in [project_dir / "pytest.ini", project_dir / "tests"]
+    ):
+        if (project_dir / "pyproject.toml").exists() or (
+            project_dir / "tests"
+        ).exists():
+            return "pytest", "python test suite detected"
+
+    return None, None
+
+
+def _execute_completion_verification(
+    *,
+    project_dir: Path,
+    command: str,
+    timeout_seconds: int = COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(project_dir),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        output = "\n".join(
+            part
+            for part in [completed.stdout.strip(), completed.stderr.strip()]
+            if part
+        ).strip()
+        return {
+            "success": completed.returncode == 0,
+            "returncode": completed.returncode,
+            "output": output[:6000],
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "returncode": None,
+            "output": f"Completion verification timed out after {timeout_seconds}s",
+        }
 
 
 def _build_completion_repair_prompt(
@@ -850,6 +930,75 @@ def finalize_successful_task(
         )
         write_project_state_snapshot_fn(db, project, task, session_id)
         return {"status": "failed", "reason": "completion_validation_failed"}
+
+    completion_verification_command, completion_verification_source = (
+        _detect_completion_verification_command(orchestration_state.project_dir)
+    )
+    if completion_verification_command:
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Running completion verification: {completion_verification_command}",
+            metadata={
+                "phase": "task_verification",
+                "command": completion_verification_command,
+                "source": completion_verification_source,
+            },
+        )
+        completion_verification = _execute_completion_verification(
+            project_dir=orchestration_state.project_dir,
+            command=completion_verification_command,
+        )
+        if not completion_verification.get("success", False):
+            verification_error = (
+                "Completion verification failed: "
+                f"`{completion_verification_command}` "
+                f"({completion_verification_source or 'auto-detected'})"
+            )
+            task.status = TaskStatus.FAILED
+            task.completed_at = datetime.utcnow()
+            task.error_message = (
+                verification_error
+                + ": "
+                + str(completion_verification.get("output") or "")[:1500]
+            )
+            task.current_step = len(orchestration_state.plan)
+            task.workspace_status = "blocked"
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = verification_error
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = task.completed_at
+            if session:
+                session.status = "paused"
+                session.is_active = False
+                set_session_alert(session, "error", task.error_message[:2000])
+            db.commit()
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Task completion verification failed",
+                metadata={
+                    "phase": "task_verification",
+                    "command": completion_verification_command,
+                    "source": completion_verification_source,
+                    "output": str(completion_verification.get("output") or "")[:2000],
+                },
+            )
+            save_orchestration_checkpoint_fn(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type="phase_finished",
+                details={
+                    "phase": "task_summary",
+                    "status": "verification_failed",
+                    "verification_command": completion_verification_command,
+                },
+            )
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {"status": "failed", "reason": "completion_verification_failed"}
 
     baseline_publish_result = None
     baseline_publish_validation = None

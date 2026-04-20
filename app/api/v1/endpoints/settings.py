@@ -17,9 +17,7 @@ from app.schemas import (
     SystemSettingsUpdateRequest,
 )
 from app.services.system_settings import (
-    MOBILE_API_KEY_KEY,
     WORKSPACE_ROOT_KEY,
-    generate_mobile_gateway_key,
     get_effective_mobile_gateway_key,
     get_effective_workspace_root,
     set_setting_value,
@@ -117,6 +115,15 @@ def update_system_settings(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
+    if payload.rotate_mobile_api_key or payload.mobile_api_key is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Mobile gateway key rotation is not available from this endpoint "
+                "until admin-only controls are implemented"
+            ),
+        )
+
     if payload.workspace_root is not None:
         workspace_root = str(Path(payload.workspace_root).expanduser().resolve())
         set_setting_value(
@@ -124,17 +131,6 @@ def update_system_settings(
             WORKSPACE_ROOT_KEY,
             workspace_root,
             description="OpenClaw workspace root used for orchestration projects",
-        )
-
-    if payload.rotate_mobile_api_key:
-        payload.mobile_api_key = generate_mobile_gateway_key()
-
-    if payload.mobile_api_key is not None:
-        set_setting_value(
-            db,
-            MOBILE_API_KEY_KEY,
-            payload.mobile_api_key.strip(),
-            description="Shared mobile API key used by ClawMobile/OpenClaw mobile endpoints",
         )
 
     return get_app_settings(request, current_user)
@@ -157,6 +153,7 @@ def reveal_mobile_secret(
     return {
         "user_email": current_user.email,
         "header_name": "X-OpenClaw-API-Key",
-        "api_key": mobile_key,
+        "api_key_preview": _mask_secret(mobile_key),
         "api_key_source": key_source,
+        "detail": "Raw mobile gateway secrets are not returned by the API",
     }

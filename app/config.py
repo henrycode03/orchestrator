@@ -78,3 +78,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def validate_runtime_secrets() -> None:
+    """Fail fast if production-critical secrets are unset or still defaulted."""
+
+    insecure_secret = not settings.SECRET_KEY or (
+        settings.SECRET_KEY == "your-secret-key-change-in-production"
+    )
+    if insecure_secret:
+        raise RuntimeError(
+            "SECRET_KEY is unset or still using the default value; "
+            "configure a unique SECRET_KEY before starting the API"
+        )

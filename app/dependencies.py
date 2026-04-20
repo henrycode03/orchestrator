@@ -9,6 +9,9 @@ from app.models import User
 from app.auth import verify_token
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
+optional_oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="api/v1/auth/login", auto_error=False
+)
 
 
 async def get_current_user(
@@ -57,7 +60,7 @@ async def get_current_active_user(
 
 
 async def get_current_optional_user(
-    token: str | None = Depends(oauth2_scheme), db: Session = Depends(get_db)
+    token: str | None = Depends(optional_oauth2_scheme), db: Session = Depends(get_db)
 ) -> User | None:
     """
     Get current user if token is provided, otherwise None.

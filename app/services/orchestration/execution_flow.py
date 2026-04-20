@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import subprocess
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -23,6 +24,7 @@ class StepExecutionAssessment:
     missing_files: List[str]
     tool_failures: List[str]
     correction_hints: List[str]
+    verification_output: str = ""
     validation_verdict: Optional[ValidationVerdict] = None
 
 
@@ -81,6 +83,50 @@ def missing_expected_files(project_dir: Path, expected_files: List[str]) -> List
     return missing
 
 
+def execute_verification_command(
+    *,
+    project_dir: Path,
+    command: str,
+    timeout_seconds: int = 120,
+) -> Dict[str, Any]:
+    raw_command = str(command or "").strip()
+    if not raw_command:
+        return {
+            "success": True,
+            "command": raw_command,
+            "returncode": 0,
+            "output": "",
+        }
+
+    try:
+        completed = subprocess.run(
+            raw_command,
+            cwd=str(project_dir),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        output = "\n".join(
+            part
+            for part in [completed.stdout.strip(), completed.stderr.strip()]
+            if part
+        ).strip()
+        return {
+            "success": completed.returncode == 0,
+            "command": raw_command,
+            "returncode": completed.returncode,
+            "output": output[:4000],
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "command": raw_command,
+            "returncode": None,
+            "output": f"Verification command timed out after {timeout_seconds}s",
+        }
+
+
 def assess_step_execution(
     *,
     db: Session,
@@ -100,6 +146,7 @@ def assess_step_execution(
     tool_failures: List[str] = []
     correction_hints: List[str] = []
     validation_verdict: Optional[ValidationVerdict] = None
+    verification_output = str(step_result.get("verification_output", "") or "")
 
     expected_files = step.get("expected_files", []) or []
 
@@ -132,6 +179,21 @@ def assess_step_execution(
         if correction_hints:
             error_message += " | Retry hints: " + " | ".join(correction_hints[:3])
 
+    verification_command = str(step.get("verification") or "").strip()
+    if step_status == "success" and verification_command:
+        verification_result = execute_verification_command(
+            project_dir=project_dir,
+            command=verification_command,
+        )
+        verification_output = verification_result.get("output", "")
+        step_result["verification_output"] = verification_output
+        if not verification_result.get("success", False):
+            step_status = "failed"
+            error_message = (
+                "Step verification command failed"
+                f" (`{verification_command}`): {verification_output[:500]}"
+            )
+
     if step_status == "success":
         validation_verdict = ValidatorService.validate_step_success(
             project_dir=project_dir,
@@ -155,6 +217,7 @@ def assess_step_execution(
         missing_files=missing_files,
         tool_failures=tool_failures,
         correction_hints=correction_hints,
+        verification_output=verification_output,
         validation_verdict=validation_verdict,
     )
 

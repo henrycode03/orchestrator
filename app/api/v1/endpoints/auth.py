@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Optional
+import hashlib
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -40,7 +41,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
 # Helper dependency to get user by API key
 def get_user_by_api_key(api_key: str, db: Session) -> Optional[User]:
     """Find user by API key hash."""
-    api_key_record = db.query(APIKey).filter(APIKey.key_hash == api_key).first()
+    presented_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    api_key_record = db.query(APIKey).filter(APIKey.key_hash == presented_hash).first()
 
     if not api_key_record:
         return None
@@ -53,7 +55,7 @@ def get_user_by_api_key(api_key: str, db: Session) -> Optional[User]:
 
 
 # Header parameter for API key
-def get_x_api_key(x_api_key: str = Header("X-API-Key", alias="X-API-Key")):
+def get_x_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")):
     """Header parameter decorator for API key."""
     return x_api_key
 
@@ -122,7 +124,7 @@ def register(
     return new_user
 
 
-@router.post("/login", response_model=UserResponse, deprecated=True)
+@router.post("/login", response_model=Token, deprecated=True)
 def login_login_form(
     form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
 ):
@@ -150,12 +152,11 @@ def login_login_form(
     access_token = create_access_token(data={"sub": user.email})
     refresh_token = create_refresh_token(data={"sub": user.email})
 
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "user": user,
-    }
+    return Token(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+    )
 
 
 @router.post("/tokens", response_model=Token)
@@ -246,7 +247,6 @@ def create_api_key(
     Store it securely - it cannot be retrieved later.
     """
     import secrets
-    import hashlib
 
     # Generate random API key
     raw_key = f"orch_{secrets.token_urlsafe(32)}"
@@ -390,8 +390,8 @@ def unpair_device(
     db.commit()
 
     return DeviceUnpairResponse(
+        success=True,
         message="Device unpaired successfully",
-        device_id=device_id,
     )
 
 

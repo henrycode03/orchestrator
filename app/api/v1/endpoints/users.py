@@ -4,6 +4,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.dependencies import get_current_active_user
 from app.models import User as UserModel
 from app.schemas import UserResponse
 
@@ -25,6 +26,7 @@ async def list_users(
     limit: int = Query(
         100, ge=1, le=1000, description="Maximum number of users to return"
     ),
+    current_user: UserModel = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -46,6 +48,7 @@ async def list_users(
 )
 async def get_user(
     user_id: int,
+    current_user: UserModel = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
     """

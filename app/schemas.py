@@ -1,6 +1,6 @@
 """Pydantic schemas for API validation"""
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
 from datetime import datetime
 from enum import Enum
@@ -223,6 +223,13 @@ class UserCreate(BaseModel):
     password: str
     name: Optional[str] = None
 
+    @field_validator("password")
+    @classmethod
+    def validate_password_length(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return value
+
 
 class UserResponse(BaseModel):
     id: int
@@ -247,10 +254,11 @@ class APIKeyCreate(BaseModel):
 
 class APIKeyResponse(BaseModel):
     id: int
+    user_id: int
     name: str
-    description: Optional[str] = None
+    key: Optional[str] = None
     key_hash: str
-    is_active: bool
+    last_used: Optional[datetime] = None
     created_at: datetime
 
     class Config:
@@ -264,7 +272,7 @@ class DevicePairRequest(BaseModel):
 
 class DeviceResponse(BaseModel):
     id: int
-    device_name: str
+    name: str
     public_key: str
     is_active: bool
     created_at: datetime
@@ -281,6 +289,13 @@ class DeviceUnpairResponse(BaseModel):
 class PasswordChangeRequest(BaseModel):
     current_password: str
     new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password_length(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("New password must be at least 8 characters")
+        return value
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -315,6 +330,7 @@ class AppSettingsResponse(BaseModel):
 class VerifySignatureRequest(BaseModel):
     message: str
     signature: str
+    public_key: str
 
 
 class VerifySignatureResponse(BaseModel):

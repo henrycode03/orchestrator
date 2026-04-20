@@ -86,7 +86,10 @@ def require_mobile_gateway_key(
     - X-OpenClaw-API-Key: <key>
     - Authorization: Bearer <key>
     """
-    configured_key = settings.MOBILE_GATEWAY_API_KEY or settings.OPENCLAW_API_KEY
+    configured_key, _ = get_effective_mobile_gateway_key(
+        settings.MOBILE_GATEWAY_API_KEY,
+        settings.OPENCLAW_API_KEY,
+    )
 
     if not configured_key:
         logger.warning(
