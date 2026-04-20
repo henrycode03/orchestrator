@@ -1,9 +1,10 @@
-"""Checkpoint, logging, and validation persistence helpers for orchestration."""
+"""Checkpoint, logging, validation, and event persistence helpers for orchestration."""
 
 from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
@@ -13,6 +14,39 @@ from app.services.checkpoint_service import CheckpointService
 from app.services.prompt_templates import OrchestrationState, StepResult
 
 from .types import ValidationVerdict
+
+
+def _orchestration_event_log_path(
+    project_dir: Any, session_id: int, task_id: int
+) -> Path:
+    return (
+        Path(project_dir)
+        / ".openclaw"
+        / "events"
+        / f"session_{session_id}_task_{task_id}.jsonl"
+    )
+
+
+def append_orchestration_event(
+    *,
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    event_type: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "event_type": event_type,
+        "session_id": session_id,
+        "task_id": task_id,
+        "details": details or {},
+    }
+    log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str) + "\n")
+    return payload
 
 
 def set_session_alert(
@@ -119,6 +153,22 @@ def record_validation_verdict(
     )
     verdict_payload = verdict.to_dict()
     orchestration_state.validation_history.append(verdict_payload)
+    try:
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type="validation_result",
+            details={
+                "stage": verdict.stage,
+                "status": verdict.status,
+                "profile": verdict.profile,
+                "step_number": step_number,
+                "reasons": verdict.reasons[:10],
+            },
+        )
+    except Exception:
+        pass
     if verdict.stage == "plan":
         orchestration_state.last_plan_validation = verdict_payload
     elif verdict.stage == "task_completion":

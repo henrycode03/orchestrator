@@ -8,7 +8,11 @@ import logging
 from typing import Any, Callable, Dict
 
 from app.models import TaskStatus
-from app.services.orchestration.persistence import record_validation_verdict
+from app.services.orchestration.context_assembly import assemble_planning_prompt
+from app.services.orchestration.persistence import (
+    append_orchestration_event,
+    record_validation_verdict,
+)
 from app.services.orchestration.planner import PlannerService
 from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.telemetry import emit_phase_event
@@ -39,11 +43,21 @@ def execute_planning_phase(
             "task_chars": len(ctx.prompt or ""),
         },
     )
+    try:
+        append_orchestration_event(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type="phase_started",
+            details={"phase": "planning"},
+        )
+    except Exception:
+        pass
 
-    planning_prompt = ctx.openclaw_service and __build_planning_prompt(
-        prompt=ctx.prompt,
-        orchestration_state=ctx.orchestration_state,
-        execution_profile=ctx.execution_profile,
+    planning_prompt = (
+        assemble_planning_prompt(ctx, workspace_review)
+        if ctx.openclaw_service
+        else None
     )
     planning_prompt_tokens = estimate_token_count(planning_prompt or "")
 
@@ -318,6 +332,20 @@ def execute_planning_phase(
                 plan_verdict,
             )
             ctx.db.commit()
+            try:
+                append_orchestration_event(
+                    project_dir=ctx.orchestration_state.project_dir,
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    event_type="phase_finished",
+                    details={
+                        "phase": "planning",
+                        "status": plan_verdict.status,
+                        "step_count": len(ctx.orchestration_state.plan),
+                    },
+                )
+            except Exception:
+                pass
 
             if not plan_verdict.accepted and not used_planning_repair_prompt:
                 planning_result = __repair_planning_output(

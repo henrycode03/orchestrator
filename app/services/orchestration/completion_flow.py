@@ -11,12 +11,18 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models import SessionTask, Task, TaskStatus
 from app.services.error_handler import error_handler
+from app.services.orchestration.context_assembly import (
+    assemble_completion_repair_inputs,
+    assemble_execution_prompt,
+    collect_workspace_inventory_paths,
+)
 from app.services.orchestration.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
 )
 from app.services.orchestration.parsing import extract_structured_text
 from app.services.orchestration.persistence import (
+    append_orchestration_event,
     record_validation_verdict,
     save_orchestration_checkpoint,
     set_session_alert,
@@ -36,28 +42,6 @@ RELATIVE_PATH_TOKEN_RE = re.compile(
     r"|(?:package\.json|tsconfig\.json|vitest\.config\.ts|jest\.config\.js|README\.md|\.env\.example)"
     r")(?![\w./-])"
 )
-
-
-def _collect_workspace_inventory_paths(
-    project_dir: Path,
-    max_files: int = 200,
-) -> list[str]:
-    existing_files: list[str] = []
-    if not project_dir.exists():
-        return existing_files
-    for path in sorted(project_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(project_dir)
-        if any(
-            part in {"node_modules", ".openclaw", "__pycache__"}
-            for part in relative.parts
-        ):
-            continue
-        existing_files.append(str(relative))
-        if len(existing_files) >= max_files:
-            break
-    return existing_files
 
 
 def _build_completion_repair_workspace_summary(
@@ -361,18 +345,27 @@ def _attempt_completion_repair(
             "reasons": completion_validation.reasons[:10],
         },
     )
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        event_type="repair_generated",
+        details={
+            "phase": "completion_repair",
+            "attempt": orchestration_state.completion_repair_attempts,
+            "reasons": completion_validation.reasons[:10],
+        },
+    )
 
+    repair_context = assemble_completion_repair_inputs(ctx, completion_validation)
     repair_prompt = _build_completion_repair_prompt(
         task_prompt=ctx.prompt,
         completion_validation=completion_validation,
         project_dir=orchestration_state.project_dir,
-        prior_results_summary=orchestration_state.prior_results_summary(),
-        project_context=orchestration_state.project_context,
+        prior_results_summary=repair_context["prior_results_summary"],
+        project_context=repair_context["project_context"],
         next_step_number=next_step_number,
-        workspace_inventory=_build_completion_repair_workspace_summary(
-            project_dir=Path(orchestration_state.project_dir),
-            completion_validation=completion_validation,
-        ),
+        workspace_inventory=repair_context["workspace_inventory"],
     )
     repair_plan_result = asyncio.run(
         ctx.openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
@@ -429,6 +422,17 @@ def _attempt_completion_repair(
                 "invalid_paths": invalid_paths[:10],
             },
         )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type="repair_rejected",
+            details={
+                "phase": "completion_repair",
+                "reason": "inventory_guard",
+                "invalid_paths": invalid_paths[:10],
+            },
+        )
         guarded_retry_prompt = (
             repair_prompt
             + "\n\nThe previous repair step was invalid because it referenced these paths that are not present in the workspace inventory or not created by the repair step:\n"
@@ -471,6 +475,17 @@ def _attempt_completion_repair(
             completion_validation=completion_validation,
         )
         if invalid_paths:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                event_type="repair_rejected",
+                details={
+                    "phase": "completion_repair",
+                    "reason": "inventory_guard_retry_rejected",
+                    "invalid_paths": invalid_paths[:10],
+                },
+            )
             return {
                 "status": "failed",
                 "reason": "repair_step_inventory_guard_rejected:"
@@ -496,19 +511,7 @@ def _attempt_completion_repair(
         },
     )
 
-    from app.services import PromptTemplates
-
-    execution_prompt = PromptTemplates.build_execution_prompt(
-        step_description=repair_step["description"],
-        step_commands=repair_step["commands"],
-        project_dir=str(orchestration_state.project_dir),
-        verification_command=repair_step.get("verification"),
-        rollback_command=repair_step.get("rollback"),
-        expected_files=repair_step.get("expected_files", []),
-        completed_steps_summary=orchestration_state.prior_results_summary(),
-        project_context=orchestration_state.project_context,
-        execution_profile=ctx.execution_profile,
-    )
+    execution_prompt = assemble_execution_prompt(ctx, repair_step)
     step_timeout_seconds = determine_step_timeout(
         timeout_seconds=ctx.timeout_seconds,
         total_steps=len(orchestration_state.plan),
@@ -595,6 +598,17 @@ def _attempt_completion_repair(
             f"[ORCHESTRATION] Completion repair step {next_step_number} completed successfully",
             metadata={"phase": "completion_repair", "step_index": next_step_number},
         )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type="repair_applied",
+            details={
+                "phase": "completion_repair",
+                "step_index": next_step_number,
+                "expected_files": repair_step.get("expected_files", [])[:20],
+            },
+        )
         return {"status": "success", "step": repair_step}
 
     orchestration_state.record_failure(step_record)
@@ -616,6 +630,17 @@ def _attempt_completion_repair(
             "phase": "completion_repair",
             "step_index": next_step_number,
             "error": assessment.error_message[:1000],
+        },
+    )
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        event_type="repair_rejected",
+        details={
+            "phase": "completion_repair",
+            "reason": assessment.error_message[:400],
+            "step_index": next_step_number,
         },
     )
     return {"status": "failed", "reason": assessment.error_message}
@@ -658,6 +683,13 @@ def finalize_successful_task(
         level="INFO",
         phase="task_summary",
         message="[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion",
+    )
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type="phase_started",
+        details={"phase": "task_summary"},
     )
 
     from app.services import PromptTemplates
@@ -757,6 +789,17 @@ def finalize_successful_task(
             )
             save_orchestration_checkpoint_fn(
                 db, session_id, task_id, prompt, orchestration_state
+            )
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type="phase_finished",
+                details={
+                    "phase": "task_summary",
+                    "status": "repair_failed",
+                    "task_status": str(task.status.value if task else "failed"),
+                },
             )
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "completion_repair_failed"}
@@ -1059,6 +1102,18 @@ def finalize_successful_task(
             logger.error(
                 "[REPORT] Failed to generate task report: %s", str(report_error)
             )
+
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type="phase_finished",
+        details={
+            "phase": "task_summary",
+            "status": completion_validation.status,
+            "task_status": str(task.status.value if task else "done"),
+        },
+    )
 
     return {
         "status": "completed",

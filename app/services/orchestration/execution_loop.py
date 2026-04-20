@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskStatus
-from app.services import PromptTemplates
 from app.services.orchestration.completion_flow import finalize_successful_task
+from app.services.orchestration.context_assembly import assemble_execution_prompt
 from app.services.orchestration.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
@@ -19,6 +19,7 @@ from app.services.orchestration.execution_flow import (
 from app.services.orchestration.policy import DEBUG_TIMEOUT_SECONDS, MAX_STEP_ATTEMPTS
 from app.services.orchestration.executor import ExecutorService
 from app.services.orchestration.persistence import (
+    append_orchestration_event,
     record_validation_verdict,
     save_orchestration_checkpoint,
     set_session_alert,
@@ -80,6 +81,16 @@ def execute_step_loop(
         message=f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps",
         details={"steps": len(orchestration_state.plan)},
     )
+    try:
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type="phase_started",
+            details={"phase": "executing", "steps": len(orchestration_state.plan)},
+        )
+    except Exception:
+        pass
 
     for step_index in range(
         orchestration_state.current_step_index, len(orchestration_state.plan)
@@ -216,17 +227,7 @@ def execute_step_loop(
             verification_command,
         )
 
-        execution_prompt = PromptTemplates.build_execution_prompt(
-            step_description=step_description,
-            step_commands=step_commands,
-            project_dir=str(orchestration_state.project_dir),
-            verification_command=verification_command,
-            rollback_command=rollback_command,
-            expected_files=expected_files,
-            completed_steps_summary=orchestration_state.prior_results_summary(),
-            project_context=orchestration_state.project_context,
-            execution_profile=execution_profile,
-        )
+        execution_prompt = assemble_execution_prompt(ctx, step)
 
         step_timeout_seconds = determine_step_timeout(
             timeout_seconds=timeout_seconds,
@@ -685,6 +686,17 @@ def execute_step_loop(
             db.commit()
             restore_workspace_snapshot_if_needed("debug parse error")
             return {"status": "failed", "reason": "debug_parse_error"}
+
+    try:
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type="phase_finished",
+            details={"phase": "executing", "status": "completed"},
+        )
+    except Exception:
+        pass
 
     return finalize_successful_task(
         ctx=ctx,

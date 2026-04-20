@@ -6,6 +6,13 @@ from the concrete module they need.
 """
 
 from .completion_flow import finalize_successful_task
+from .context_assembly import (
+    assemble_completion_repair_inputs,
+    assemble_execution_prompt,
+    assemble_planning_prompt,
+    build_workspace_inventory_summary,
+    collect_workspace_inventory_paths,
+)
 from .execution_flow import (
     StepExecutionAssessment,
     ToolPathFailureDecision,
@@ -37,6 +44,7 @@ from .policy import (
     should_restore_workspace_on_failure,
 )
 from .persistence import (
+    append_orchestration_event,
     record_live_log,
     record_validation_verdict,
     restore_step_result,
@@ -78,6 +86,12 @@ from .workspace_guard import (
 __all__ = [
     "ValidationVerdict",
     "PlannerService",
+    "append_orchestration_event",
+    "assemble_completion_repair_inputs",
+    "assemble_execution_prompt",
+    "assemble_planning_prompt",
+    "build_workspace_inventory_summary",
+    "collect_workspace_inventory_paths",
     "ExecutorService",
     "ValidatorService",
     "record_live_log",

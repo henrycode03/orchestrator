@@ -47,6 +47,7 @@ from app.services.orchestration import (
     should_force_review_execution_profile as _should_force_review_execution_profile,
 )
 from app.services.orchestration.persistence import (
+    append_orchestration_event as _append_orchestration_event,
     record_live_log as _record_live_log,
     record_validation_verdict as _record_validation_verdict,
     restore_step_result as _restore_step_result,
@@ -413,6 +414,16 @@ def execute_openclaw_task(
                         "policy": "preserve_on_non_isolation_failures",
                     },
                 )
+                _append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type="workspace_restore_skipped",
+                    details={
+                        "reason": reason,
+                        "policy": "preserve_on_non_isolation_failures",
+                    },
+                )
                 return {
                     "restored": False,
                     "reason": "preserved_non_isolation_failure",
@@ -471,6 +482,27 @@ def execute_openclaw_task(
                             "current_workspace_files", 0
                         ),
                         "restore_skipped": True,
+                    },
+                )
+                _append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type="workspace_restore_skipped",
+                    details={
+                        "reason": reason,
+                        "policy": "empty_snapshot_preserved_existing_workspace",
+                    },
+                )
+            elif restore_result and restore_result.get("restored"):
+                _append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type="workspace_preserved",
+                    details={
+                        "reason": reason,
+                        "restored_files": restore_result.get("files_restored", 0),
                     },
                 )
             return restore_result
@@ -601,6 +633,21 @@ def execute_openclaw_task(
                     "execution_results", checkpoint_payload.get("step_results", [])
                 )
             ]
+            _append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type="checkpoint_loaded",
+                details={
+                    "checkpoint_name": checkpoint_payload.get(
+                        "_resolved_checkpoint_name"
+                    )
+                    or checkpoint_payload.get("checkpoint_name"),
+                    "requested_checkpoint_name": checkpoint_payload.get(
+                        "_requested_checkpoint_name"
+                    ),
+                },
+            )
             if (
                 orchestration_state.completion_repair_attempts > 0
                 and orchestration_state.plan
@@ -679,6 +726,17 @@ def execute_openclaw_task(
                 checkpoint_data.get("_resolved_checkpoint_name")
                 or resume_checkpoint_name
             )
+            if resolved_resume_checkpoint_name != requested_resume_checkpoint_name:
+                _append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type="checkpoint_redirected",
+                    details={
+                        "requested_checkpoint_name": requested_resume_checkpoint_name,
+                        "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                    },
+                )
             resume_workspace_compatibility = _apply_checkpoint_payload(checkpoint_data)
             if orchestration_state.plan and not resume_workspace_compatibility.get(
                 "compatible", True
@@ -708,6 +766,17 @@ def execute_openclaw_task(
                                 "resolved_checkpoint_name": resolved_resume_checkpoint_name,
                                 "fallback_checkpoint_name": fallback_name,
                                 "compatibility": resume_workspace_compatibility,
+                            },
+                        )
+                        _append_orchestration_event(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type="resume_workspace_drift",
+                            details={
+                                "requested_checkpoint_name": requested_resume_checkpoint_name,
+                                "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                                "fallback_checkpoint_name": fallback_name,
                             },
                         )
                         logger.warning(
@@ -741,6 +810,18 @@ def execute_openclaw_task(
                             "requested_checkpoint_name": requested_resume_checkpoint_name,
                             "resolved_checkpoint_name": resolved_resume_checkpoint_name,
                             "compatibility": resume_workspace_compatibility,
+                        },
+                    )
+                    _append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type="resume_workspace_drift",
+                        details={
+                            "requested_checkpoint_name": requested_resume_checkpoint_name,
+                            "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                            "compatibility": resume_workspace_compatibility,
+                            "action": "replan",
                         },
                     )
                     _clear_resume_execution_state(compatibility_error)
