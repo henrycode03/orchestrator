@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
+from app.dependencies import get_current_active_user
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
@@ -203,6 +204,7 @@ def get_all_tasks(
     limit: int = 100,
     status: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Get all tasks across all projects"""
     query = db.query(Task)
@@ -225,7 +227,11 @@ def get_all_tasks(
 
 
 @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-def create_task(task: TaskCreate, db: Session = Depends(get_db)):
+def create_task(
+    task: TaskCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Create a new task"""
     # Verify project exists
     project = db.query(Project).filter(Project.id == task.project_id).first()
@@ -243,7 +249,11 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)):
 
 @router.get("/projects/{project_id}/tasks", response_model=List[TaskResponse])
 def get_project_tasks(
-    project_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
+    project_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Get all tasks for a project"""
     # Verify project exists
@@ -258,7 +268,10 @@ def get_project_tasks(
 
 @router.post("/tasks/{task_id}/execute")
 async def execute_task_with_openclaw(
-    task_id: int, request: Request, db: Session = Depends(get_db)
+    task_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Execute a task using OpenClaw AI agent with real-time log streaming
@@ -412,7 +425,11 @@ async def execute_task_with_openclaw(
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
-def get_task(task_id: int, db: Session = Depends(get_db)):
+def get_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Get a task by ID"""
     task_service = TaskService(db)
     task = task_service.get_task(task_id)
@@ -590,7 +607,12 @@ def request_task_workspace_changes(
 
 
 @router.put("/tasks/{task_id}", response_model=TaskResponse)
-def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get_db)):
+def update_task(
+    task_id: int,
+    task_update: TaskUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Update a task"""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -612,9 +634,14 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
         "error_message",
     }
 
+    unsupported_fields = sorted(set(update_data) - editable_fields)
+    if unsupported_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported fields: {unsupported_fields}",
+        )
+
     for field, value in update_data.items():
-        if field not in editable_fields:
-            continue
         if field in {"description", "steps"} and value == "":
             value = None
         setattr(task, field, value)
@@ -627,7 +654,11 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
 
 
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(task_id: int, db: Session = Depends(get_db)):
+def delete_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Delete a task"""
     from app.models import TaskCheckpoint
 
@@ -653,6 +684,7 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
 def get_sorted_task_logs(
     task_id: int,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
     order: str = "asc",
     deduplicate: bool = True,
     level: Optional[str] = None,

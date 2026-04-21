@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket
 from fastapi.requests import Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any, Dict
 from datetime import datetime, timezone
@@ -21,18 +22,14 @@ from app.schemas import (
 )
 from app.services import (
     OpenClawSessionService,
-    LogStreamService,
-    ToolTrackingService,
     PromptTemplates,
     check_session_overwrites_payload as _check_session_overwrites_payload,
     cleanup_orphaned_checkpoints_payload as _cleanup_orphaned_checkpoints_payload,
     cleanup_session_checkpoints_payload as _cleanup_session_checkpoints_payload,
     create_session_backup_payload as _create_session_backup_payload,
     delete_session_checkpoint_payload as _delete_session_checkpoint_payload,
-    ensure_task_workspace as _ensure_task_workspace,
     ensure_unique_session_name as _ensure_unique_session_name,
     get_session_logs_payload as _get_session_logs_payload,
-    get_session_task_subfolder as _get_session_task_subfolder,
     get_session_workspace_info_payload as _get_session_workspace_info_payload,
     get_session_statistics_payload as _get_session_statistics_payload,
     get_sorted_logs_payload as _get_sorted_logs_payload,
@@ -41,7 +38,6 @@ from app.services import (
     load_session_checkpoint_payload as _load_session_checkpoint_payload,
     maybe_queue_next_automatic_task as _maybe_queue_next_automatic_task,
     queue_task_for_session as _queue_task_for_session,
-    revoke_session_celery_tasks as _revoke_session_celery_tasks,
     save_session_checkpoint_payload as _save_session_checkpoint_payload,
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
@@ -85,7 +81,8 @@ def create_session(
         humanize_display_name(session_data.get("name") or "session"),
     )
     db_session = SessionModel(**session_data)
-    db_session.is_active = True  # Session is active when created
+    db_session.status = "pending"
+    db_session.is_active = False
     db_session.instance_id = str(
         uuid.uuid4()
     )  # Generate unique instance ID immediately
@@ -404,9 +401,6 @@ def delete_session(
 
     logger.info(f"DELETE /sessions/{session_id} - Session deleted successfully")
     return None
-
-
-from pydantic import BaseModel
 
 
 class StartOpenClawRequest(BaseModel):
@@ -799,14 +793,6 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
     return {"steps": default_steps, "task_name": task_name}
 
 
-# ============================================================================
-# OVERWRITE PROTECTION ENDPOINTS (Session-scoped)
-# ============================================================================
-
-from pydantic import BaseModel
-from typing import List, Optional
-
-
 class OverwriteCheckRequest(BaseModel):
     """Request model for overwrite check"""
 
@@ -888,21 +874,6 @@ async def get_session_workspace_info(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Workspace info failed: {str(e)}")
-
-
-# ============================================================================
-# CHECKPOINT MANAGEMENT ENDPOINTS (For Pause/Resume Functionality)
-# ============================================================================
-
-from pydantic import BaseModel
-from typing import List, Optional
-
-
-class CheckpointListResponse(BaseModel):
-    """Response model for checkpoint listing"""
-
-    checkpoints: List[Dict[str, Any]]
-    total_count: int
 
 
 @router.post("/sessions/{session_id}/checkpoint/save")

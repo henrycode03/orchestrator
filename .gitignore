@@ -93,3 +93,6 @@ worker.pid
 # alembic
 alembic
 alembic.ini
+
+# ai agent
+.codex

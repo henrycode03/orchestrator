@@ -276,20 +276,16 @@ def get_mobile_connection_info(
 def reveal_mobile_connection_secret(
     current_user: User = Depends(get_current_active_user),
 ):
-    """Reveal the configured mobile shared key to an authenticated user."""
+    """Return setup metadata without exposing the raw mobile shared key."""
     shared_key, key_source = _get_mobile_shared_key()
-    if not shared_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Mobile gateway API key is not configured",
-        )
-
     return {
         "user_email": current_user.email,
         "header_name": "X-OpenClaw-API-Key",
-        "api_key": shared_key,
+        "api_key": None,
+        "api_key_configured": bool(shared_key),
         "api_key_preview": _mask_secret(shared_key),
         "api_key_source": key_source,
+        "detail": "Raw mobile gateway secrets are not returned by the API",
     }
 
 

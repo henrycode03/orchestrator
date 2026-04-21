@@ -1,16 +1,16 @@
 """AI Dev Agent Orchestrator - FastAPI Application"""
 
 from contextlib import asynccontextmanager
+import logging
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-from sqlalchemy import text
+from fastapi.responses import JSONResponse
+
 from app.config import settings, validate_runtime_secrets
 from app.api.v1.router import api_router
-from app.database import engine, init_db, get_db_session
+from app.database import init_db, get_db_session
 from app.services.checkpoint_service import CheckpointService
-import logging
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -54,75 +54,6 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Orchestrator API shutting down...")
     logger.info("Cleaning up WebSocket connections and resources...")
     logger.info("=" * 50)
-
-
-# Custom CORS middleware to handle OPTIONS before router
-class CORSMiddlewareBeforeRouter:
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["method"] == "OPTIONS":
-            # Get the origin from the request
-            origin = scope.get("headers", [])
-            request_origin = None
-            for name, value in origin:
-                if name == b"origin":
-                    request_origin = value.decode("utf-8")
-                    break
-
-            # Determine allowed origin
-            # If origin is null or empty, allow * (for console/test requests)
-            # Otherwise, validate against allowed origins
-            allowed_origin = "*"
-            if request_origin and request_origin not in ["null", ""]:
-                # Check if origin is in allowed list
-                allowed_origins = settings.CORS_ORIGINS
-                if "*" in allowed_origins:
-                    allowed_origin = "*"
-                elif request_origin in allowed_origins:
-                    allowed_origin = request_origin
-                else:
-                    allowed_origin = None  # Block this origin
-
-            # Build response headers
-            headers = {
-                "Access-Control-Allow-Methods": "*",
-                "Access-Control-Allow-Headers": "*",
-                "Access-Control-Max-Age": "86400",
-                "Access-Control-Allow-Credentials": "true",  # Always include credentials
-            }
-
-            if allowed_origin:
-                headers["Access-Control-Allow-Origin"] = allowed_origin
-
-            response = Response(
-                status_code=200,
-                headers=headers,
-            )
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [
-                        (b"access-control-allow-origin", allowed_origin.encode()),
-                        (b"access-control-allow-methods", b"*"),
-                        (b"access-control-allow-headers", b"*"),
-                        (b"access-control-max-age", b"86400"),
-                        (b"access-control-allow-credentials", b"true"),
-                    ],
-                }
-            )
-
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": b"",
-                }
-            )
-            return
-
-        await self.app(scope, receive, send)
 
 
 app = FastAPI(

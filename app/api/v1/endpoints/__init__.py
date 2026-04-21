@@ -6,13 +6,12 @@ from .auth import router as auth_router
 from .context import router as context_router
 from .github import router as github_router
 from .isolation import router as isolation_router
+from .planner import router as planner_router
 from .permissions import router as permissions_router
 from .project_logs import router as project_logs_router
 from .projects import router as projects_router
 from .sessions import router as sessions_router
 from .tasks import router as tasks_router
-from .orchestrator import router as orchestrator_router
-from .planner import router as planner_router
 
 __all__ = [
     "auth_router",
@@ -24,6 +23,5 @@ __all__ = [
     "projects_router",
     "sessions_router",
     "tasks_router",
-    "orchestrator_router",
     "planner_router",
 ]

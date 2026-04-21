@@ -21,6 +21,12 @@ def test_health_check_contract():
 def test_projects_list_returns_array_contract():
     response = main_client.get("/api/v1/projects")
 
+    assert response.status_code == 401
+
+
+def test_projects_list_returns_array_contract_when_authenticated(authenticated_client):
+    response = authenticated_client.get("/api/v1/projects")
+
     assert response.status_code == 200
     payload = response.json()
     assert isinstance(payload, list)
@@ -50,8 +56,8 @@ def test_project_create_and_detail_contract(authenticated_client):
     assert "updated_at" in detail
 
 
-def test_missing_project_returns_detail_message():
-    response = main_client.get("/api/v1/projects/999999")
+def test_missing_project_returns_detail_message(authenticated_client):
+    response = authenticated_client.get("/api/v1/projects/999999")
 
     assert response.status_code == 404
     payload = response.json()

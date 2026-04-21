@@ -1,6 +1,6 @@
 """API Router v1"""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.api.v1.endpoints import (
     tasks,
     github,
@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
 )
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.project_logs import router as project_logs_router
+from app.dependencies import get_current_active_user
 
 # Import auth router separately
 from app.api.v1.endpoints.auth import router as auth_router
@@ -50,32 +51,38 @@ api_router.include_router(
 api_router.include_router(
     users.router,
     tags=["users"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 api_router.include_router(
     settings.router,
     tags=["settings"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 # Add other routers
 api_router.include_router(
     projects.router,
     tags=["projects"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 api_router.include_router(
     planner.router,
     tags=["planner"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 api_router.include_router(
     tasks.router,
     tags=["tasks"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 api_router.include_router(
     sessions.router,
     tags=["sessions"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 api_router.include_router(
@@ -88,6 +95,7 @@ api_router.include_router(
     isolation.router,
     # No prefix needed - endpoints already have /projects/{project_id}/isolation/...
     tags=["project-isolation"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 # Permission Approval
@@ -95,12 +103,14 @@ api_router.include_router(
     permissions.router,
     prefix="/permissions",
     tags=["permissions"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 # Context Preservation
 api_router.include_router(
     context.router,
     tags=["context-preservation"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 # Project Logs (filter by project_id)
@@ -108,6 +118,7 @@ api_router.include_router(
     project_logs_router,
     prefix="/projects/{project_id}",
     tags=["project-logs"],
+    dependencies=[Depends(get_current_active_user)],
 )
 
 # Mobile API — clawmobile integration via OpenClaw Gateway
@@ -119,4 +130,5 @@ api_router.include_router(
     resume.router,
     prefix="/sessions/{session_id}/resume",
     tags=["resume-operations"],
+    dependencies=[Depends(get_current_active_user)],
 )
