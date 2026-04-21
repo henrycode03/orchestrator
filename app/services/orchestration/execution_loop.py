@@ -79,6 +79,7 @@ def execute_step_loop(
     error_handler = ctx.error_handler
     restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
 
+    orchestration_state.status = OrchestrationStatus.EXECUTING
     logger.info(
         "[ORCHESTRATION] Phase 2: EXECUTING - executing %s steps",
         len(orchestration_state.plan),

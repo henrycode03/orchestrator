@@ -74,6 +74,44 @@ from app.services.session_runtime_service import (
 
 logger = logging.getLogger(__name__)
 
+_PROGRESS_NOTES_MAX_BYTES = 8000
+
+
+def _inject_progress_notes_into_context(
+    *,
+    orchestration_state: Any,
+    logger: Any,
+) -> None:
+    """Read .openclaw/progress_notes.md and prepend it to project_context.
+
+    This is the orient phase from best-practices: give the planner full history
+    of what previous task runs already accomplished so it does not repeat work
+    or contradict earlier decisions.
+    """
+    from pathlib import Path
+
+    project_dir = getattr(orchestration_state, "project_dir", None)
+    if not project_dir:
+        return
+    notes_path = Path(project_dir) / ".openclaw" / "progress_notes.md"
+    if not notes_path.exists():
+        return
+    try:
+        notes_text = notes_path.read_text(encoding="utf-8", errors="replace")
+        # Keep only the tail so large histories don't flood the context window.
+        if len(notes_text) > _PROGRESS_NOTES_MAX_BYTES:
+            notes_text = "...(truncated)\n" + notes_text[-_PROGRESS_NOTES_MAX_BYTES:]
+        prefix = (
+            "=== PRIOR SESSION PROGRESS NOTES ===\n"
+            + notes_text.strip()
+            + "\n=== END PRIOR SESSION PROGRESS NOTES ===\n\n"
+        )
+        current = orchestration_state.project_context or ""
+        orchestration_state.project_context = (prefix + current)[:8000]
+        logger.info("[ORIENT] Injected progress notes from %s", notes_path)
+    except Exception as e:
+        logger.warning("[ORIENT] Failed to read progress notes: %s", e)
+
 
 def _get_next_pending_project_task(
     db: Session, project_id: Optional[int]
@@ -644,6 +682,22 @@ def execute_openclaw_task(
                     "execution_results", checkpoint_payload.get("step_results", [])
                 )
             ]
+            # Restore execution status: if a plan exists with pending steps, mark
+            # as EXECUTING so downstream checkpoint saves reflect the real phase.
+            # Never restore ABORTED/DONE — those are terminal states from a prior
+            # run and we are actively resuming.
+            raw_status = checkpoint_state.get("status", "")
+            if raw_status in ("executing", "debugging", "revising_plan"):
+                try:
+                    orchestration_state.status = OrchestrationStatus(raw_status)
+                except ValueError:
+                    pass
+            elif (
+                orchestration_state.plan
+                and orchestration_state.current_step_index
+                < len(orchestration_state.plan)
+            ):
+                orchestration_state.status = OrchestrationStatus.EXECUTING
             _append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
@@ -1084,6 +1138,10 @@ def execute_openclaw_task(
                 )
 
         if not resumed_from_checkpoint and not orchestration_state.plan:
+            _inject_progress_notes_into_context(
+                orchestration_state=orchestration_state,
+                logger=logger,
+            )
             planning_phase_result = execute_planning_phase(
                 ctx=run_ctx,
                 workspace_review=workspace_review,

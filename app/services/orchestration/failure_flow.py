@@ -49,7 +49,11 @@ def handle_task_failure(
     retry_count = int(getattr(getattr(self_task, "request", None), "retries", 0) or 0)
     max_retries = int(getattr(self_task, "max_retries", 0) or 0)
     has_retry_capacity = should_retry and retry_count < max_retries
-    is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
+    is_timeout = (
+        "time limit" in str(exc).lower()
+        or "timeout" in str(exc).lower()
+        or "timed out" in str(exc).lower()
+    )
     non_restoring_failure_markers = (
         "completion validation failed",
         "baseline publish validation failed",

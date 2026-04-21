@@ -87,6 +87,7 @@ class OpenClawSessionService:
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
         self.openclaw_session_key: Optional[str] = None
+        self._task_session_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
         # Initialize checkpoint service
         from app.services.checkpoint_service import CheckpointService
@@ -206,6 +207,13 @@ class OpenClawSessionService:
 
             # Use the main OpenClaw session that already exists
             self.openclaw_session_key = "agent:main:main"
+
+            # Generate a stable session ID for this task run; all steps share it
+            # so the AI agent retains context across the entire task lifecycle.
+            task_id_str = str(self.task_id or self.session_id)
+            self._task_session_id = (
+                f"orchestrator-task-{task_id_str}-{int(time.time())}"
+            )
 
             self._log_entry(
                 "INFO", f"✅ OpenClaw session set to: {self.openclaw_session_key}"
@@ -1322,9 +1330,13 @@ class OpenClawSessionService:
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI with real-time log streaming (optimized)"""
 
-        # OPTIMIZATION: Single session ID generation
+        # Reuse the stable per-task session ID set in create_openclaw_session so
+        # all steps in this task share one AI context window.
         task_id_str = str(self.task_id or self.session_id)
-        new_session_id = f"orchestrator-task-{task_id_str}-{int(time.time())}"
+        new_session_id = (
+            self._task_session_id
+            or f"orchestrator-task-{task_id_str}-{int(time.time())}"
+        )
 
         try:
             openclaw_command = self._resolve_openclaw_command()

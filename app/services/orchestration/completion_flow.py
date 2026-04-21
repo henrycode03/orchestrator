@@ -726,6 +726,139 @@ def _attempt_completion_repair(
     return {"status": "failed", "reason": assessment.error_message}
 
 
+def _run_evaluator(
+    *,
+    openclaw_service: Any,
+    orchestration_state: Any,
+    prompt: str,
+    summary: str,
+    emit_live: Any,
+    logger: Any,
+) -> None:
+    """Run an independent QA evaluation pass after structural validation passes.
+
+    The evaluator is intentionally separate from the generator: it receives the
+    task goal, the execution record, and the summary, then grades the result
+    against concrete criteria.  A failing grade is logged as a warning (not a
+    hard failure) so the task still completes, but the signal is surfaced in
+    the live log and stored in the orchestration events for later review.
+    """
+    try:
+        steps_text = "\n".join(
+            (
+                f"- {r.get('step_title', r.get('step', ''))}: {r.get('status', '')}"
+                if isinstance(r, dict)
+                else f"- {r}"
+            )
+            for r in (orchestration_state.execution_results or [])
+        )
+        changed_files_text = "\n".join(
+            f"- {f}"
+            for f in (getattr(orchestration_state, "changed_files", []) or [])[:30]
+        )
+        evaluator_prompt = (
+            "You are an independent QA evaluator. Grade the following completed task.\n\n"
+            f"## Task goal\n{prompt}\n\n"
+            f"## Steps executed\n{steps_text or '(none recorded)'}\n\n"
+            f"## Files changed\n{changed_files_text or '(none recorded)'}\n\n"
+            f"## Agent summary\n{summary[:600] or '(no summary)'}\n\n"
+            "## Evaluation criteria\n"
+            "1. **Goal coverage** – Does the work address the full task goal? (0–3)\n"
+            "2. **No regressions** – Are there signs of broken functionality? (0–2)\n"
+            "3. **Code quality** – Is the implementation complete, not stubbed? (0–2)\n"
+            "4. **File correctness** – Do the changed files match what the task requires? (0–3)\n\n"
+            "Respond in this exact format:\n"
+            "SCORES: goal=X/3 regressions=X/2 quality=X/2 files=X/3\n"
+            "TOTAL: X/10\n"
+            "VERDICT: PASS or NEEDS_REVIEW\n"
+            "NOTES: one-sentence rationale\n"
+        )
+        eval_result = asyncio.run(
+            openclaw_service.execute_task(evaluator_prompt, timeout_seconds=120)
+        )
+        eval_output = (
+            eval_result.get("output", "")
+            if isinstance(eval_result, dict)
+            else str(eval_result)
+        )
+        verdict = "PASS"
+        if "VERDICT: NEEDS_REVIEW" in eval_output.upper():
+            verdict = "NEEDS_REVIEW"
+        log_level = "INFO" if verdict == "PASS" else "WARN"
+        emit_live(
+            log_level,
+            f"[EVALUATOR] QA verdict: {verdict}",
+            metadata={
+                "phase": "evaluation",
+                "verdict": verdict,
+                "eval_output": eval_output[:800],
+            },
+        )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=getattr(orchestration_state, "session_id", None),
+            task_id=getattr(orchestration_state, "task_id", None),
+            event_type="evaluator_result",
+            details={"verdict": verdict, "output": eval_output[:800]},
+        )
+    except Exception as e:
+        logger.warning("[EVALUATOR] QA evaluation failed (non-blocking): %s", e)
+
+
+def _write_progress_notes(
+    *,
+    orchestration_state: Any,
+    task: Any,
+    prompt: str,
+    summary: str,
+    logger: Any,
+) -> None:
+    """Append a structured completion entry to .openclaw/progress_notes.md.
+
+    This replaces git commits as the session artifact bridge when the project is
+    not version-controlled.  The orient phase in worker.py reads this file before
+    planning to give the next run full context on what was already done.
+    """
+    try:
+        project_dir = getattr(orchestration_state, "project_dir", None)
+        if not project_dir:
+            return
+        notes_dir = Path(project_dir) / ".openclaw"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        notes_path = notes_dir / "progress_notes.md"
+
+        completed_steps = [
+            r.get("step_title", r.get("step", "")) if isinstance(r, dict) else str(r)
+            for r in (orchestration_state.execution_results or [])
+        ]
+        changed_files = getattr(orchestration_state, "changed_files", []) or []
+        task_title = getattr(task, "title", "") or prompt[:80]
+
+        entry_lines = [
+            f"\n## {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} — {task_title}",
+            "",
+            f"**Steps completed ({len(completed_steps)}):**",
+        ]
+        for step in completed_steps[:20]:
+            entry_lines.append(f"- {step}")
+        if changed_files:
+            entry_lines.append("")
+            entry_lines.append(f"**Files changed ({len(changed_files)}):**")
+            for f in changed_files[:30]:
+                entry_lines.append(f"- {f}")
+        if summary:
+            entry_lines.append("")
+            entry_lines.append("**Summary:**")
+            entry_lines.append(summary[:800])
+        entry_lines.append("")
+
+        with open(notes_path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(entry_lines))
+        logger.info("[PROGRESS] Progress notes written to %s", notes_path)
+    except Exception as e:
+        logger.warning("[PROGRESS] Failed to write progress notes: %s", e)
+
+
 def finalize_successful_task(
     *,
     ctx: OrchestrationRunContext,
@@ -1083,6 +1216,15 @@ def finalize_successful_task(
                 "reason": "baseline_publish_validation_failed",
             }
 
+    _run_evaluator(
+        openclaw_service=openclaw_service,
+        orchestration_state=orchestration_state,
+        prompt=prompt,
+        summary=summary_result.get("output", ""),
+        emit_live=emit_live,
+        logger=logger,
+    )
+
     task.status = TaskStatus.DONE
     task.completed_at = datetime.utcnow()
     task.error_message = None
@@ -1092,6 +1234,14 @@ def finalize_successful_task(
     if session_task_link:
         session_task_link.status = TaskStatus.DONE
         session_task_link.completed_at = task.completed_at
+
+    _write_progress_notes(
+        orchestration_state=orchestration_state,
+        task=task,
+        prompt=prompt,
+        summary=summary_result.get("output", ""),
+        logger=logger,
+    )
 
     set_session_alert(session, None, None)
 
