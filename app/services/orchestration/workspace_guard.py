@@ -1,7 +1,8 @@
-"""Workspace isolation and path normalization helpers."""
+"""Workspace isolation, path normalization, and write-scope audit helpers."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -312,6 +313,74 @@ def normalize_plan(
             )
         normalized_plan.append(normalized_step)
     return normalized_plan
+
+
+_CHECKSUM_IGNORED = frozenset(
+    {"node_modules", ".git", "__pycache__", "dist", "build", ".openclaw"}
+)
+
+
+def compute_workspace_checksum(project_dir: Path) -> Dict[str, str]:
+    """SHA-256 checksum of every tracked file; used for pre-task audit."""
+    checksums: Dict[str, str] = {}
+    if not project_dir.exists():
+        return checksums
+    for path in sorted(project_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(project_dir)
+        if any(part in _CHECKSUM_IGNORED for part in relative.parts):
+            continue
+        try:
+            checksums[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return checksums
+
+
+def detect_scope_violations(
+    project_dir: Path,
+    expected_files: List[str],
+    pre_checksum: Dict[str, str],
+) -> List[str]:
+    """Return paths written or modified outside expected_files since pre_checksum.
+
+    Only flags files not declared in the step's expected_files list and either
+    newly created or byte-level changed.  Config/lock files are excluded from
+    the violation list to avoid noise from package-manager side-effects.
+    """
+    _NOISE_SUFFIXES = {".lock", ".log"}
+    _NOISE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
+    allowed = {str(f).lstrip("./") for f in (expected_files or [])}
+    post_checksum = compute_workspace_checksum(project_dir)
+    violations: List[str] = []
+    for rel_path, checksum in post_checksum.items():
+        normalized = rel_path.lstrip("./")
+        if normalized in allowed:
+            continue
+        if Path(rel_path).name in _NOISE_NAMES:
+            continue
+        if Path(rel_path).suffix in _NOISE_SUFFIXES:
+            continue
+        if rel_path not in pre_checksum or pre_checksum[rel_path] != checksum:
+            violations.append(rel_path)
+    return sorted(violations)
+
+
+def summarize_step_changes(
+    pre_checksum: Dict[str, str],
+    project_dir: Path,
+) -> List[str]:
+    """CoVe helper: list files created, modified, or deleted since pre_checksum."""
+    post_checksum = compute_workspace_checksum(project_dir)
+    changed: List[str] = []
+    for rel_path, checksum in post_checksum.items():
+        if rel_path not in pre_checksum or pre_checksum[rel_path] != checksum:
+            changed.append(rel_path)
+    for rel_path in pre_checksum:
+        if rel_path not in post_checksum:
+            changed.append(f"{rel_path} (deleted)")
+    return sorted(changed)
 
 
 def normalize_plan_with_live_logging(

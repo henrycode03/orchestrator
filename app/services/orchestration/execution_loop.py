@@ -32,6 +32,11 @@ from app.services.orchestration.step_support import (
 )
 from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.workspace_guard import (
+    compute_workspace_checksum,
+    detect_scope_violations,
+    summarize_step_changes,
+)
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import (
     OrchestrationStatus,
@@ -207,6 +212,8 @@ def execute_step_loop(
             verification_command = step.get("verification")
             rollback_command = step.get("rollback")
             expected_files = step.get("expected_files", [])
+        scope_violations: list = []
+        pre_step_checksum: dict = {}
 
         logger.info(
             "[ORCHESTRATION] Executing step %s/%s: %s...",
@@ -231,6 +238,9 @@ def execute_step_loop(
             step_commands,
             verification_command,
         )
+
+        # Pre-task audit: snapshot workspace before the step runs
+        pre_step_checksum = compute_workspace_checksum(orchestration_state.project_dir)
 
         execution_prompt = assemble_execution_prompt(ctx, step)
 
@@ -282,6 +292,25 @@ def execute_step_loop(
         tool_failures = assessment.tool_failures
         correction_hints = assessment.correction_hints
         step_result["error"] = assessment.error_message
+
+        # Audit-on-write: flag files created/modified outside the declared scope
+        scope_violations = detect_scope_violations(
+            orchestration_state.project_dir, expected_files, pre_step_checksum
+        )
+        if scope_violations:
+            emit_live(
+                "WARN",
+                (
+                    f"[WORKSPACE_GUARD] Step {step_index + 1} wrote "
+                    f"{len(scope_violations)} file(s) outside declared scope: "
+                    f"{', '.join(scope_violations[:6])}"
+                ),
+                metadata={
+                    "phase": "executing",
+                    "step_index": step_index + 1,
+                    "scope_violations": scope_violations[:20],
+                },
+            )
 
         if missing_files:
             emit_live(
@@ -357,6 +386,23 @@ def execute_step_loop(
         )
 
         if step_status == "success":
+            # Chain-of-Verification: confirm and surface the actual workspace changes
+            cove_changes = summarize_step_changes(
+                pre_step_checksum, orchestration_state.project_dir
+            )
+            if cove_changes:
+                emit_live(
+                    "INFO",
+                    (
+                        f"[WORKSPACE_GUARD] CoVe: step {step_index + 1} verified "
+                        f"{len(cove_changes)} change(s): {', '.join(cove_changes[:8])}"
+                    ),
+                    metadata={
+                        "phase": "executing",
+                        "step_index": step_index + 1,
+                        "cove_changes": cove_changes[:20],
+                    },
+                )
             orchestration_state.record_success(step_record)
             save_orchestration_checkpoint(
                 db, session_id, task_id, prompt, orchestration_state
@@ -389,6 +435,13 @@ def execute_step_loop(
                 )
             else:
                 extra_context = ""
+
+            if scope_violations:
+                extra_context += (
+                    "\\n\\nNote: these files were written outside the step's declared "
+                    "expected_files scope (unexpected side effects to be aware of): "
+                    + ", ".join(scope_violations[:10])
+                )
 
         orchestration_state.record_failure(step_record)
         save_orchestration_checkpoint(
@@ -543,6 +596,40 @@ def execute_step_loop(
                 debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
             )
         )
+
+        if debug_result.get("error") == "Context window exceeded":
+            logger.warning(
+                "[ORCHESTRATION] Debug prompt exceeded context window at step %s; "
+                "retrying with compact prompt",
+                step_index + 1,
+            )
+            emit_live(
+                "WARN",
+                f"[ORCHESTRATION] Debug prompt exceeded context window; retrying compact for step {step_index + 1}",
+                metadata={
+                    "phase": "debugging",
+                    "step_index": step_index + 1,
+                    "compact_retry": True,
+                },
+            )
+            compact_debug_prompt = PromptTemplates.build_debugging_prompt(
+                step_description=step_description,
+                error_message=step_record.error_message,
+                command_output=step_output,
+                verification_output=step_record.verification_output,
+                attempt_number=current_attempt,
+                max_attempts=max_attempts,
+                prior_debug_attempts=orchestration_state.debug_attempts,
+                project_name=orchestration_state.project_name,
+                workspace_root=str(orchestration_state.workspace_root),
+                project_dir=str(orchestration_state.project_dir),
+                compact=True,
+            )
+            debug_result = asyncio.run(
+                openclaw_service.execute_task(
+                    compact_debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
+                )
+            )
 
         try:
             success, debug_data, strategy_info = coerce_debug_step_result(

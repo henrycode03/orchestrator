@@ -147,6 +147,8 @@ async def stream_session_logs(
 
     logger.info("Sent %s initial logs, starting main loop...", len(recent_logs))
 
+    _TERMINAL_STATUSES = frozenset({"stopped", "paused", "completed", "failed"})
+
     async def heartbeat_sender() -> None:
         try:
             while True:
@@ -158,8 +160,8 @@ async def stream_session_logs(
                 "Heartbeat sender error for session %s: %s", session_id, str(exc)
             )
 
+    heartbeat_task = asyncio.create_task(heartbeat_sender())
     try:
-        heartbeat_task = asyncio.create_task(heartbeat_sender())
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
@@ -167,6 +169,10 @@ async def stream_session_logs(
                 data = None
 
             poll_db = create_db_session()
+            session_is_terminal = False
+            terminal_status = None
+            alert_level = None
+            alert_message = None
             try:
                 current_session = (
                     poll_db.query(SessionModel)
@@ -211,8 +217,38 @@ async def stream_session_logs(
                                 "session_instance_id": log.session_instance_id,
                             }
                         )
+
+                    # Detect terminal state after draining all pending logs
+                    if (
+                        not current_session.is_active
+                        and current_session.status in _TERMINAL_STATUSES
+                    ):
+                        session_is_terminal = True
+                        terminal_status = current_session.status
+                        alert_level = getattr(current_session, "last_alert_level", None)
+                        alert_message = getattr(
+                            current_session, "last_alert_message", None
+                        )
             finally:
                 poll_db.close()
+
+            if session_is_terminal:
+                await websocket.send_json(
+                    {
+                        "type": "session_ended",
+                        "session_id": session_id,
+                        "status": terminal_status,
+                        "alert_level": alert_level,
+                        "alert_message": alert_message,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
+                logger.info(
+                    "Session %s reached terminal status %r; closing log stream",
+                    session_id,
+                    terminal_status,
+                )
+                break
 
             if data is None:
                 continue
@@ -231,10 +267,9 @@ async def stream_session_logs(
                 logger.debug("Received message from WebSocket: %s...", data[:100])
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected gracefully for session %s", session_id)
-        heartbeat_task.cancel()
-        _remove_active_websocket(session_id, websocket)
     except Exception as exc:
         logger.error("WebSocket error for session %s: %s", session_id, str(exc))
+    finally:
         heartbeat_task.cancel()
         _remove_active_websocket(session_id, websocket)
 
@@ -262,6 +297,8 @@ async def stream_session_status(
             "status_interval": 2,
         }
     )
+
+    _TERMINAL_STATUSES_STATUS = frozenset({"stopped", "paused", "completed", "failed"})
 
     async def status_sender() -> None:
         last_snapshot: Optional[Dict[str, Any]] = None
@@ -304,6 +341,8 @@ async def stream_session_status(
                     "updated_at": (
                         current.updated_at.isoformat() if current.updated_at else None
                     ),
+                    "alert_level": getattr(current, "last_alert_level", None),
+                    "alert_message": getattr(current, "last_alert_message", None),
                 }
 
                 if snapshot != last_snapshot:
@@ -316,13 +355,47 @@ async def stream_session_status(
                         }
                     )
                     last_snapshot = snapshot
+
+                # Signal terminal state so the frontend stops waiting
+                if (
+                    not current.is_active
+                    and current.status in _TERMINAL_STATUSES_STATUS
+                ):
+                    await websocket.send_json(
+                        {
+                            "type": "session_terminal",
+                            "session_id": session_id,
+                            "status": current.status,
+                            "alert_level": getattr(current, "last_alert_level", None),
+                            "alert_message": getattr(
+                                current, "last_alert_message", None
+                            ),
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+                    logger.info(
+                        "Session %s is terminal (%s); closing status stream",
+                        session_id,
+                        current.status,
+                    )
+                    break
+            except Exception as exc:
+                logger.error(
+                    "Status sender error for session %s: %s", session_id, str(exc)
+                )
+                break
             finally:
                 poll_db.close()
 
     async def heartbeat_sender() -> None:
-        while True:
-            await asyncio.sleep(30)
-            await websocket.send_text("ping")
+        try:
+            while True:
+                await asyncio.sleep(30)
+                await websocket.send_text("ping")
+        except Exception as exc:
+            logger.error(
+                "Status heartbeat error for session %s: %s", session_id, str(exc)
+            )
 
     status_task = asyncio.create_task(status_sender())
     heartbeat_task = asyncio.create_task(heartbeat_sender())
@@ -332,6 +405,9 @@ async def stream_session_status(
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
             except asyncio.TimeoutError:
+                # Exit the receive loop once the status_sender has finished
+                if status_task.done():
+                    break
                 continue
 
             if data == "ping":

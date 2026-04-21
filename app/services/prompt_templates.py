@@ -934,6 +934,7 @@ Examples:
         project_name: str = "",
         workspace_root: Optional[str] = None,
         project_dir: Optional[str] = None,
+        compact: bool = False,
     ) -> str:
         """
         Build a prompt for debugging phase.
@@ -953,21 +954,40 @@ Examples:
             Debugging prompt string ready for LLM call.
         """
         ws_root = workspace_root or str(get_effective_workspace_root())
+
+        # compact=True uses tighter field limits for context-overflow retries
+        if compact:
+            _attempts_window = 1
+            _attempt_error_chars = 80
+            _output_chars = 200
+            _verification_chars = 60
+            _error_chars = 120
+            _description_chars = 100
+        else:
+            _attempts_window = 2
+            _attempt_error_chars = 180
+            _output_chars = 700
+            _verification_chars = 120
+            _error_chars = 260
+            _description_chars = 240
+
         prior_attempts_text = (
             "\n".join(
-                f"Attempt {a['attempt']}: {str(a['error'])[:180]}"
-                for a in (prior_debug_attempts or [])[-2:]
+                f"Attempt {a['attempt']}: {str(a['error'])[:_attempt_error_chars]}"
+                for a in (prior_debug_attempts or [])[-_attempts_window:]
             )
             or "No prior attempts."
         )
 
         # Pre-process values that need slicing or conditional logic
-        truncated_output = command_output[:700] if command_output else "No output"
-        truncated_verification = (
-            verification_output[:120] if verification_output else "None"
+        truncated_output = (
+            command_output[:_output_chars] if command_output else "No output"
         )
-        truncated_error = (error_message or "")[:260]
-        truncated_description = (step_description or "")[:240]
+        truncated_verification = (
+            verification_output[:_verification_chars] if verification_output else "None"
+        )
+        truncated_error = (error_message or "")[:_error_chars]
+        truncated_description = (step_description or "")[:_description_chars]
 
         context = {
             "step_description": truncated_description,

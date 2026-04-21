@@ -58,6 +58,49 @@ def collect_workspace_inventory_paths(
     return existing_files
 
 
+def compress_orchestration_context(
+    orchestration_state: Any,
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """Condense execution state into a compact snapshot for dense-context replanning.
+
+    Produces a short text block summarising step progress, recent failures, and
+    debug history so the planner can resume without the full log context.
+    """
+    plan = getattr(orchestration_state, "plan", []) or []
+    step_idx = getattr(orchestration_state, "current_step_index", 0) or 0
+    completed = getattr(orchestration_state, "completed_steps", []) or []
+    failed = getattr(orchestration_state, "failed_steps", []) or []
+    debug_attempts = getattr(orchestration_state, "debug_attempts", []) or []
+    changed_files = getattr(orchestration_state, "changed_files", []) or []
+
+    lines: List[str] = [f"Step progress: {step_idx}/{len(plan)}"]
+    if completed:
+        nums = ", ".join(str(getattr(r, "step_number", "?")) for r in completed[:6])
+        lines.append(f"Completed steps: {nums}")
+    if failed:
+        nums = ", ".join(str(getattr(r, "step_number", "?")) for r in failed[:4])
+        lines.append(f"Failed steps: {nums}")
+    if debug_attempts:
+        last = debug_attempts[-1]
+        step_label = last.get("step_index", "?")
+        if isinstance(step_label, int):
+            step_label = step_label + 1
+        lines.append(
+            f"Debug attempts: {len(debug_attempts)} total; last was "
+            f"{last.get('fix_type', '?')} on step {step_label} — "
+            f"{str(last.get('error', ''))[:120]}"
+        )
+    if changed_files:
+        lines.append(f"Changed files: {', '.join(str(f) for f in changed_files[:10])}")
+
+    summary = "\n".join(lines)
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 3].rstrip() + "..."
+    return summary
+
+
 def build_workspace_inventory_summary(
     project_dir: Path,
     *,

@@ -344,3 +344,88 @@ class ToolTrackingService:
             logger.info(f"Cleaned up {cleaned} old executions")
 
         return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Tool Curation
+# ---------------------------------------------------------------------------
+
+TOOL_PHASE_CATEGORIES: Dict[str, List[str]] = {
+    "planning": ["Read", "Glob", "Grep", "WebSearch", "WebFetch"],
+    "executing": ["Bash", "Edit", "Write", "Read", "Glob", "Grep"],
+    "debugging": ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
+    "completing": ["Read", "Glob", "Grep", "Bash"],
+}
+
+_ALL_KNOWN_TOOLS: List[str] = sorted(
+    {tool for tools in TOOL_PHASE_CATEGORIES.values() for tool in tools}
+)
+
+
+class ToolCurationService:
+    """Phase-aware tool allowlist with error-rate-based pruning.
+
+    Categorises tools by orchestration phase (planning / executing / debugging /
+    completing) and prunes any tool whose recent session error rate exceeds
+    ERROR_RATE_THRESHOLD, provided the sample size is sufficient.
+
+    Usage::
+        allowed = ToolCurationService.get_allowed_tools(db, session_id, "executing")
+    """
+
+    ERROR_RATE_THRESHOLD: float = 0.5
+    MIN_SAMPLE_SIZE: int = 5
+
+    @staticmethod
+    def get_phase_tools(phase: str) -> List[str]:
+        """Return the canonical allowlist for the given orchestration phase."""
+        return list(TOOL_PHASE_CATEGORIES.get(phase, _ALL_KNOWN_TOOLS))
+
+    @classmethod
+    def compute_tool_error_rate(
+        cls,
+        db: Session,
+        session_id: int,
+        tool_name: str,
+    ) -> Optional[float]:
+        """Return [0.0, 1.0] error rate for tool_name in recent session logs.
+
+        Returns None when there are fewer than MIN_SAMPLE_SIZE log entries,
+        which means the tool should not be pruned on insufficient evidence.
+        """
+        try:
+            entries = (
+                db.query(LogEntry)
+                .filter(
+                    LogEntry.session_id == session_id,
+                    LogEntry.message.contains(f"Tool '{tool_name}'"),
+                )
+                .order_by(LogEntry.id.desc())
+                .limit(50)
+                .all()
+            )
+            if len(entries) < cls.MIN_SAMPLE_SIZE:
+                return None
+            errors = sum(1 for e in entries if e.level in {"ERROR", "WARN"})
+            return errors / len(entries)
+        except Exception:
+            return None
+
+    @classmethod
+    def _should_prune(cls, db: Session, session_id: int, tool_name: str) -> bool:
+        error_rate = cls.compute_tool_error_rate(db, session_id, tool_name)
+        return error_rate is not None and error_rate >= cls.ERROR_RATE_THRESHOLD
+
+    @classmethod
+    def get_allowed_tools(
+        cls,
+        db: Session,
+        session_id: int,
+        phase: str,
+    ) -> List[str]:
+        """Return phase tools pruned by error rate threshold."""
+        return [
+            tool
+            for tool in cls.get_phase_tools(phase)
+            if not cls._should_prune(db, session_id, tool)
+        ]

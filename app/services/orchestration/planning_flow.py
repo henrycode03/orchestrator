@@ -8,7 +8,10 @@ import logging
 from typing import Any, Callable, Dict
 
 from app.models import TaskStatus
-from app.services.orchestration.context_assembly import assemble_planning_prompt
+from app.services.orchestration.context_assembly import (
+    assemble_planning_prompt,
+    compress_orchestration_context,
+)
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     record_validation_verdict,
@@ -76,6 +79,19 @@ def execute_planning_phase(
     MINIMAL_PROMPT_TOKEN_THRESHOLD = 8000
     if planning_prompt_tokens > MINIMAL_PROMPT_TOKEN_THRESHOLD:
         start_with_minimal_planning_prompt = True
+        # Context compression: if mid-execution state exists, replace the full
+        # project_context with a compact snapshot so the planner can recover
+        # without blowing the context window again.
+        if getattr(ctx.orchestration_state, "debug_attempts", None) or getattr(
+            ctx.orchestration_state, "completed_steps", None
+        ):
+            _compressed = compress_orchestration_context(ctx.orchestration_state)
+            if _compressed:
+                ctx.orchestration_state.project_context = _compressed
+                ctx.logger.info(
+                    "[ORCHESTRATION] Context compressed for dense replanning (%d chars)",
+                    len(_compressed),
+                )
     used_minimal_planning_prompt = start_with_minimal_planning_prompt
 
     if start_with_minimal_planning_prompt:
