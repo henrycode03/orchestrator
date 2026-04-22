@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.orchestration.step_support import coerce_debug_step_result
 from app.services.orchestration.parsing import extract_structured_text
 
@@ -55,3 +56,31 @@ def test_debug_parser_still_accepts_json_payloads():
     assert debug_data["fix_type"] == "command_fix"
     assert debug_data["fix"] == "rg --files . | head -50"
     assert strategy in {"", "Found JSON in text", "Extracted from mixed content"}
+
+
+def test_plan_revision_prompt_serializes_original_plan():
+    prompt = PromptTemplates.build_plan_revision_prompt(
+        original_plan=[
+            {
+                "step_number": 1,
+                "description": "Add test coverage for formatter",
+                "commands": ["npm test -- format"],
+            }
+        ],
+        failed_steps=[
+            StepResult(
+                step_number=2,
+                status="failed",
+                error_message="Expected src/utils/format.test.ts to exist",
+            )
+        ],
+        debug_analysis="The execution reported success but did not create the expected file.",
+        completed_steps=[
+            {"step_number": 1, "description": "Inspect formatter helpers"}
+        ],
+        workspace_root="/tmp/workspace",
+        project_dir="/tmp/workspace/demo-project",
+    )
+
+    assert "Add test coverage for formatter" in prompt
+    assert "Expected src/utils/format.test.ts to exist" in prompt

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -9,6 +10,9 @@ from app.services.prompt_templates import PromptTemplates, StepResult
 
 
 _IGNORED_PARTS = {"node_modules", ".openclaw", "__pycache__", ".git", "dist", "build"}
+_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_.-]+)(?![\w./-])"
+)
 
 
 def _trim_text(text: Any, max_chars: int) -> str:
@@ -56,6 +60,82 @@ def collect_workspace_inventory_paths(
         if len(existing_files) >= max_files:
             break
     return existing_files
+
+
+def identify_stale_path_references(
+    text: str,
+    project_dir: Path,
+    *,
+    max_files: int = 300,
+    max_items: int = 20,
+) -> List[str]:
+    inventory = {
+        path
+        for path in collect_workspace_inventory_paths(project_dir, max_files=max_files)
+        if path
+    }
+    stale_paths: List[str] = []
+    seen: set[str] = set()
+
+    for match in _PATH_TOKEN_RE.finditer(str(text or "")):
+        raw_token = match.group(1).strip().strip("`'\".,:;()[]{}")
+        if not raw_token:
+            continue
+        normalized = raw_token.replace("\\", "/").lstrip("./")
+        if not normalized or normalized in seen:
+            continue
+        if normalized.startswith("/") or normalized.startswith(".."):
+            continue
+        if any(part in _IGNORED_PARTS for part in Path(normalized).parts):
+            continue
+        if normalized in inventory:
+            continue
+        seen.add(normalized)
+        stale_paths.append(normalized)
+        if len(stale_paths) >= max_items:
+            break
+
+    return stale_paths
+
+
+def sanitize_progress_notes_for_workspace(
+    notes_text: str,
+    project_dir: Path,
+    *,
+    max_files: int = 300,
+    max_chars: int = 8000,
+) -> str:
+    stale_paths = identify_stale_path_references(
+        notes_text,
+        project_dir,
+        max_files=max_files,
+    )
+    stale_set = set(stale_paths)
+    kept_lines: List[str] = []
+    removed_lines = 0
+
+    for line in str(notes_text or "").splitlines():
+        if stale_set and any(path in line for path in stale_set):
+            removed_lines += 1
+            continue
+        kept_lines.append(line)
+
+    sections: List[str] = []
+    sanitized_notes = "\n".join(kept_lines).strip()
+    if sanitized_notes:
+        sections.append(sanitized_notes)
+    if stale_paths:
+        sections.append(
+            "Ignore prior-note file references that are not present in the current workspace:\n"
+            + "\n".join(f"- {path}" for path in stale_paths[:12])
+        )
+    if removed_lines:
+        sections.append(
+            f"Filtered {removed_lines} stale note line(s) that referenced missing workspace paths."
+        )
+
+    rendered = "\n\n".join(section for section in sections if section).strip()
+    return _trim_text(rendered, max_chars=max_chars)
 
 
 def compress_orchestration_context(

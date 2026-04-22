@@ -1,7 +1,7 @@
 """Pydantic schemas for API validation"""
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Optional
+from typing import Optional, Any, List
 from datetime import datetime
 from enum import Enum
 
@@ -124,6 +124,70 @@ class PlanResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PlanningMessageResponse(BaseModel):
+    id: int
+    role: str
+    prompt_id: Optional[str] = None
+    content: str
+    metadata_json: Optional[dict[str, Any]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PlanningArtifactResponse(BaseModel):
+    id: int
+    artifact_type: str
+    filename: str
+    content: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PlanningSessionSummaryResponse(BaseModel):
+    id: int
+    project_id: int
+    title: str
+    prompt: str
+    status: str
+    source_brain: str
+    current_prompt_id: Optional[str] = None
+    finalized_plan_id: Optional[int] = None
+    committed_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PlanningSessionResponse(PlanningSessionSummaryResponse):
+    last_error: Optional[str] = None
+    messages: List[PlanningMessageResponse] = []
+    artifacts: List[PlanningArtifactResponse] = []
+    tasks_preview: List[PlannerTaskCandidate] = []
+    committed_task_ids: List[int] = []
+
+
+class PlanningSessionCreateRequest(BaseModel):
+    project_id: int
+    prompt: str = Field(min_length=3)
+    source_brain: str = "local"
+
+
+class PlanningSessionRespondRequest(BaseModel):
+    response: str = Field(min_length=1)
+
+
+class PlanningSessionCommitRequest(BaseModel):
+    selected_tasks: Optional[List[PlannerTaskCandidate]] = None
+    planner_markdown: Optional[str] = None
 
 
 # Session Schemas

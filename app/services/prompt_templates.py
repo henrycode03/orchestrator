@@ -14,6 +14,7 @@ Architecture:
   - Every step has a machine-runnable verification command and rollback command
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path

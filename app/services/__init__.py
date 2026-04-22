@@ -12,6 +12,8 @@ from .project_isolation_service import ProjectIsolationService
 from .log_stream_service import LogStreamService
 from .github_service import GitHubService
 from .tool_tracking_service import ToolTrackingService
+from .plan_commit_service import PlanCommitService
+from .planning_session_service import PlanningSessionService
 from .prompt_templates import PromptTemplates
 from .session_runtime_service import (
     build_task_subfolder_name,
@@ -66,6 +68,8 @@ __all__ = [
     "LogStreamService",
     "GitHubService",
     "ToolTrackingService",
+    "PlanCommitService",
+    "PlanningSessionService",
     "PromptTemplates",
     "build_task_subfolder_name",
     "ensure_task_workspace",

@@ -46,6 +46,10 @@ from app.services.orchestration import (
     should_restore_workspace_on_failure,
     should_force_review_execution_profile as _should_force_review_execution_profile,
 )
+from app.services.orchestration.context_assembly import (
+    collect_workspace_inventory_paths,
+    sanitize_progress_notes_for_workspace,
+)
 from app.services.orchestration.persistence import (
     append_orchestration_event as _append_orchestration_event,
     record_live_log as _record_live_log,
@@ -98,13 +102,30 @@ def _inject_progress_notes_into_context(
         return
     try:
         notes_text = notes_path.read_text(encoding="utf-8", errors="replace")
+        sanitized_notes = sanitize_progress_notes_for_workspace(
+            notes_text,
+            Path(project_dir),
+        )
+        workspace_inventory = collect_workspace_inventory_paths(
+            Path(project_dir),
+            max_files=40,
+        )
         # Keep only the tail so large histories don't flood the context window.
-        if len(notes_text) > _PROGRESS_NOTES_MAX_BYTES:
-            notes_text = "...(truncated)\n" + notes_text[-_PROGRESS_NOTES_MAX_BYTES:]
+        if len(sanitized_notes) > _PROGRESS_NOTES_MAX_BYTES:
+            sanitized_notes = (
+                "...(truncated)\n" + sanitized_notes[-_PROGRESS_NOTES_MAX_BYTES:]
+            )
+        workspace_truth = ["=== CURRENT WORKSPACE TRUTH ==="]
+        if workspace_inventory:
+            workspace_truth.extend(f"- {path}" for path in workspace_inventory[:40])
+        else:
+            workspace_truth.append("- No tracked files detected yet.")
         prefix = (
             "=== PRIOR SESSION PROGRESS NOTES ===\n"
-            + notes_text.strip()
+            + sanitized_notes.strip()
             + "\n=== END PRIOR SESSION PROGRESS NOTES ===\n\n"
+            + "\n".join(workspace_truth)
+            + "\n=== END CURRENT WORKSPACE TRUTH ===\n\n"
         )
         current = orchestration_state.project_context or ""
         orchestration_state.project_context = (prefix + current)[:8000]

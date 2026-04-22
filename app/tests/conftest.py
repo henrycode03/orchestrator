@@ -61,8 +61,11 @@ def api_app(db_session_factory) -> Generator[FastAPI, None, None]:
 
 @pytest.fixture
 def api_client(api_app) -> Generator[TestClient, None, None]:
-    with TestClient(api_app) as client:
+    client = TestClient(api_app)
+    try:
         yield client
+    finally:
+        client.close()
 
 
 @pytest.fixture
@@ -74,11 +77,14 @@ def authenticated_client(api_app) -> Generator[TestClient, None, None]:
         is_active=True,
     )
 
-    async def override_current_user():
+    def override_current_user():
         return fake_user
 
     api_app.dependency_overrides[get_current_user] = override_current_user
     api_app.dependency_overrides[get_current_active_user] = override_current_user
 
-    with TestClient(api_app) as client:
+    client = TestClient(api_app)
+    try:
         yield client
+    finally:
+        client.close()

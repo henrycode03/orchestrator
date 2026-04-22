@@ -254,6 +254,131 @@ def _migration_002_session_name_soft_delete(engine: Engine) -> None:
             )
 
 
+def _migration_003_planning_sessions(engine: Engine) -> None:
+    table_names = _table_names(engine)
+
+    with engine.begin() as connection:
+        if "planning_sessions" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE planning_sessions (
+                        id INTEGER PRIMARY KEY,
+                        project_id INTEGER NOT NULL,
+                        title VARCHAR(255) NOT NULL,
+                        prompt TEXT NOT NULL,
+                        status VARCHAR(50) NOT NULL DEFAULT 'active',
+                        source_brain VARCHAR(50) NOT NULL DEFAULT 'local',
+                        current_prompt_id VARCHAR(64),
+                        finalized_plan_id INTEGER,
+                        committed_at DATETIME,
+                        committed_task_ids TEXT,
+                        last_error TEXT,
+                        completed_at DATETIME,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME,
+                        FOREIGN KEY(project_id) REFERENCES projects (id),
+                        FOREIGN KEY(finalized_plan_id) REFERENCES plans (id)
+                    )
+                    """
+                )
+            )
+
+        if "planning_messages" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE planning_messages (
+                        id INTEGER PRIMARY KEY,
+                        planning_session_id INTEGER NOT NULL,
+                        role VARCHAR(20) NOT NULL,
+                        prompt_id VARCHAR(64),
+                        content TEXT NOT NULL,
+                        metadata_json JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(planning_session_id) REFERENCES planning_sessions (id)
+                    )
+                    """
+                )
+            )
+
+        if "planning_artifacts" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE planning_artifacts (
+                        id INTEGER PRIMARY KEY,
+                        planning_session_id INTEGER NOT NULL,
+                        artifact_type VARCHAR(50) NOT NULL,
+                        filename VARCHAR(255) NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(planning_session_id) REFERENCES planning_sessions (id)
+                    )
+                    """
+                )
+            )
+
+        if not _has_index(
+            engine, "planning_sessions", "ix_planning_sessions_project_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_sessions_project_id ON planning_sessions (project_id)"
+                )
+            )
+        if not _has_index(engine, "planning_sessions", "ix_planning_sessions_status"):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_sessions_status ON planning_sessions (status)"
+                )
+            )
+        if not _has_index(
+            engine, "planning_sessions", "ix_planning_sessions_finalized_plan_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_sessions_finalized_plan_id ON planning_sessions (finalized_plan_id)"
+                )
+            )
+        if not _has_index(
+            engine, "planning_sessions", "ux_planning_sessions_one_active"
+        ):
+            connection.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX ux_planning_sessions_one_active
+                    ON planning_sessions (project_id)
+                    WHERE status IN ('active', 'waiting_for_input')
+                    """
+                )
+            )
+        if not _has_index(
+            engine, "planning_messages", "ix_planning_messages_planning_session_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_messages_planning_session_id ON planning_messages (planning_session_id)"
+                )
+            )
+        if not _has_index(
+            engine, "planning_messages", "ix_planning_messages_prompt_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_messages_prompt_id ON planning_messages (prompt_id)"
+                )
+            )
+        if not _has_index(
+            engine, "planning_artifacts", "ix_planning_artifacts_planning_session_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_artifacts_planning_session_id ON planning_artifacts (planning_session_id)"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -264,6 +389,16 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="002_session_soft_delete_name_strategy",
         description="Rename deleted sessions and enforce active-name uniqueness",
         upgrade=_migration_002_session_name_soft_delete,
+    ),
+    Migration(
+        version="003_planning_sessions",
+        description="Create planning session, message, and artifact tables",
+        upgrade=_migration_003_planning_sessions,
+    ),
+    Migration(
+        version="004_planning_active_session_index",
+        description="Enforce one active planning session per project",
+        upgrade=lambda engine: _migration_003_planning_sessions(engine),
     ),
 )
 

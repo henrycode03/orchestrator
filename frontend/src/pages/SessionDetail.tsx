@@ -63,6 +63,7 @@ const NOISY_LOG_PATTERNS = [
   /^"truncated":\s*(true|false),?$/,
   /^"missing":\s*(true|false),?$/,
   /^"path":\s*".*",?$/,
+  /^"name":\s*"[^"]+",?$/,
   /^"name":\s*"(healthcheck|memory_get|memory_search|session_status|update_plan|web_search|web_fetch|image|pdf|browser|BOOTSTRAP\.md|MEMORY\.md)".*$/,
   /^"entries":\s*\[$/,
   /^"skills":\s*{$/,

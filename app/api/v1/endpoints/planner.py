@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models import Plan, Project, Task, TaskStatus
 from app.schemas import PlanResponse, PlannerTaskCandidate, TaskResponse
 from app.services.name_formatter import humanize_display_name
+from app.services.plan_commit_service import PlanCommitService
 from app.services.planner_service import PlannerService
 
 router = APIRouter()
@@ -58,6 +59,7 @@ class PlanUpdateRequest(BaseModel):
 
 @router.post("/planner/generate", response_model=PlannerGenerateResponse)
 def generate_plan(payload: PlannerGenerateRequest, db: Session = Depends(get_db)):
+    """Legacy manual planner flow retained for backward compatibility."""
     project = db.query(Project).filter(Project.id == payload.project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -201,44 +203,15 @@ def create_batch_tasks(
         )
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
-    elif payload.markdown:
-        plan = Plan(
-            project_id=project_id,
-            title=(payload.plan_title or payload.requirement or "Imported plan")[:255],
-            source_brain=payload.source_brain,
-            requirement=payload.requirement
-            or payload.plan_title
-            or "Imported planner markdown",
-            markdown=payload.markdown,
-            status="draft",
-        )
-        db.add(plan)
-        db.flush()
-
-    created_tasks = []
-    for index, item in enumerate(payload.tasks, start=1):
-        task = Task(
-            project_id=project_id,
-            plan_id=plan.id if plan else None,
-            title=humanize_display_name(item.title),
-            description=item.description,
-            execution_profile=item.execution_profile,
-            priority=item.priority,
-            plan_position=item.plan_position or index,
-            estimated_effort=item.estimated_effort,
-            status=TaskStatus.PENDING,
-        )
-        db.add(task)
-        created_tasks.append(task)
-
-    if plan:
-        plan.status = "committed"
-
-    db.commit()
-    for task in created_tasks:
-        db.refresh(task)
-    if plan:
-        db.refresh(plan)
+    plan, created_tasks = PlanCommitService(db).create_plan_tasks(
+        project,
+        payload.tasks,
+        plan=plan,
+        markdown=payload.markdown,
+        plan_title=payload.plan_title,
+        requirement=payload.requirement,
+        source_brain=payload.source_brain,
+    )
 
     return BatchTaskCreateResponse(
         plan=PlanResponse.model_validate(plan) if plan else None,

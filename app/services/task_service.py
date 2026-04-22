@@ -191,7 +191,13 @@ class TaskService:
             return []
         return parsed if isinstance(parsed, list) else []
 
-    def get_task_expected_files(self, task: Task) -> list[str]:
+    def get_task_expected_files(
+        self,
+        task: Task,
+        *,
+        existing_root: Optional[Path] = None,
+        prefer_existing_for_completed: bool = False,
+    ) -> list[str]:
         expected_files: list[str] = []
         seen = set()
         for step in self._parse_task_steps(task):
@@ -209,6 +215,19 @@ class TaskService:
                     continue
                 seen.add(normalized)
                 expected_files.append(normalized)
+        if (
+            existing_root is not None
+            and prefer_existing_for_completed
+            and getattr(task, "status", None) == TaskStatus.DONE
+        ):
+            root = existing_root.resolve()
+            existing_expected_files = [
+                relative_path
+                for relative_path in expected_files
+                if (root / relative_path).exists()
+            ]
+            if existing_expected_files:
+                return existing_expected_files
         return expected_files
 
     def _reserved_project_names(self, project: Project) -> set[str]:
@@ -803,7 +822,11 @@ class TaskService:
         self, project: Project, task: Task
     ) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)
-        expected_files = self.get_task_expected_files(task)
+        expected_files = self.get_task_expected_files(
+            task,
+            existing_root=baseline_dir,
+            prefer_existing_for_completed=True,
+        )
         missing_expected_files = [
             relative_path
             for relative_path in expected_files
@@ -973,7 +996,11 @@ class TaskService:
         missing_expected_files = []
         tasks_with_expected_files = []
         for task in candidate_tasks:
-            expected_files = self.get_task_expected_files(task)
+            expected_files = self.get_task_expected_files(
+                task,
+                existing_root=baseline_dir,
+                prefer_existing_for_completed=True,
+            )
             if not expected_files:
                 continue
             tasks_with_expected_files.append(task.id)

@@ -6,6 +6,9 @@ import type {
   ExecutionProfile,
   Plan,
   PlannerTaskCandidate,
+  PlanningCommitPreview,
+  PlanningSession,
+  PlanningSessionSummary,
   LogEntry, 
   SessionStatistics, 
   AuthTokens, 
@@ -277,6 +280,30 @@ export const plannerAPI = {
       status?: string;
     }
   ) => apiClient.put<Plan>(`/projects/${projectId}/plans/${planId}`, data),
+};
+
+export const planningAPI = {
+  list: (projectId?: number) =>
+    apiClient.get<PlanningSessionSummary[]>('/planning/sessions', {
+      params: projectId ? { project_id: projectId } : undefined,
+    }),
+
+  start: (data: { project_id: number; prompt: string; source_brain?: string }) =>
+    apiClient.post<PlanningSession>('/planning/sessions', data),
+
+  get: (sessionId: number) =>
+    apiClient.get<PlanningSession>(`/planning/sessions/${sessionId}`),
+
+  respond: (sessionId: number, response: string) =>
+    apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/respond`, { response }),
+
+  cancel: (sessionId: number) =>
+    apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/cancel`),
+
+  commit: (
+    sessionId: number,
+    data?: { selected_tasks?: PlannerTaskCandidate[]; planner_markdown?: string }
+  ) => apiClient.post<PlanningCommitPreview>(`/planning/sessions/${sessionId}/commit`, data || {}),
 };
 
 // Tasks API

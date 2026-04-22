@@ -35,7 +35,7 @@ from app.services.orchestration.policy import (
 from app.services.orchestration.runtime import write_project_state_snapshot
 from app.services.orchestration.step_support import coerce_execution_step_result
 from app.services.orchestration.telemetry import emit_phase_event
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
@@ -222,11 +222,21 @@ def _detect_completion_verification_command(
             and isinstance(scripts, dict)
             and str(scripts.get("test") or "").strip()
         ):
+            test_script = str(scripts.get("test") or "").strip()
             if (project_dir / "pnpm-lock.yaml").exists():
-                return "pnpm test", "package.json test script via pnpm"
+                return (
+                    _augment_completion_verification_command("pnpm test", test_script),
+                    "package.json test script via pnpm",
+                )
             if (project_dir / "yarn.lock").exists():
-                return "yarn test", "package.json test script via yarn"
-            return "npm test", "package.json test script via npm"
+                return (
+                    _augment_completion_verification_command("yarn test", test_script),
+                    "package.json test script via yarn",
+                )
+            return (
+                _augment_completion_verification_command("npm test", test_script),
+                "package.json test script via npm",
+            )
 
     if any(
         candidate.exists()
@@ -238,6 +248,27 @@ def _detect_completion_verification_command(
             return "pytest", "python test suite detected"
 
     return None, None
+
+
+def _augment_completion_verification_command(command: str, test_script: str) -> str:
+    normalized_command = str(command or "").strip()
+    normalized_script = str(test_script or "").strip().lower()
+
+    if not normalized_command or not normalized_script:
+        return normalized_command
+
+    if ".openclaw" in normalized_script:
+        return normalized_command
+
+    if "vitest" in normalized_script and "--exclude" not in normalized_script:
+        return f"{normalized_command} -- --exclude=.openclaw/**"
+
+    if re.search(r"(^|\\s)jest(\\s|$)", normalized_script) and (
+        "--testpathignorepatterns" not in normalized_script
+    ):
+        return f"{normalized_command} -- --testPathIgnorePatterns=.openclaw/"
+
+    return normalized_command
 
 
 def _execute_completion_verification(
@@ -271,6 +302,72 @@ def _execute_completion_verification(
             "returncode": None,
             "output": f"Completion verification timed out after {timeout_seconds}s",
         }
+
+
+def _classify_completion_verification_failure(
+    *,
+    command: str,
+    source: Optional[str],
+    verification_output: str,
+    completion_validation: Any,
+) -> Optional[ValidationVerdict]:
+    normalized_output = str(verification_output or "").strip()
+    lowered = normalized_output.lower()
+    missing_dependency_markers = (
+        "jest: not found",
+        "vitest: not found",
+        "mocha: not found",
+        "tsx: not found",
+        "ts-node: not found",
+        "command not found",
+        "cannot find module",
+    )
+    repairable_test_failure_markers = (
+        "failed to load url",
+        "does the file exist?",
+        "failed suites",
+        "no test suite found",
+        "module not found",
+        "cannot find module",
+    )
+
+    if not any(marker in lowered for marker in missing_dependency_markers):
+        if "timed out" in lowered:
+            return None
+        if not any(marker in lowered for marker in repairable_test_failure_markers):
+            return None
+
+    expected_core_files = (
+        list((completion_validation.details or {}).get("expected_core_files", []) or [])
+        if completion_validation
+        else []
+    )
+    preview = normalized_output[:400]
+    if any(marker in lowered for marker in missing_dependency_markers):
+        reason = (
+            "Completion verification could not run because the test runner or project "
+            f"dependencies are missing or not installed for `{command}`"
+        )
+    else:
+        reason = (
+            "Completion verification found a repairable test/module issue under "
+            f"`{command}`"
+        )
+    if preview:
+        reason += f": {preview}"
+
+    return ValidationVerdict(
+        stage="completion_verification",
+        status="repair_required",
+        profile=(getattr(completion_validation, "profile", None) or "implementation"),
+        reasons=[reason],
+        details={
+            "expected_core_files": expected_core_files[:20],
+            "verification_command": command,
+            "verification_source": source or "auto-detected",
+            "verification_output_preview": preview,
+        },
+    )
 
 
 def _build_completion_repair_prompt(
@@ -1082,6 +1179,86 @@ def finalize_successful_task(
             command=completion_verification_command,
         )
         if not completion_verification.get("success", False):
+            verification_failure_verdict = _classify_completion_verification_failure(
+                command=completion_verification_command,
+                source=completion_verification_source,
+                verification_output=str(completion_verification.get("output") or ""),
+                completion_validation=completion_validation,
+            )
+            if verification_failure_verdict and verification_failure_verdict.repairable:
+                record_validation_verdict(
+                    db,
+                    session_id,
+                    task_id,
+                    orchestration_state,
+                    verification_failure_verdict,
+                )
+                db.commit()
+                repair_result = _attempt_completion_repair(
+                    ctx=ctx,
+                    completion_validation=verification_failure_verdict,
+                    save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
+                )
+                if repair_result.get("status") == "success":
+                    emit_live(
+                        "INFO",
+                        "[ORCHESTRATION] Completion verification repair applied, rerunning verification",
+                        metadata={
+                            "phase": "completion_repair",
+                            "command": completion_verification_command,
+                        },
+                    )
+                    completion_verification = _execute_completion_verification(
+                        project_dir=orchestration_state.project_dir,
+                        command=completion_verification_command,
+                    )
+                else:
+                    completion_error = "Completion repair failed: " + str(
+                        repair_result.get("reason") or "unknown reason"
+                    )
+                    completion_failure_reason = str(
+                        repair_result.get("reason") or "unknown reason"
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = completion_error
+                    task.status = TaskStatus.FAILED
+                    task.completed_at = datetime.utcnow()
+                    task.error_message = completion_error
+                    task.current_step = len(orchestration_state.plan)
+                    task.workspace_status = "blocked"
+                    if session_task_link:
+                        session_task_link.status = TaskStatus.FAILED
+                        session_task_link.completed_at = task.completed_at
+                    if session:
+                        session.status = "paused"
+                        session.is_active = False
+                        set_session_alert(session, "error", completion_error[:2000])
+                    db.commit()
+                    emit_live(
+                        "ERROR",
+                        f"[ORCHESTRATION] Completion repair failed: {completion_failure_reason}",
+                        metadata={
+                            "phase": "completion_repair",
+                            "reason": completion_failure_reason,
+                        },
+                    )
+                    save_orchestration_checkpoint_fn(
+                        db, session_id, task_id, prompt, orchestration_state
+                    )
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type="phase_finished",
+                        details={
+                            "phase": "task_summary",
+                            "status": "repair_failed",
+                            "task_status": str(task.status.value if task else "failed"),
+                        },
+                    )
+                    write_project_state_snapshot_fn(db, project, task, session_id)
+                    return {"status": "failed", "reason": "completion_repair_failed"}
+
             verification_error = (
                 "Completion verification failed: "
                 f"`{completion_verification_command}` "

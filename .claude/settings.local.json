@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest app/tests/test_planning_sessions_api.py app/tests/test_planning_prompt_compaction.py -x -q)",
+      "Bash(python3 -m pytest app/tests/test_planning_sessions_api.py app/tests/test_planning_prompt_compaction.py -x -q)",
+      "Bash(venv/bin/python -m pytest app/tests/test_planning_sessions_api.py app/tests/test_planning_prompt_compaction.py -x -q)",
+      "Bash(venv/bin/python -m pytest app/tests/test_planning_sessions_api.py::test_planning_commit_uses_edited_markdown_for_plan_and_tasks -x -q -s)",
+      "Bash(venv/bin/python -m pytest app/tests/test_planning_sessions_api.py::test_planning_commit_uses_edited_markdown_for_plan_and_tasks -x -v -s)",
+      "Bash(venv/bin/python -m pytest app/tests/test_planning_sessions_api.py app/tests/test_planning_prompt_compaction.py -q)"
+    ]
+  }
+}

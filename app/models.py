@@ -47,6 +47,9 @@ class Project(Base):
     sessions = relationship(
         "Session", back_populates="project", cascade="all, delete-orphan"
     )
+    planning_sessions = relationship(
+        "PlanningSession", back_populates="project", cascade="all, delete-orphan"
+    )
     permission_requests = relationship(
         "PermissionRequest", back_populates="project", cascade="all, delete-orphan"
     )
@@ -169,6 +172,82 @@ class Plan(Base):
 
     project = relationship("Project", back_populates="plans")
     tasks = relationship("Task", back_populates="plan")
+    planning_sessions = relationship("PlanningSession", back_populates="finalized_plan")
+
+
+class PlanningSession(Base):
+    __tablename__ = "planning_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    prompt = Column(Text, nullable=False)
+    status = Column(String(50), nullable=False, default="active", index=True)
+    source_brain = Column(String(50), nullable=False, default="local")
+    current_prompt_id = Column(String(64), nullable=True)
+    finalized_plan_id = Column(
+        Integer, ForeignKey("plans.id"), nullable=True, index=True
+    )
+    committed_at = Column(DateTime(timezone=True), nullable=True)
+    committed_task_ids = Column(Text, nullable=True)
+    last_error = Column(Text, nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        Index(
+            "ux_planning_sessions_one_active",
+            "project_id",
+            unique=True,
+            sqlite_where=text("status IN ('active', 'waiting_for_input')"),
+            postgresql_where=text("status IN ('active', 'waiting_for_input')"),
+        ),
+    )
+
+    project = relationship("Project", back_populates="planning_sessions")
+    finalized_plan = relationship("Plan", back_populates="planning_sessions")
+    messages = relationship(
+        "PlanningMessage",
+        back_populates="planning_session",
+        cascade="all, delete-orphan",
+    )
+    artifacts = relationship(
+        "PlanningArtifact",
+        back_populates="planning_session",
+        cascade="all, delete-orphan",
+    )
+
+
+class PlanningMessage(Base):
+    __tablename__ = "planning_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer, ForeignKey("planning_sessions.id"), nullable=False, index=True
+    )
+    role = Column(String(20), nullable=False)
+    prompt_id = Column(String(64), nullable=True, index=True)
+    content = Column(Text, nullable=False)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    planning_session = relationship("PlanningSession", back_populates="messages")
+
+
+class PlanningArtifact(Base):
+    __tablename__ = "planning_artifacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer, ForeignKey("planning_sessions.id"), nullable=False, index=True
+    )
+    artifact_type = Column(String(50), nullable=False)
+    filename = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    planning_session = relationship("PlanningSession", back_populates="artifacts")
 
 
 class SessionState(Base):

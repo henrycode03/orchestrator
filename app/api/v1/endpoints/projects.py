@@ -12,6 +12,9 @@ from app.models import (
     Task,
     SessionTask,
     Plan,
+    PlanningArtifact,
+    PlanningMessage,
+    PlanningSession,
 )
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
@@ -118,6 +121,26 @@ def purge_soft_deleted_projects(
         db.query(Task).filter(Task.project_id == project_id).delete(
             synchronize_session=False
         )
+
+        db.query(PlanningArtifact).filter(
+            PlanningArtifact.planning_session_id.in_(
+                db.query(PlanningSession.id).filter(
+                    PlanningSession.project_id == project_id
+                )
+            )
+        ).delete(synchronize_session=False)
+
+        db.query(PlanningMessage).filter(
+            PlanningMessage.planning_session_id.in_(
+                db.query(PlanningSession.id).filter(
+                    PlanningSession.project_id == project_id
+                )
+            )
+        ).delete(synchronize_session=False)
+
+        db.query(PlanningSession).filter(
+            PlanningSession.project_id == project_id
+        ).delete(synchronize_session=False)
 
         db.query(Plan).filter(Plan.project_id == project_id).delete(
             synchronize_session=False
@@ -249,6 +272,15 @@ def delete_project(
             "is_active": False,
             "status": "deleted",
         }
+    )
+
+    db.query(PlanningSession).filter(PlanningSession.project_id == project_id).update(
+        {
+            "status": "cancelled",
+            "current_prompt_id": None,
+            "updated_at": datetime.now(timezone.utc),
+        },
+        synchronize_session=False,
     )
 
     if session_ids:

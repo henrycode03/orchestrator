@@ -88,6 +88,58 @@ export interface PlannerTaskCandidate {
   include?: boolean;
 }
 
+export type PlanningSessionStatus =
+  | 'active'
+  | 'waiting_for_input'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface PlanningMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  prompt_id?: string | null;
+  content: string;
+  metadata_json?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface PlanningArtifact {
+  id: number;
+  artifact_type: 'requirements' | 'design' | 'implementation_plan' | 'planner_markdown' | string;
+  filename: string;
+  content: string;
+  created_at: string;
+}
+
+export interface PlanningSessionSummary {
+  id: number;
+  project_id: number;
+  title: string;
+  prompt: string;
+  status: PlanningSessionStatus;
+  source_brain: string;
+  current_prompt_id?: string | null;
+  finalized_plan_id?: number | null;
+  committed_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface PlanningSession extends PlanningSessionSummary {
+  last_error?: string | null;
+  messages: PlanningMessage[];
+  artifacts: PlanningArtifact[];
+  tasks_preview: PlannerTaskCandidate[];
+  committed_task_ids: number[];
+}
+
+export interface PlanningCommitPreview extends PlanningSession {
+  plan: Plan | null;
+  tasks: Task[];
+}
+
 export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed';
 
 export interface LogEntry {

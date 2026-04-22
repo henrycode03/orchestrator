@@ -267,11 +267,11 @@ class OpenClawSessionService:
                 result = await self.execute_task_with_streaming(
                     optimized_prompt, timeout_seconds, log_callback
                 )
-                if result.get("error") == "Context window exceeded":
+                if self._is_context_overflow_result(result):
                     retry_prompt = optimize_prompt(
                         prompt,
-                        max_tokens=1200,
-                        hard_char_limit=2800,
+                        max_tokens=700,
+                        hard_char_limit=1800,
                     )
                     if retry_prompt != optimized_prompt:
                         self._log_entry(
@@ -315,6 +315,24 @@ class OpenClawSessionService:
             self._log_entry("ERROR", error_msg)
 
             raise OpenClawSessionError(error_msg)
+
+    @staticmethod
+    def _is_context_overflow_result(result: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(result, dict):
+            return False
+
+        candidates = [
+            str(result.get("error") or ""),
+            str(result.get("output") or ""),
+        ]
+        lowered = "\n".join(candidates).lower()
+        markers = (
+            "context window exceeded",
+            "context size has been exceeded",
+            "context length exceeded",
+            "prompt is too long for the model",
+        )
+        return any(marker in lowered for marker in markers)
 
     async def _check_and_request_permission(
         self,

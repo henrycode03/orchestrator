@@ -100,6 +100,13 @@ class ExecutorService:
                             "A path like `step-03-...md` is probably a guessed artifact; enumerate the workspace first "
                             "and only read it if it is actually present."
                         )
+                elif Path(raw_path).is_dir():
+                    hints.extend(
+                        ExecutorService._directory_read_recovery_hints(
+                            raw_path=Path(raw_path),
+                            project_dir=project_dir,
+                        )
+                    )
 
             raw_command = str(raw_params.get("command") or "").strip()
             if raw_command.startswith("cd ") and "&&" in raw_command:
@@ -110,9 +117,24 @@ class ExecutorService:
                 )
 
             if "read failed: eisd" in message.lower():
-                hints.append(
-                    "A directory path was passed to the file-read tool. Retry by reading "
-                    "an actual file path inside the task workspace, not the folder itself."
+                if raw_path and Path(raw_path).is_dir():
+                    hints.extend(
+                        ExecutorService._directory_read_recovery_hints(
+                            raw_path=Path(raw_path),
+                            project_dir=project_dir,
+                        )
+                    )
+                else:
+                    hints.append(
+                        "A directory path was passed to the file-read tool. Retry by reading "
+                        "an actual file path inside the task workspace, not the folder itself."
+                    )
+            elif raw_path and Path(raw_path).is_dir():
+                hints.extend(
+                    ExecutorService._directory_read_recovery_hints(
+                        raw_path=Path(raw_path),
+                        project_dir=project_dir,
+                    )
                 )
             elif raw_path and re.search(r"/task-[^/]+/?$", raw_path):
                 hints.append(
@@ -127,6 +149,35 @@ class ExecutorService:
                 seen.add(hint)
                 deduped.append(hint)
         return deduped
+
+    @staticmethod
+    def _directory_read_recovery_hints(raw_path: Path, project_dir: Path) -> List[str]:
+        normalized_raw_path = raw_path.resolve()
+        normalized_project_dir = project_dir.resolve()
+        inventory_command = "`rg --files . | head -200`"
+
+        if normalized_raw_path == normalized_project_dir:
+            return [
+                "The file-read tool was pointed at the project root directory itself. "
+                f"Do not read `{normalized_project_dir}` as a file. First inventory the workspace with {inventory_command}, "
+                "then read one confirmed file using its full absolute path inside the project root.",
+                "For example: run `rg --files . | head -200`, choose a returned file such as "
+                f"`src/index.ts`, then call the file-read tool on `{normalized_project_dir}/src/index.ts`.",
+            ]
+
+        if normalized_project_dir in normalized_raw_path.parents:
+            relative_dir = normalized_raw_path.relative_to(normalized_project_dir)
+            return [
+                "A directory inside the task workspace was passed to the file-read tool. "
+                f"Do not read `{normalized_raw_path}` directly. First inventory files under `{relative_dir}` with "
+                f"`find ./{relative_dir} -maxdepth 4 -type f | sort | head -200`, then read one confirmed file.",
+                "Use the file-read tool only on a concrete file path returned by that listing, not on the directory.",
+            ]
+
+        return [
+            "A directory path was passed to the file-read tool. First inventory the workspace with "
+            f"{inventory_command}, then read a concrete file path rather than the directory itself."
+        ]
 
     @staticmethod
     def is_repeated_tool_path_failure(
