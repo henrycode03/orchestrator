@@ -14,14 +14,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from typing import Any
 
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_active_user
 from app.models import (
     LogEntry,
+    PermissionRequest,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -29,6 +42,33 @@ from app.models import (
     TaskStatus,
     User,
 )
+
+# ── Request body schemas for new mobile endpoints ─────────────
+
+
+class MobileCreateSessionBody(BaseModel):
+    project_id: int
+    name: str
+    task_id: Optional[int] = None
+
+
+class MobileCheckpointLoadBody(BaseModel):
+    checkpoint_name: str
+
+
+class MobileTaskPositionBody(BaseModel):
+    plan_position: int
+
+
+class MobileWorkspaceReviewBody(BaseModel):
+    action: str  # "promote" or "request_changes"
+    note: Optional[str] = None
+
+
+class MobilePermissionApproveBody(BaseModel):
+    auto_approve_same: bool = False
+
+
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.system_settings import get_effective_mobile_gateway_key
 from app.services.task_service import TaskService
@@ -51,6 +91,11 @@ TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 
 def _status_value(value: object) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _normalize_permission_status(value: object) -> str:
+    normalized = _status_value(value).lower()
+    return "rejected" if normalized == "denied" else normalized
 
 
 def _build_task_counts(tasks: list[Task]) -> dict[str, int]:
@@ -866,4 +911,322 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
             }
             for log in recent_logs
         ],
+    }
+
+
+# ── US2: Session Start / Pause / Live Log Stream ──────────────
+
+
+@router.post("/mobile/sessions")
+async def create_mobile_session(
+    body: MobileCreateSessionBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create a new session via mobile — proxies to SessionCreate service (T022)."""
+    _log_mobile_request(request, "create_session", project_id=body.project_id)
+    from app.schemas import SessionCreate
+    from app.api.v1.endpoints.sessions import create_session
+
+    session_create = SessionCreate(
+        project_id=body.project_id,
+        name=body.name,
+        task_id=body.task_id,
+    )
+    result = create_session(session=session_create, db=db, current_user=None)
+    return {
+        "session_id": result["id"] if isinstance(result, dict) else result.id,
+        "status": (
+            result.get("status", "pending")
+            if isinstance(result, dict)
+            else getattr(result, "status", "pending")
+        ),
+        "name": (
+            result.get("name", body.name)
+            if isinstance(result, dict)
+            else getattr(result, "name", body.name)
+        ),
+    }
+
+
+@router.post("/mobile/sessions/{session_id}/pause")
+async def pause_mobile_session(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Pause a running session via mobile (T023)."""
+    _log_mobile_request(request, "pause_session", session_id=session_id)
+    from app.api.v1.endpoints.sessions import pause_session
+
+    return await pause_session(session_id=session_id, db=db, current_user=None)
+
+
+@router.websocket("/mobile/sessions/{session_id}/logs/stream")
+async def mobile_log_stream(
+    session_id: int,
+    websocket: WebSocket,
+    api_key: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Stream live log entries for a session via WebSocket (T024).
+
+    Auth: X-OpenClaw-API-Key header or ?api_key= query param (fallback for WebSocket clients).
+    Closes on terminal session state (stopped/failed/done).
+    """
+    configured_key, _ = get_effective_mobile_gateway_key(
+        settings.MOBILE_GATEWAY_API_KEY, settings.OPENCLAW_API_KEY
+    )
+    presented_key = api_key or websocket.headers.get("X-OpenClaw-API-Key")
+    if (
+        not configured_key
+        or not presented_key
+        or not secrets.compare_digest(presented_key, configured_key)
+    ):
+        await websocket.close(code=4001)
+        return
+
+    await websocket.accept()
+    TERMINAL_STATES = {"stopped", "failed", "done", "completed", "error"}
+    last_log_id = 0
+    try:
+        while True:
+            session = (
+                db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            )
+            if not session:
+                await websocket.send_json(
+                    {
+                        "level": "ERROR",
+                        "message": "Session not found",
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
+                break
+            if _status_value(session.status).lower() in TERMINAL_STATES:
+                break
+
+            new_logs = (
+                db.query(LogEntry)
+                .filter(LogEntry.session_id == session_id, LogEntry.id > last_log_id)
+                .order_by(LogEntry.id.asc())
+                .limit(50)
+                .all()
+            )
+            for log in new_logs:
+                await websocket.send_json(
+                    {
+                        "level": log.level,
+                        "message": log.message,
+                        "timestamp": log.created_at.isoformat(),
+                    }
+                )
+                last_log_id = log.id
+
+            db.expire_all()
+            import asyncio
+
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+# ── US3: Task Position / Workspace Review ─────────────────────
+
+
+@router.patch("/mobile/tasks/{task_id}/position")
+def update_mobile_task_position(
+    task_id: int,
+    body: MobileTaskPositionBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Update task plan_position for drag-and-drop reorder (T036)."""
+    _log_mobile_request(request, "update_task_position", task_id=task_id)
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.plan_position = body.plan_position
+    db.commit()
+    return {"task_id": task_id, "plan_position": body.plan_position}
+
+
+@router.post("/mobile/tasks/{task_id}/review")
+def submit_mobile_workspace_review(
+    task_id: int,
+    body: MobileWorkspaceReviewBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Submit workspace review (promote / request_changes) for a task (T037)."""
+    _log_mobile_request(
+        request, "workspace_review", task_id=task_id, action=body.action
+    )
+    from app.services.task_service import TaskService
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if body.action not in ("promote", "request_changes"):
+        raise HTTPException(
+            status_code=400, detail="action must be 'promote' or 'request_changes'"
+        )
+
+    task_service = TaskService(db)
+    if body.action == "promote":
+        task_service.promote_task(task, note=body.note)
+    else:
+        task_service.request_changes(task, note=body.note)
+    db.commit()
+
+    return {
+        "task_id": task_id,
+        "workspace_status": getattr(task, "workspace_status", body.action),
+        "promoted_at": (
+            task.promoted_at.isoformat() if getattr(task, "promoted_at", None) else None
+        ),
+    }
+
+
+# ── US4: Checkpoint Load / Delete ─────────────────────────────
+
+
+@router.post("/mobile/sessions/{session_id}/checkpoint/load")
+async def load_mobile_checkpoint(
+    session_id: int,
+    body: MobileCheckpointLoadBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Load a session checkpoint via mobile (T048)."""
+    _log_mobile_request(
+        request, "load_checkpoint", session_id=session_id, name=body.checkpoint_name
+    )
+    from app.api.v1.endpoints.sessions import load_session_checkpoint
+
+    return await load_session_checkpoint(
+        session_id=session_id,
+        checkpoint_name=body.checkpoint_name,
+        db=db,
+        current_user=None,
+    )
+
+
+@router.delete("/mobile/sessions/{session_id}/checkpoints/{checkpoint_name}")
+async def delete_mobile_checkpoint(
+    session_id: int,
+    checkpoint_name: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Delete a session checkpoint via mobile (T049)."""
+    _log_mobile_request(
+        request, "delete_checkpoint", session_id=session_id, name=checkpoint_name
+    )
+    from app.api.v1.endpoints.sessions import delete_session_checkpoint
+
+    return await delete_session_checkpoint(
+        session_id=session_id,
+        checkpoint_name=checkpoint_name,
+        db=db,
+        current_user=None,
+    )
+
+
+# ── US5: Permission List / Approve / Reject ───────────────────
+
+
+@router.get("/mobile/permissions")
+def list_mobile_permissions(
+    request: Request,
+    status: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """List permission requests, optionally filtered by status (T057)."""
+    _log_mobile_request(request, "list_permissions", status=status)
+    query = db.query(PermissionRequest).order_by(
+        PermissionRequest.created_at.desc().nullslast(),
+        PermissionRequest.id.desc(),
+    )
+    if status:
+        normalized_status = status.lower()
+        internal_status = (
+            "denied" if normalized_status == "rejected" else normalized_status
+        )
+        if internal_status not in {"pending", "approved", "denied", "expired"}:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        query = query.filter(PermissionRequest.status == internal_status)
+
+    permissions = query.limit(100).all()
+    return {
+        "permissions": [
+            {
+                "id": p.id,
+                "operation_type": p.operation_type,
+                "description": p.description,
+                "status": _normalize_permission_status(p.status),
+                "session_id": p.session_id,
+                "session_name": p.session.name if p.session else None,
+                "expires_at": p.expires_at.isoformat() if p.expires_at else None,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+            }
+            for p in permissions
+        ],
+        "total": len(permissions),
+    }
+
+
+@router.post("/mobile/permissions/{request_id}/approve")
+async def approve_mobile_permission(
+    request_id: int,
+    body: MobilePermissionApproveBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Approve a permission request via mobile (T058)."""
+    _log_mobile_request(request, "approve_permission", request_id=request_id)
+    from app.services.permission_service import PermissionApprovalService
+
+    service = PermissionApprovalService(db)
+    try:
+        permission = service.approve_permission(
+            request_id=request_id,
+            approved_by="mobile",
+            auto_approve_same=body.auto_approve_same,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "request_id": permission.id,
+        "status": permission.status,
+        "message": "Permission approved",
+    }
+
+
+@router.post("/mobile/permissions/{request_id}/reject")
+async def reject_mobile_permission(
+    request_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Reject a permission request via mobile (T059)."""
+    _log_mobile_request(request, "reject_permission", request_id=request_id)
+    from app.services.permission_service import PermissionApprovalService
+
+    service = PermissionApprovalService(db)
+    try:
+        permission = service.deny_permission(request_id=request_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "request_id": permission.id,
+        "status": "rejected",
+        "message": "Permission rejected",
     }

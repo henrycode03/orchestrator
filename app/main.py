@@ -2,14 +2,16 @@
 
 from contextlib import asynccontextmanager
 import logging
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.config import settings, validate_runtime_secrets
 from app.api.v1.router import api_router
-from app.database import init_db, get_db_session
+from app.database import engine, init_db, get_db_session
 from app.services.checkpoint_service import CheckpointService
 
 logger = logging.getLogger(__name__)
