@@ -16,6 +16,7 @@ from app.schemas import (
     ProfileUpdateRequest,
     SystemSettingsUpdateRequest,
 )
+from app.services.agent_backends import get_backend_descriptor
 from app.services.system_settings import (
     WORKSPACE_ROOT_KEY,
     get_effective_mobile_gateway_key,
@@ -50,6 +51,7 @@ def get_app_settings(
     request: Request,
     current_user: User = Depends(get_current_active_user),
 ):
+    backend = get_backend_descriptor(settings.ORCHESTRATOR_AGENT_BACKEND)
     mobile_key, key_source = get_effective_mobile_gateway_key(
         settings.MOBILE_GATEWAY_API_KEY,
         settings.OPENCLAW_API_KEY,
@@ -66,6 +68,9 @@ def get_app_settings(
             "mobile_api_key_preview": _mask_secret(mobile_key),
             "mobile_api_key_source": key_source,
             "openclaw_gateway_url": settings.OPENCLAW_GATEWAY_URL,
+            "agent_backend": backend.name,
+            "agent_model_family": settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            "backend_capabilities": backend.capabilities.to_dict(),
         },
     }
 

@@ -12,8 +12,8 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.services.agent_runtime import create_agent_runtime
 from app.services.checkpoint_service import CheckpointError, CheckpointService
-from app.services.openclaw_service import OpenClawSessionService
 from app.services.session_runtime_service import (
     DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
     queue_task_for_session,
@@ -99,7 +99,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         session.instance_id = session_instance_id
         db.commit()
 
-        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
+        openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
         task_description = session.description or session.name
         logger.info(
             "Starting session %s with description: %s, instance: %s",
@@ -352,7 +352,7 @@ async def stop_session_lifecycle(
             checkpoint_name = None
 
         revoked_ids = revoke_session_celery_tasks(db, session_id, terminate=True)
-        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
+        openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
         if not force:
             await openclaw_service.stop_session()
 
@@ -426,9 +426,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 step_results=latest_checkpoint.get("step_results", []),
             )
         except Exception:
-            openclaw_service = OpenClawSessionService(
-                db, session_id, use_demo_mode=False
-            )
+            openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
             await openclaw_service.pause_session()
 
         session.is_active = True

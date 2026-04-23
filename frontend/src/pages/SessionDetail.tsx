@@ -458,7 +458,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, classifyTimelineEvent, loadCheckpointCount, logVerbosity, logViewMode, session?.status, sessionId, setupWebSocket, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, classifyTimelineEvent, loadCheckpointCount, logVerbosity, logViewMode, scheduleWebSocketConnect, session?.status, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSession = async () => {
     if (!session || !sessionId) {

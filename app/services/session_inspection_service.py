@@ -9,9 +9,10 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel
+from app.services.agent_runtime import create_agent_runtime
 from app.services.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
-from app.services.openclaw_service import OpenClawSessionError, OpenClawSessionService
+from app.services.openclaw_service import OpenClawSessionError
 from app.services.overwrite_protection_service import (
     OverwriteProtectionError,
     OverwriteProtectionService,
@@ -174,7 +175,7 @@ async def save_session_checkpoint_payload(
     db: Session, session_id: int
 ) -> Dict[str, Any]:
     _get_session_or_404(db, session_id)
-    openclaw_service = OpenClawSessionService(db, session_id)
+    openclaw_service = create_agent_runtime(db, session_id)
     try:
         await openclaw_service.pause_session()
     except OpenClawSessionError as exc:
@@ -206,7 +207,7 @@ async def load_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
     _get_session_or_404(db, session_id)
-    openclaw_service = OpenClawSessionService(db, session_id)
+    openclaw_service = create_agent_runtime(db, session_id)
     try:
         session_key = await openclaw_service.resume_session(
             checkpoint_name=checkpoint_name

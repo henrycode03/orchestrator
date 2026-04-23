@@ -373,6 +373,9 @@ class SystemSettingsResponse(BaseModel):
     mobile_api_key_preview: Optional[str] = None
     mobile_api_key_source: Optional[str] = None
     openclaw_gateway_url: str
+    agent_backend: str
+    agent_model_family: str
+    backend_capabilities: dict[str, Any]
 
 
 class AppSettingsResponse(BaseModel):

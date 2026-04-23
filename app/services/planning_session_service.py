@@ -24,7 +24,12 @@ from app.models import (
     Task,
 )
 from app.schemas import PlannerTaskCandidate
-from app.services.openclaw_service import OpenClawSessionError, OpenClawSessionService
+from app.services.agent_runtime import (
+    build_runtime_cli_agent_command,
+    parse_runtime_cli_response,
+    runtime_reports_context_overflow,
+)
+from app.services.openclaw_service import OpenClawSessionError
 from app.services.plan_commit_service import PlanCommitService
 from app.services.planner_service import PlannerService
 from app.services.performance_optimizations import optimize_prompt
@@ -452,30 +457,20 @@ class PlanningSessionService:
         source_brain: str = "local",
         timeout_seconds: int = 180,
     ) -> list[str]:
-        service = OpenClawSessionService(self.db, session_id=None)
-        cmd = service._resolve_openclaw_command()
-        planning_key = f"planning-{uuid.uuid4().hex[:12]}"
-        full_cmd = [*cmd, "agent"]
-        if source_brain == "local":
-            full_cmd.append("--local")
-        full_cmd.extend(
-            [
-                "--session-id",
-                planning_key,
-                "--message",
-                prompt,
-                "--json",
-                "--timeout",
-                str(timeout_seconds),
-            ]
+        return build_runtime_cli_agent_command(
+            self.db,
+            prompt,
+            session_id=None,
+            task_id=None,
+            source_brain=source_brain,
+            timeout_seconds=timeout_seconds,
+            session_prefix="planning",
         )
-        return full_cmd
 
     def _run_openclaw(
         self, prompt: str, *, source_brain: str = "local"
     ) -> dict[str, Any]:
-        """Execute OpenClaw synchronously via subprocess to avoid asyncio threading issues."""
-        service = OpenClawSessionService(self.db, session_id=None)
+        """Execute planning synthesis through the active backend runtime."""
         try:
             full_cmd = self._build_openclaw_command(
                 prompt,
@@ -493,13 +488,18 @@ class PlanningSessionService:
             )
         except _subprocess.TimeoutExpired:
             raise RuntimeError("Planning synthesis timed out after 180s")
-        return service._parse_openclaw_response(proc)
+        return parse_runtime_cli_response(
+            self.db,
+            proc,
+            session_id=None,
+            task_id=None,
+        )
 
     def _run_openclaw_with_fallback(
         self, prompt: str, *, source_brain: str = "local"
     ) -> dict[str, Any]:
         result = self._run_openclaw(prompt, source_brain=source_brain)
-        if not OpenClawSessionService._is_context_overflow_result(result):
+        if not runtime_reports_context_overflow(result):
             return result
 
         compact_prompt = self._build_compact_synthesis_prompt(prompt)

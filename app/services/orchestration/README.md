@@ -29,6 +29,10 @@ This package holds the internal orchestration pipeline used by the worker.
   - shared orchestration thresholds and timeout caps
 - `persistence.py`
   - checkpoint, validation, and live-log persistence helpers
+- `app/services/agent_backends.py`
+  - backend registry and capability metadata for runtime selection
+- `app/services/agent_runtime.py`
+  - runtime factory used by worker/session entrypoints to instantiate the configured backend
 - `runtime.py`
   - workspace snapshot/state-manager/runtime support
 - `telemetry.py`

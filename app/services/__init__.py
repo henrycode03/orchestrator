@@ -4,6 +4,7 @@ All services and utilities are available from this package
 """
 
 from .openclaw_executor import OpenClawExecutor, OpenClawConfig
+from .agent_runtime import AgentRuntime, create_agent_runtime
 from .openclaw_service import OpenClawSessionService
 from .task_service import TaskService
 from .context_service import ContextPreservationService
@@ -60,6 +61,8 @@ from .session_stream_service import stream_session_logs, stream_session_status
 __all__ = [
     "OpenClawExecutor",
     "OpenClawConfig",
+    "AgentRuntime",
+    "create_agent_runtime",
     "OpenClawSessionService",
     "TaskService",
     "ContextPreservationService",

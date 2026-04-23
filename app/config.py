@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     OPENCLAW_CLI_PATH: str = ""
     OPENCLAW_CLI_ARGS: str = ""
     MOBILE_GATEWAY_API_KEY: str = ""
+    ORCHESTRATOR_AGENT_BACKEND: str = "local_openclaw"
+    ORCHESTRATOR_AGENT_MODEL_FAMILY: str = "local"
 
     # Mobile app configuration
     ORCHESTRATOR_MOBILE_BASE_URL: str = "http://localhost:8080/api/v1"

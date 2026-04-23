@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any, List
 from app.celery_app import celery_app
 from app.tasks.worker import get_db_session
 from app.models import Session as SessionModel, Task, TaskStatus
-from app.services import OpenClawSessionService, PromptTemplates
+from app.services import PromptTemplates, create_agent_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def execute_openclaw_code_generation(
         db.commit()
 
         # Initialize OpenClaw service
-        openclaw_service = OpenClawSessionService(db, session_id, task_id)
+        openclaw_service = create_agent_runtime(db, session_id, task_id)
 
         # Build prompt for code generation
         prompt = PromptTemplates.render(
@@ -108,7 +108,7 @@ def execute_openclaw_debugging(
         task.status = TaskStatus.RUNNING
         db.commit()
 
-        openclaw_service = OpenClawSessionService(db, session_id, task_id)
+        openclaw_service = create_agent_runtime(db, session_id, task_id)
 
         # Build debugging prompt
         prompt = PromptTemplates.render(
@@ -164,7 +164,7 @@ def execute_openclaw_testing(
         task.status = Task.RUNNING
         db.commit()
 
-        openclaw_service = OpenClawSessionService(db, session_id, task_id)
+        openclaw_service = create_agent_runtime(db, session_id, task_id)
 
         # Build testing prompt
         prompt = PromptTemplates.render(
@@ -222,7 +222,7 @@ def execute_openclaw_code_review(
         task.status = TaskStatus.RUNNING
         db.commit()
 
-        openclaw_service = OpenClawSessionService(db, session_id, task_id)
+        openclaw_service = create_agent_runtime(db, session_id, task_id)
 
         # Build code review prompt
         prompt = PromptTemplates.render(

@@ -23,7 +23,7 @@ from app.models import (
 )
 from app.database import get_db_session
 from app.services import (
-    OpenClawSessionService,
+    create_agent_runtime,
     build_task_subfolder_name,
 )
 from app.services.orchestration import (
@@ -636,7 +636,7 @@ def execute_openclaw_task(
         )
 
         # Initialize OpenClaw service
-        openclaw_service = OpenClawSessionService(db, session_id, task_id)
+        openclaw_service = create_agent_runtime(db, session_id, task_id)
 
         # Get session context
         session_context = asyncio.run(openclaw_service.get_session_context())

@@ -39,6 +39,20 @@ def test_mobile_connection_secret_refuses_to_return_raw_secret(authenticated_cli
     assert payload["detail"] == "Raw mobile gateway secrets are not returned by the API"
 
 
+def test_settings_exposes_backend_metadata_without_secrets(authenticated_client):
+    response = authenticated_client.get("/api/v1/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["agent_backend"] == settings.ORCHESTRATOR_AGENT_BACKEND
+    assert (
+        payload["system"]["agent_model_family"]
+        == settings.ORCHESTRATOR_AGENT_MODEL_FAMILY
+    )
+    assert payload["system"]["backend_capabilities"]["supports_planning"] is True
+    assert "api_key" not in payload["system"]["backend_capabilities"]
+
+
 def test_task_update_rejects_unsupported_fields(authenticated_client, db_session):
     project = Project(name="Task Security Project")
     db_session.add(project)

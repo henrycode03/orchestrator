@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, TaskStatus
 from app.schemas import TaskExecuteRequest
-from app.services.openclaw_service import OpenClawSessionError, OpenClawSessionService
+from app.services.agent_runtime import create_agent_runtime
+from app.services.openclaw_service import OpenClawSessionError
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.prompt_templates import OrchestrationState
 from app.services.session_runtime_service import ensure_task_workspace
@@ -31,7 +32,7 @@ async def start_openclaw_session_payload(
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
+        openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
         session_key = await openclaw_service.create_openclaw_session(task_description)
 
         db.add(
@@ -130,7 +131,7 @@ async def execute_task_payload(
             )
             db.commit()
 
-        openclaw_service = OpenClawSessionService(
+        openclaw_service = create_agent_runtime(
             db,
             session_id,
             task_id=selected_task.id if selected_task else None,

@@ -34,6 +34,7 @@ from app.services.prompt_templates import (
     StepResult,
     PromptTemplates,
 )
+from app.services.agent_backends import BackendDescriptor, get_backend_descriptor
 from app.services.project_isolation_service import (
     ProjectIsolationService,
     resolve_project_workspace_path,
@@ -89,10 +90,59 @@ class OpenClawSessionService:
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
+        self.backend_descriptor: BackendDescriptor = get_backend_descriptor(
+            settings.ORCHESTRATOR_AGENT_BACKEND
+        )
         # Initialize checkpoint service
         from app.services.checkpoint_service import CheckpointService
 
         self.checkpoint_service = CheckpointService(db)
+
+    def get_backend_metadata(self) -> Dict[str, Any]:
+        """Return normalized backend metadata for logs, APIs, and orchestration."""
+
+        return {
+            "backend": self.backend_descriptor.name,
+            "display_name": self.backend_descriptor.display_name,
+            "implementation": self.backend_descriptor.implementation,
+            "model_family": settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            "capabilities": self.backend_descriptor.capabilities.to_dict(),
+        }
+
+    def build_cli_agent_command(
+        self,
+        prompt: str,
+        *,
+        source_brain: str = "local",
+        timeout_seconds: int = 180,
+        session_prefix: str = "planning",
+    ) -> List[str]:
+        """Build a one-shot CLI agent command for synchronous planning-style tasks."""
+
+        cmd = self._resolve_openclaw_command()
+        runtime_session_key = f"{session_prefix}-{int(time.time())}"
+        full_cmd = [*cmd, "agent"]
+        if source_brain == "local":
+            full_cmd.append("--local")
+        full_cmd.extend(
+            [
+                "--session-id",
+                runtime_session_key,
+                "--message",
+                prompt,
+                "--json",
+                "--timeout",
+                str(timeout_seconds),
+            ]
+        )
+        return full_cmd
+
+    def parse_cli_response(
+        self, proc: subprocess.CompletedProcess[str]
+    ) -> Dict[str, Any]:
+        """Normalize subprocess output into the same payload shape as streaming execution."""
+
+        return self._parse_openclaw_response(proc)
 
     def _resolve_openclaw_command(self) -> List[str]:
         """Resolve the OpenClaw CLI command with fallback locations."""
@@ -308,6 +358,12 @@ class OpenClawSessionService:
                     f"{result_status or 'unknown'}",
                 )
 
+            result.setdefault("backend", self.backend_descriptor.name)
+            result.setdefault("model_family", settings.ORCHESTRATOR_AGENT_MODEL_FAMILY)
+            result.setdefault(
+                "backend_capabilities",
+                self.backend_descriptor.capabilities.to_dict(),
+            )
             return result
 
         except Exception as e:
@@ -833,11 +889,15 @@ class OpenClawSessionService:
                 "status": "completed",
                 "mode": "orchestration",
                 "output": summary_result.get("output", "Task completed"),
+                "backend": self.backend_descriptor.name,
+                "model_family": settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
                 "orchestration_state": {
                     "status": orchestration_state.status.value,
                     "plan_length": len(orchestration_state.plan),
                     "steps_completed": len(orchestration_state.execution_results),
                     "debug_attempts": len(orchestration_state.debug_attempts),
+                    "backend": self.backend_descriptor.name,
+                    "backend_capabilities": self.backend_descriptor.capabilities.to_dict(),
                 },
             }
 

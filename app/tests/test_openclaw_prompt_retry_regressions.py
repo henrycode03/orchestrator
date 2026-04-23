@@ -79,6 +79,9 @@ def test_execute_task_retries_context_overflow_with_compact_prompt(
     result = asyncio.run(service.execute_task(prompt, timeout_seconds=30))
 
     assert result["status"] == "completed"
+    assert result["backend"] == "local_openclaw"
+    assert result["model_family"] == "local"
+    assert result["backend_capabilities"]["supports_streaming"] is True
     assert len(seen_prompts) == 2
     assert len(seen_prompts[1]) < len(seen_prompts[0])
     assert "[Content truncated for performance]" in seen_prompts[1]
