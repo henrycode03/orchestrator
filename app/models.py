@@ -185,6 +185,8 @@ class PlanningSession(Base):
     status = Column(String(50), nullable=False, default="active", index=True)
     source_brain = Column(String(50), nullable=False, default="local")
     current_prompt_id = Column(String(64), nullable=True)
+    processing_token = Column(String(64), nullable=True, index=True)
+    processing_started_at = Column(DateTime(timezone=True), nullable=True)
     finalized_plan_id = Column(
         Integer, ForeignKey("plans.id"), nullable=True, index=True
     )
@@ -245,6 +247,8 @@ class PlanningArtifact(Base):
     artifact_type = Column(String(50), nullable=False)
     filename = Column(String(255), nullable=False)
     content = Column(Text, nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    is_latest = Column(Boolean, nullable=False, default=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     planning_session = relationship("PlanningSession", back_populates="artifacts")

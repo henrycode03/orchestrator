@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess as _subprocess
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -35,6 +37,7 @@ class PlanningSessionService:
     MAX_QUESTIONS = 2
     SYNTHESIS_TRANSCRIPT_CHAR_BUDGET = 1800
     SYNTHESIS_PROMPT_CHAR_BUDGET = 4200
+    PROCESSING_LEASE_MINUTES = 10
 
     def __init__(self, db: Session):
         self.db = db
@@ -95,8 +98,8 @@ class PlanningSessionService:
             ) from exc
 
         self._add_message(session, "user", prompt.strip(), metadata={"kind": "prompt"})
-        self._advance_or_finalize(session, project)
         self.db.commit()
+        self.schedule_processing(session.id)
         self.db.refresh(session)
         return session
 
@@ -107,7 +110,6 @@ class PlanningSessionService:
                 status_code=409, detail="Planning session is not waiting for input"
             )
 
-        project = session.project
         self._add_message(
             session,
             "user",
@@ -117,9 +119,11 @@ class PlanningSessionService:
         )
         session.current_prompt_id = None
         session.status = "active"
+        session.processing_token = None
+        session.processing_started_at = None
         session.updated_at = datetime.now(timezone.utc)
-        self._advance_or_finalize(session, project)
         self.db.commit()
+        self.schedule_processing(session.id)
         self.db.refresh(session)
         return session
 
@@ -128,10 +132,64 @@ class PlanningSessionService:
         if session.status not in {"completed", "cancelled"}:
             session.status = "cancelled"
             session.current_prompt_id = None
+            session.processing_token = None
+            session.processing_started_at = None
             session.updated_at = datetime.now(timezone.utc)
             self.db.commit()
             self.db.refresh(session)
         return session
+
+    def schedule_processing(self, session_id: int) -> None:
+        if self._should_process_inline():
+            self.process_session(session_id)
+            return
+
+        try:
+            from app.tasks.planning_tasks import advance_planning_session
+
+            advance_planning_session.delay(session_id)
+        except Exception:
+            self.process_session(session_id)
+
+    def process_session(self, session_id: int) -> Optional[PlanningSession]:
+        session = self._claim_session_for_processing(session_id)
+        if not session:
+            return None
+
+        try:
+            project = session.project
+            self._advance_or_finalize(session, project)
+            self._clear_processing_lease(session)
+            self.db.commit()
+            self.db.refresh(session)
+            return session
+        except HTTPException:
+            self._clear_processing_lease(session)
+            self.db.commit()
+            raise
+        except Exception as exc:
+            session.status = "failed"
+            session.last_error = str(exc)
+            session.current_prompt_id = None
+            session.updated_at = datetime.now(timezone.utc)
+            self._clear_processing_lease(session)
+            self.db.commit()
+            self.db.refresh(session)
+            return session
+
+    def recover_active_sessions(self) -> list[int]:
+        session_ids = [
+            session_id
+            for (session_id,) in self.db.query(PlanningSession.id)
+            .join(Project)
+            .filter(Project.deleted_at.is_(None))
+            .filter(PlanningSession.status == "active")
+            .filter(PlanningSession.current_prompt_id.is_(None))
+            .all()
+        ]
+        for session_id in session_ids:
+            self.schedule_processing(session_id)
+        return session_ids
 
     def commit(
         self,
@@ -204,7 +262,7 @@ class PlanningSessionService:
             plan.markdown = effective_markdown
 
         if planner_markdown is not None:
-            self._upsert_artifact(
+            self._append_artifact_version(
                 session,
                 artifact_type="planner_markdown",
                 filename="planner.md",
@@ -247,7 +305,7 @@ class PlanningSessionService:
             "updated_at": session.updated_at,
             "last_error": session.last_error,
             "messages": session.messages,
-            "artifacts": session.artifacts,
+            "artifacts": self._latest_artifacts(session),
             "tasks_preview": [
                 PlannerTaskCandidate(
                     title=item.title,
@@ -264,10 +322,61 @@ class PlanningSessionService:
             "committed_task_ids": self._load_committed_task_ids(session),
         }
 
+    def _claim_session_for_processing(
+        self, session_id: int
+    ) -> Optional[PlanningSession]:
+        token = uuid.uuid4().hex[:12]
+        stale_before = datetime.now(timezone.utc) - timedelta(
+            minutes=self.PROCESSING_LEASE_MINUTES
+        )
+        claimed_rows = (
+            self.db.query(PlanningSession)
+            .filter(PlanningSession.id == session_id)
+            .filter(PlanningSession.status == "active")
+            .filter(PlanningSession.current_prompt_id.is_(None))
+            .filter(
+                or_(
+                    PlanningSession.processing_token.is_(None),
+                    PlanningSession.processing_started_at.is_(None),
+                    PlanningSession.processing_started_at < stale_before,
+                )
+            )
+            .update(
+                {
+                    "processing_token": token,
+                    "processing_started_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        if claimed_rows == 0:
+            return None
+
+        session = self.get_session(session_id)
+        if session.processing_token != token:
+            return None
+        return session
+
+    @staticmethod
+    def _clear_processing_lease(session: PlanningSession) -> None:
+        session.processing_token = None
+        session.processing_started_at = None
+        session.updated_at = datetime.now(timezone.utc)
+
+    @staticmethod
+    def _should_process_inline() -> bool:
+        return (
+            os.environ.get("PYTEST_CURRENT_TEST") is not None
+            or os.environ.get("ORCHESTRATOR_FORCE_INLINE_PLANNING") == "1"
+        )
+
     def _advance_or_finalize(self, session: PlanningSession, project: Project) -> None:
         question_count = len([m for m in session.messages if m.role == "assistant"])
-        if self._needs_clarification(session) and question_count < self.MAX_QUESTIONS:
-            question = self._next_question(session)
+        decision = self._decide_clarification(session, project)
+        if decision["needs_clarification"] and question_count < self.MAX_QUESTIONS:
+            question = decision["question"]
             prompt_id = f"prompt-{uuid.uuid4().hex[:12]}"
             session.status = "waiting_for_input"
             session.current_prompt_id = prompt_id
@@ -286,7 +395,9 @@ class PlanningSessionService:
     def _finalize_session(self, session: PlanningSession, project: Project) -> None:
         prompt = self._build_synthesis_prompt(session, project)
         try:
-            result = self._run_openclaw_with_fallback(prompt)
+            result = self._run_openclaw_with_fallback(
+                prompt, source_brain=session.source_brain
+            )
             artifacts = self._parse_finalization_payload(result)
         except HTTPException:
             raise
@@ -308,10 +419,6 @@ class PlanningSessionService:
             session.updated_at = datetime.now(timezone.utc)
             return
 
-        self.db.query(PlanningArtifact).filter(
-            PlanningArtifact.planning_session_id == session.id
-        ).delete(synchronize_session=False)
-
         artifact_specs = {
             "requirements": ("requirements.md", artifacts.get("requirements", "")),
             "design": ("design.md", artifacts.get("design", "")),
@@ -322,13 +429,11 @@ class PlanningSessionService:
             "planner_markdown": ("planner.md", planner_markdown),
         }
         for artifact_type, (filename, content) in artifact_specs.items():
-            self.db.add(
-                PlanningArtifact(
-                    planning_session_id=session.id,
-                    artifact_type=artifact_type,
-                    filename=filename,
-                    content=content.strip(),
-                )
+            self._append_artifact_version(
+                session,
+                artifact_type=artifact_type,
+                filename=filename,
+                content=content.strip(),
             )
 
         self._add_message(
@@ -343,27 +448,45 @@ class PlanningSessionService:
         session.updated_at = datetime.now(timezone.utc)
         session.last_error = None
 
-    def _run_openclaw(self, prompt: str) -> dict[str, Any]:
+    def _build_openclaw_command(
+        self,
+        prompt: str,
+        *,
+        source_brain: str = "local",
+        timeout_seconds: int = 180,
+    ) -> list[str]:
+        service = OpenClawSessionService(self.db, session_id=None)
+        cmd = service._resolve_openclaw_command()
+        planning_key = f"planning-{uuid.uuid4().hex[:12]}"
+        full_cmd = [*cmd, "agent"]
+        if source_brain == "local":
+            full_cmd.append("--local")
+        full_cmd.extend(
+            [
+                "--session-id",
+                planning_key,
+                "--message",
+                prompt,
+                "--json",
+                "--timeout",
+                str(timeout_seconds),
+            ]
+        )
+        return full_cmd
+
+    def _run_openclaw(
+        self, prompt: str, *, source_brain: str = "local"
+    ) -> dict[str, Any]:
         """Execute OpenClaw synchronously via subprocess to avoid asyncio threading issues."""
         service = OpenClawSessionService(self.db, session_id=None)
         try:
-            cmd = service._resolve_openclaw_command()
+            full_cmd = self._build_openclaw_command(
+                prompt,
+                source_brain=source_brain,
+                timeout_seconds=180,
+            )
         except OpenClawSessionError as exc:
             raise RuntimeError(str(exc))
-
-        planning_key = f"planning-{uuid.uuid4().hex[:12]}"
-        full_cmd = [
-            *cmd,
-            "agent",
-            "--local",
-            "--session-id",
-            planning_key,
-            "--message",
-            prompt,
-            "--json",
-            "--timeout",
-            "180",
-        ]
         try:
             proc = _subprocess.run(
                 full_cmd,
@@ -375,15 +498,28 @@ class PlanningSessionService:
             raise RuntimeError("Planning synthesis timed out after 180s")
         return service._parse_openclaw_response(proc)
 
-    def _run_openclaw_with_fallback(self, prompt: str) -> dict[str, Any]:
-        result = self._run_openclaw(prompt)
+    def _invoke_openclaw(
+        self, prompt: str, *, source_brain: str = "local"
+    ) -> dict[str, Any]:
+        """Call _run_openclaw with backward compatibility for older monkeypatched tests."""
+        try:
+            return self._run_openclaw(prompt, source_brain=source_brain)
+        except TypeError as exc:
+            if "source_brain" not in str(exc) and "positional argument" not in str(exc):
+                raise
+            return self._run_openclaw(prompt)  # type: ignore[call-arg]
+
+    def _run_openclaw_with_fallback(
+        self, prompt: str, *, source_brain: str = "local"
+    ) -> dict[str, Any]:
+        result = self._invoke_openclaw(prompt, source_brain=source_brain)
         if not OpenClawSessionService._is_context_overflow_result(result):
             return result
 
         compact_prompt = self._build_compact_synthesis_prompt(prompt)
         if compact_prompt == prompt:
             return result
-        return self._run_openclaw(compact_prompt)
+        return self._invoke_openclaw(compact_prompt, source_brain=source_brain)
 
     def _parse_finalization_payload(self, result: dict[str, Any]) -> dict[str, str]:
         if result.get("status") == "failed":
@@ -457,7 +593,7 @@ Artifact requirements:
         compact += "\n\nKeep every artifact concise. Prefer short markdown sections and compact task descriptions."
         return compact
 
-    def _needs_clarification(self, session: PlanningSession) -> bool:
+    def _heuristic_needs_clarification(self, session: PlanningSession) -> bool:
         responses = [m for m in session.messages if m.role == "user"][1:]
         if responses:
             combined = " ".join(message.content for message in responses)
@@ -481,7 +617,7 @@ Artifact requirements:
         )
         return sum(marker in prompt for marker in strong_detail_markers) < 2
 
-    def _next_question(self, session: PlanningSession) -> str:
+    def _heuristic_next_question(self, session: PlanningSession) -> str:
         responses = [m for m in session.messages if m.role == "user"][1:]
         if not responses:
             return (
@@ -492,6 +628,125 @@ Artifact requirements:
             "What acceptance criteria or implementation constraints would make this plan "
             "feel complete enough to execute safely?"
         )
+
+    def _decide_clarification(
+        self, session: PlanningSession, project: Project
+    ) -> dict[str, Any]:
+        heuristic_question = self._heuristic_next_question(session)
+        heuristic_needs = self._heuristic_needs_clarification(session)
+        question_count = len([m for m in session.messages if m.role == "assistant"])
+        if question_count >= self.MAX_QUESTIONS:
+            return {"needs_clarification": False, "question": None}
+
+        prompt = self._build_clarification_prompt(
+            session,
+            project,
+            fallback_question=heuristic_question,
+        )
+        try:
+            result = self._run_openclaw_with_fallback(
+                prompt, source_brain=session.source_brain
+            )
+            return self._parse_clarification_payload(
+                result,
+                fallback_needs=heuristic_needs,
+                fallback_question=heuristic_question,
+            )
+        except Exception:
+            return {
+                "needs_clarification": heuristic_needs,
+                "question": heuristic_question if heuristic_needs else None,
+            }
+
+    def _build_clarification_prompt(
+        self,
+        session: PlanningSession,
+        project: Project,
+        *,
+        fallback_question: str,
+    ) -> str:
+        transcript = self._build_condensed_transcript(session)
+        project_description = self._trim_text(project.description or "", 220)
+        prompt = f"""You are deciding whether a planning conversation needs one more clarifying question before final plan synthesis.
+
+Project: {project.name}
+Project description: {project_description or "None provided"}
+Planning prompt: {self._trim_text(session.prompt, 500)}
+
+Conversation transcript:
+{transcript}
+
+Return JSON only with exactly these keys:
+- needs_clarification
+- question
+
+Rules:
+1. Set needs_clarification to true only if one more user answer would materially improve implementation safety or task quality.
+2. If needs_clarification is false, set question to an empty string.
+3. If needs_clarification is true, question must be a single concrete question, under 30 words, focused on the most important missing constraint or acceptance criterion.
+4. Avoid repeating already-answered questions.
+5. If uncertain, prefer this fallback question:
+   {fallback_question}
+"""
+        return optimize_prompt(prompt, max_tokens=500, hard_char_limit=2200)
+
+    def _parse_clarification_payload(
+        self,
+        result: dict[str, Any],
+        *,
+        fallback_needs: bool,
+        fallback_question: str,
+    ) -> dict[str, Any]:
+        if result.get("status") == "failed":
+            return {
+                "needs_clarification": fallback_needs,
+                "question": fallback_question if fallback_needs else None,
+            }
+
+        output_text = result.get("output", "")
+        if isinstance(output_text, str):
+            try:
+                parsed_output = json.loads(output_text)
+                if isinstance(parsed_output, dict) and "payloads" in parsed_output:
+                    payloads = parsed_output.get("payloads") or []
+                    if payloads and isinstance(payloads[0], dict):
+                        output_text = payloads[0].get("text", output_text)
+            except json.JSONDecodeError:
+                pass
+
+        if not isinstance(output_text, str):
+            return {
+                "needs_clarification": fallback_needs,
+                "question": fallback_question if fallback_needs else None,
+            }
+
+        cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", output_text.strip())
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return {
+                "needs_clarification": fallback_needs,
+                "question": fallback_question if fallback_needs else None,
+            }
+
+        if not isinstance(parsed, dict) or (
+            "needs_clarification" not in parsed and "question" not in parsed
+        ):
+            return {
+                "needs_clarification": fallback_needs,
+                "question": fallback_question if fallback_needs else None,
+            }
+
+        needs_clarification = bool(parsed.get("needs_clarification"))
+        question = str(parsed.get("question", "") or "").strip()
+        if needs_clarification and not question:
+            question = fallback_question
+        if not needs_clarification:
+            question = None
+        return {
+            "needs_clarification": needs_clarification,
+            "question": question,
+        }
 
     def _add_message(
         self,
@@ -544,12 +799,25 @@ Artifact requirements:
     def _get_artifact_content(
         self, session: PlanningSession, artifact_type: str
     ) -> Optional[str]:
-        for artifact in session.artifacts:
+        for artifact in self._latest_artifacts(session):
             if artifact.artifact_type == artifact_type:
                 return artifact.content
         return None
 
-    def _upsert_artifact(
+    def _latest_artifacts(self, session: PlanningSession) -> list[PlanningArtifact]:
+        latest = [artifact for artifact in session.artifacts if artifact.is_latest]
+        if latest:
+            return latest
+
+        fallback: dict[str, PlanningArtifact] = {}
+        for artifact in sorted(
+            session.artifacts,
+            key=lambda item: (item.artifact_type, item.version or 1, item.id or 0),
+        ):
+            fallback[artifact.artifact_type] = artifact
+        return list(fallback.values())
+
+    def _append_artifact_version(
         self,
         session: PlanningSession,
         *,
@@ -557,24 +825,25 @@ Artifact requirements:
         filename: str,
         content: str,
     ) -> None:
-        existing = next(
+        latest = next(
             (
                 artifact
-                for artifact in session.artifacts
+                for artifact in self._latest_artifacts(session)
                 if artifact.artifact_type == artifact_type
             ),
             None,
         )
-        if existing:
-            existing.filename = filename
-            existing.content = content.strip()
-            return
-
+        next_version = 1
+        if latest is not None:
+            latest.is_latest = False
+            next_version = (latest.version or 1) + 1
         artifact = PlanningArtifact(
             planning_session_id=session.id,
             artifact_type=artifact_type,
             filename=filename,
             content=content.strip(),
+            version=next_version,
+            is_latest=True,
         )
         self.db.add(artifact)
         session.artifacts.append(artifact)

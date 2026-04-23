@@ -39,7 +39,7 @@ def create_project(
     project_data = project.model_dump()
     project_data["name"] = humanize_display_name(project_data.get("name", ""))
     project_data["workspace_path"] = normalize_project_workspace_path(
-        project.workspace_path, project.name
+        project.workspace_path, project.name, db=db
     )
     db_project = Project(**project_data)
     db.add(db_project)
@@ -223,6 +223,7 @@ def update_project(
         update_data["workspace_path"] = normalize_project_workspace_path(
             update_data.get("workspace_path", db_project.workspace_path),
             update_data.get("name", db_project.name),
+            db=db,
         )
     for field, value in update_data.items():
         setattr(db_project, field, value)

@@ -13,6 +13,7 @@ from app.config import settings, validate_runtime_secrets
 from app.api.v1.router import api_router
 from app.database import engine, init_db, get_db_session
 from app.services.checkpoint_service import CheckpointService
+from app.services.planning_session_service import PlanningSessionService
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,20 @@ async def lifespan(app: FastAPI):
     finally:
         if cleanup_db is not None:
             cleanup_db.close()
+
+    planning_db = None
+    try:
+        planning_db = get_db_session()
+        recovered = PlanningSessionService(planning_db).recover_active_sessions()
+        if recovered:
+            logger.info(
+                "Requeued active planning sessions after startup: %s", recovered
+            )
+    except Exception as exc:
+        logger.warning("Planning session recovery skipped due to error: %s", exc)
+    finally:
+        if planning_db is not None:
+            planning_db.close()
 
     logger.info("=" * 50)
     logger.info("🚀 Orchestrator API starting up...")

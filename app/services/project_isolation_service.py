@@ -25,7 +25,9 @@ def _slugify_workspace_name(name: str) -> str:
 
 
 def normalize_project_workspace_path(
-    workspace_path: Optional[str], project_name: Optional[str] = None
+    workspace_path: Optional[str],
+    project_name: Optional[str] = None,
+    db: Optional[Session] = None,
 ) -> str:
     """Store workspace paths as project-root-relative values under OPENCLAW_WORKSPACE_ROOT."""
     if not workspace_path:
@@ -35,7 +37,7 @@ def normalize_project_workspace_path(
     if not raw:
         return _slugify_workspace_name(project_name or "")
 
-    workspace_root = get_effective_workspace_root()
+    workspace_root = get_effective_workspace_root(db=db)
     root_str = str(workspace_root)
     if raw.startswith(root_str):
         raw = raw[len(root_str) :].lstrip("/")
@@ -50,10 +52,12 @@ def normalize_project_workspace_path(
 
 
 def resolve_project_workspace_path(
-    workspace_path: Optional[str], project_name: Optional[str] = None
+    workspace_path: Optional[str],
+    project_name: Optional[str] = None,
+    db: Optional[Session] = None,
 ) -> Path:
-    relative = normalize_project_workspace_path(workspace_path, project_name)
-    return (get_effective_workspace_root() / relative).resolve()
+    relative = normalize_project_workspace_path(workspace_path, project_name, db=db)
+    return (get_effective_workspace_root(db=db) / relative).resolve()
 
 
 class ProjectIsolationError(Exception):

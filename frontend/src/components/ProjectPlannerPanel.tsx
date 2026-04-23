@@ -714,6 +714,12 @@ export function ProjectPlannerPanel({
                       </div>
                     )}
 
+                    {activeSession.status === 'active' && (
+                      <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-100">
+                        The planner is still running in the background. This view refreshes automatically while it decides whether to ask one more question or generate final artifacts.
+                      </div>
+                    )}
+
                     {activeSession.status === 'failed' && activeSession.last_error && (
                       <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
                         {activeSession.last_error}

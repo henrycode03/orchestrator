@@ -39,26 +39,31 @@ def set_setting_value(
     return record
 
 
-def get_setting_value_runtime(key: str, default: Optional[str] = None) -> Optional[str]:
-    db = get_db_session()
-    try:
+def get_setting_value_runtime(
+    key: str, default: Optional[str] = None, db: Optional[Session] = None
+) -> Optional[str]:
+    if db is not None:
         return get_setting_value(db, key, default)
+
+    runtime_db = get_db_session()
+    try:
+        return get_setting_value(runtime_db, key, default)
     finally:
-        db.close()
+        runtime_db.close()
 
 
-def get_effective_workspace_root() -> Path:
+def get_effective_workspace_root(db: Optional[Session] = None) -> Path:
     fallback = os.environ.get(
         "OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"
     )
-    value = get_setting_value_runtime(WORKSPACE_ROOT_KEY, fallback) or fallback
+    value = get_setting_value_runtime(WORKSPACE_ROOT_KEY, fallback, db=db) or fallback
     return Path(value).expanduser().resolve()
 
 
 def get_effective_mobile_gateway_key(
-    env_mobile_key: str, env_openclaw_key: str
+    env_mobile_key: str, env_openclaw_key: str, db: Optional[Session] = None
 ) -> tuple[Optional[str], Optional[str]]:
-    override_key = get_setting_value_runtime(MOBILE_API_KEY_KEY)
+    override_key = get_setting_value_runtime(MOBILE_API_KEY_KEY, db=db)
     if override_key:
         return override_key, MOBILE_API_KEY_KEY
     if env_mobile_key:

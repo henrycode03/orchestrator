@@ -1,6 +1,6 @@
 """Pydantic schemas for API validation"""
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from typing import Optional, Any, List
 from datetime import datetime
 from enum import Enum
@@ -36,12 +36,11 @@ class ProjectUpdate(BaseModel):
 
 
 class ProjectResponse(ProjectBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 # Task Schemas
@@ -77,6 +76,8 @@ class TaskPromotionRequest(BaseModel):
 
 
 class TaskResponse(TaskBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     project_id: int
     plan_id: Optional[int] = None
@@ -97,9 +98,6 @@ class TaskResponse(TaskBase):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class PlannerTaskCandidate(BaseModel):
     title: str
@@ -112,6 +110,8 @@ class PlannerTaskCandidate(BaseModel):
 
 
 class PlanResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     project_id: int
     title: str
@@ -122,11 +122,10 @@ class PlanResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class PlanningMessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     role: str
     prompt_id: Optional[str] = None
@@ -134,22 +133,20 @@ class PlanningMessageResponse(BaseModel):
     metadata_json: Optional[dict[str, Any]] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class PlanningArtifactResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     artifact_type: str
     filename: str
     content: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class PlanningSessionSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     project_id: int
     title: str
@@ -162,9 +159,6 @@ class PlanningSessionSummaryResponse(BaseModel):
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 class PlanningSessionResponse(PlanningSessionSummaryResponse):
@@ -214,6 +208,8 @@ class SessionUpdate(BaseModel):
 
 
 class SessionResponse(SessionBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     project_id: int
     status: str
@@ -231,9 +227,6 @@ class SessionResponse(SessionBase):
     updated_at: Optional[datetime] = None
     instance_id: Optional[str] = None
     deleted_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 # Log Entry Schemas
@@ -254,6 +247,8 @@ class LogEntryResponse(LogEntryBase):
 
 # Task Execute Schema
 class TaskExecuteRequest(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     task: str
     timeout_seconds: int = (
         600  # Increased from 300 to 600 (10 minutes) for complex tasks
@@ -261,9 +256,6 @@ class TaskExecuteRequest(BaseModel):
     session_id: Optional[int] = None
     task_id: Optional[int] = None
     created_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 # Auth Schemas (moved from auth.py to avoid circular imports)
@@ -296,15 +288,14 @@ class UserCreate(BaseModel):
 
 
 class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     email: EmailStr
     name: Optional[str] = None
     is_active: bool = True
     created_at: datetime
     updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 class TokenRefresh(BaseModel):
@@ -317,6 +308,8 @@ class APIKeyCreate(BaseModel):
 
 
 class APIKeyResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     user_id: int
     name: str
@@ -325,9 +318,6 @@ class APIKeyResponse(BaseModel):
     last_used: Optional[datetime] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class DevicePairRequest(BaseModel):
     device_name: str
@@ -335,14 +325,13 @@ class DevicePairRequest(BaseModel):
 
 
 class DeviceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     public_key: str
     is_active: bool
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class DeviceUnpairResponse(BaseModel):

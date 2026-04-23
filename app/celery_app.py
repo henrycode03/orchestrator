@@ -15,6 +15,7 @@ celery_app = Celery(
         "app.tasks.scheduler",
         "app.tasks.github_tasks",
         "app.tasks.openclaw_tasks",
+        "app.tasks.planning_tasks",
     ],
 )
 

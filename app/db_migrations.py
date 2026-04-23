@@ -270,6 +270,8 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
                         status VARCHAR(50) NOT NULL DEFAULT 'active',
                         source_brain VARCHAR(50) NOT NULL DEFAULT 'local',
                         current_prompt_id VARCHAR(64),
+                        processing_token VARCHAR(64),
+                        processing_started_at DATETIME,
                         finalized_plan_id INTEGER,
                         committed_at DATETIME,
                         committed_task_ids TEXT,
@@ -312,6 +314,8 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
                         artifact_type VARCHAR(50) NOT NULL,
                         filename VARCHAR(255) NOT NULL,
                         content TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        is_latest BOOLEAN NOT NULL DEFAULT 1,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY(planning_session_id) REFERENCES planning_sessions (id)
                     )
@@ -339,6 +343,14 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
             connection.execute(
                 text(
                     "CREATE INDEX ix_planning_sessions_finalized_plan_id ON planning_sessions (finalized_plan_id)"
+                )
+            )
+        if not _has_index(
+            engine, "planning_sessions", "ix_planning_sessions_processing_token"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_sessions_processing_token ON planning_sessions (processing_token)"
                 )
             )
         if not _has_index(
@@ -377,6 +389,94 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
                     "CREATE INDEX ix_planning_artifacts_planning_session_id ON planning_artifacts (planning_session_id)"
                 )
             )
+        if not _has_index(
+            engine, "planning_artifacts", "ix_planning_artifacts_is_latest"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_artifacts_is_latest ON planning_artifacts (is_latest)"
+                )
+            )
+
+
+def _migration_005_planning_processing_lease(engine: Engine) -> None:
+    if "planning_sessions" not in _table_names(engine):
+        return
+
+    statements: list[str] = []
+    if not _has_column(engine, "planning_sessions", "processing_token"):
+        statements.append(
+            "ALTER TABLE planning_sessions ADD COLUMN processing_token VARCHAR(64)"
+        )
+    if not _has_column(engine, "planning_sessions", "processing_started_at"):
+        statements.append(
+            "ALTER TABLE planning_sessions ADD COLUMN processing_started_at DATETIME"
+        )
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+        if not _has_index(
+            engine, "planning_sessions", "ix_planning_sessions_processing_token"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_sessions_processing_token ON planning_sessions (processing_token)"
+                )
+            )
+
+
+def _migration_006_planning_artifact_versioning(engine: Engine) -> None:
+    if "planning_artifacts" not in _table_names(engine):
+        return
+
+    statements: list[str] = []
+    if not _has_column(engine, "planning_artifacts", "version"):
+        statements.append(
+            "ALTER TABLE planning_artifacts ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+        )
+    if not _has_column(engine, "planning_artifacts", "is_latest"):
+        statements.append(
+            "ALTER TABLE planning_artifacts ADD COLUMN is_latest BOOLEAN NOT NULL DEFAULT 1"
+        )
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+        if not _has_index(
+            engine, "planning_artifacts", "ix_planning_artifacts_is_latest"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_artifacts_is_latest ON planning_artifacts (is_latest)"
+                )
+            )
+        connection.execute(
+            text(
+                """
+                UPDATE planning_artifacts
+                SET is_latest = 1
+                WHERE id IN (
+                    SELECT MAX(id)
+                    FROM planning_artifacts
+                    GROUP BY planning_session_id, artifact_type
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE planning_artifacts
+                SET is_latest = 0
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM planning_artifacts
+                    GROUP BY planning_session_id, artifact_type
+                )
+                """
+            )
+        )
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -399,6 +499,16 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="004_planning_active_session_index",
         description="Enforce one active planning session per project",
         upgrade=lambda engine: _migration_003_planning_sessions(engine),
+    ),
+    Migration(
+        version="005_planning_processing_lease",
+        description="Add processing lease columns for background planning workers",
+        upgrade=_migration_005_planning_processing_lease,
+    ),
+    Migration(
+        version="006_planning_artifact_versioning",
+        description="Preserve planning artifact history with latest-version markers",
+        upgrade=_migration_006_planning_artifact_versioning,
     ),
 )
 
