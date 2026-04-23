@@ -44,27 +44,6 @@ def create_agent_runtime(
     )
 
 
-def build_runtime_cli_agent_command(
-    db: Session,
-    prompt: str,
-    *,
-    session_id: Optional[int] = None,
-    task_id: Optional[int] = None,
-    source_brain: str = "local",
-    timeout_seconds: int = 180,
-    session_prefix: str = "planning",
-) -> list[str]:
-    """Build a backend-specific CLI command for synchronous planning flows."""
-
-    runtime = create_agent_runtime(db, session_id, task_id)
-    return runtime.build_cli_agent_command(
-        prompt,
-        source_brain=source_brain,
-        timeout_seconds=timeout_seconds,
-        session_prefix=session_prefix,
-    )
-
-
 def invoke_runtime_prompt(
     db: Session,
     prompt: str,
@@ -86,19 +65,6 @@ def invoke_runtime_prompt(
             session_prefix=session_prefix,
         )
     )
-
-
-def parse_runtime_cli_response(
-    db: Session,
-    proc: Any,
-    *,
-    session_id: Optional[int] = None,
-    task_id: Optional[int] = None,
-) -> dict[str, Any]:
-    """Parse backend CLI output through the active runtime adapter."""
-
-    runtime = create_agent_runtime(db, session_id, task_id)
-    return runtime.parse_cli_response(proc)
 
 
 def runtime_reports_context_overflow(

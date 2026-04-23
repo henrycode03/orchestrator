@@ -12,6 +12,7 @@ from app.api.v1.endpoints import (
     mobile,
     resume,
     settings,
+    admin,
 )
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.project_logs import router as project_logs_router
@@ -136,5 +137,11 @@ api_router.include_router(
     resume.router,
     prefix="/sessions/{session_id}/resume",
     tags=["resume-operations"],
+    dependencies=[Depends(get_current_active_user)],
+)
+
+# Admin diagnostics
+api_router.include_router(
+    admin.router,
     dependencies=[Depends(get_current_active_user)],
 )

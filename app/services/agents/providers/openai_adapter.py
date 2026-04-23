@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.services.agents.agent_backends import get_backend_descriptor
-from app.services.agents.interfaces import AgentRuntimeError
+from app.services.agents.interfaces import AgentRuntimeError, UnsupportedCapabilityError
 from app.services.workspace.system_settings import get_effective_agent_model_family
 
 
@@ -121,24 +121,23 @@ class OpenAIResponsesRuntime:
     async def execute_task_with_orchestration(
         self, prompt: str, timeout_seconds: int = 300, orchestration_state: Any = None
     ) -> dict[str, Any]:
-        raise AgentRuntimeError(
-            "Backend 'openai_responses_api' supports direct prompt execution and planning, "
-            "but not full step-by-step orchestration yet."
+        raise UnsupportedCapabilityError(
+            "Backend 'openai_responses_api' does not support full step-by-step orchestration."
         )
 
     async def pause_session(self) -> None:
-        raise AgentRuntimeError(
+        raise UnsupportedCapabilityError(
             "Backend 'openai_responses_api' does not support checkpoint pause."
         )
 
     async def resume_session(self, checkpoint_name: Optional[str] = None) -> str:
-        raise AgentRuntimeError(
+        raise UnsupportedCapabilityError(
             "Backend 'openai_responses_api' does not support checkpoint resume."
         )
 
     async def stop_session(self) -> None:
-        raise AgentRuntimeError(
-            "Backend 'openai_responses_api' does not support remote stop after request completion."
+        raise UnsupportedCapabilityError(
+            "Backend 'openai_responses_api' does not support remote stop."
         )
 
     async def get_session_context(self) -> dict[str, Any]:
@@ -159,23 +158,6 @@ class OpenAIResponsesRuntime:
             ),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
-
-    def build_cli_agent_command(
-        self,
-        prompt: str,
-        *,
-        source_brain: str = "local",
-        timeout_seconds: int = 180,
-        session_prefix: str = "planning",
-    ) -> list[str]:
-        raise AgentRuntimeError(
-            "Backend 'openai_responses_api' does not expose a local CLI command path."
-        )
-
-    def parse_cli_response(self, proc: Any) -> dict[str, Any]:
-        raise AgentRuntimeError(
-            "Backend 'openai_responses_api' does not parse CLI subprocess output."
-        )
 
     def reports_context_overflow(self, result: Optional[dict[str, Any]]) -> bool:
         if not result:

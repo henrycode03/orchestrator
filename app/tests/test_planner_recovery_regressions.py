@@ -101,7 +101,7 @@ def test_handle_task_failure_queues_one_automatic_recovery_for_failed_ordered_ta
         validation_profile="implementation",
         runs_in_canonical_baseline=True,
         orchestration_state=None,
-        openclaw_service=None,
+        runtime_service=None,
         task_service=None,
         logger=logging.getLogger(__name__),
         emit_live=lambda *_args, **_kwargs: None,

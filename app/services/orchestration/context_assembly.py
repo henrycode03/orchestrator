@@ -355,23 +355,44 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
     )
 
 
-def assemble_execution_prompt(ctx: Any, step: Dict[str, Any]) -> str:
+def assemble_execution_prompt(
+    ctx: Any, step: Dict[str, Any], *, compact: bool = False
+) -> str:
     expected_files = step.get("expected_files", []) or []
+    workspace_max_files = 18 if compact else 40
+    project_context_max_chars = 700 if compact else 1500
+    recent_history_entries = 2 if compact else 3
+    recent_history_chars = 260 if compact else 500
+    validation_history_entries = 1 if compact else 2
+    validation_history_chars = 180 if compact else 400
+    instructions = [
+        "Treat the provided step commands as the primary implementation plan for this step.",
+        "Ground your work in the current workspace state.",
+    ]
+    if compact:
+        instructions.append(
+            "Keep your reasoning concise and avoid repeating workspace context."
+        )
+
     workspace_summary = build_workspace_inventory_summary(
         Path(ctx.orchestration_state.project_dir),
         expected_files=expected_files,
-        max_files=40,
+        max_files=workspace_max_files,
     )
     project_context = _shape_project_context(
         ctx.orchestration_state.project_context,
         workspace_summary=workspace_summary,
         recent_history=_condense_dict_events(
-            ctx.orchestration_state.phase_history, max_entries=3, max_chars=500
+            ctx.orchestration_state.phase_history,
+            max_entries=recent_history_entries,
+            max_chars=recent_history_chars,
         ),
         validation_history=_condense_dict_events(
-            ctx.orchestration_state.validation_history, max_entries=2, max_chars=400
+            ctx.orchestration_state.validation_history,
+            max_entries=validation_history_entries,
+            max_chars=validation_history_chars,
         ),
-        max_chars=1500,
+        max_chars=project_context_max_chars,
     )
     raw_prompt = PromptTemplates.build_execution_prompt(
         step_description=step.get("description", ""),
@@ -394,16 +415,14 @@ def assemble_execution_prompt(ctx: Any, step: Dict[str, Any]) -> str:
         ),
         execution_mode="step_execution",
         prompt_body=raw_prompt,
-        instructions=[
-            "Treat the provided step commands as the primary implementation plan for this step.",
-            "Ground your work in the current workspace state.",
-        ],
+        instructions=instructions,
         context={
             "Project Directory": str(ctx.orchestration_state.project_dir),
             "Verification Command": step.get("verification"),
             "Rollback Command": step.get("rollback"),
             "Expected Files": expected_files,
             "Execution Profile": ctx.execution_profile,
+            "Compact Retry": compact,
         },
         expected_output=(
             "Structured step result describing status, output, verification_output, "

@@ -295,9 +295,12 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 message=f"Session started: {session.name}",
                 log_metadata=json.dumps(
                     {
+                        "event_type": "session_started",
+                        "session_id": session_id,
+                        "instance_id": session_instance_id,
                         "session_key": session_key,
                         "task_description": task_description,
-                        "instance_id": session_instance_id,
+                        "execution_mode": session.execution_mode,
                     }
                 ),
             )
@@ -318,6 +321,13 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 session_id=session_id,
                 level="ERROR",
                 message=f"Failed to start session: {str(exc)}",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "session_start_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    }
+                ),
             )
         )
         db.commit()
@@ -373,6 +383,8 @@ async def stop_session_lifecycle(
                 message=f"Session stopped: {session.name}",
                 log_metadata=json.dumps(
                     {
+                        "event_type": "session_stopped",
+                        "session_id": session_id,
                         "force": force,
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,
@@ -396,6 +408,13 @@ async def stop_session_lifecycle(
                 session_id=session_id,
                 level="ERROR",
                 message=f"Failed to stop session: {str(exc)}",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "session_stop_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    }
+                ),
             )
         )
         db.commit()
@@ -446,6 +465,8 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 message=f"Session paused: {session.name}",
                 log_metadata=json.dumps(
                     {
+                        "event_type": "session_paused",
+                        "session_id": session_id,
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,
                         "reset_running_tasks": reset_count,
@@ -468,6 +489,13 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 session_id=session_id,
                 level="ERROR",
                 message=f"Failed to pause session: {str(exc)}",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "session_pause_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    }
+                ),
             )
         )
         db.commit()
@@ -546,6 +574,8 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
                 ),
                 log_metadata=json.dumps(
                     {
+                        "event_type": "session_resumed",
+                        "session_id": session_id,
                         "requested_checkpoint_name": requested_checkpoint_name,
                         "checkpoint_name": checkpoint_name,
                         "resolved_checkpoint_name": checkpoint_name,
@@ -580,6 +610,13 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
                 session_id=session_id,
                 level="ERROR",
                 message=f"Failed to resume session: {str(exc)}",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "session_resume_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    }
+                ),
             )
         )
         db.commit()

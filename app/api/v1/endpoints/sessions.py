@@ -409,20 +409,6 @@ class StartSessionRequest(BaseModel):
     task_description: str
 
 
-@router.post("/sessions/{session_id}/start")
-async def start_session_execution(
-    session_id: int,
-    request: StartSessionRequest,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """Start a backend-neutral orchestration session for a task."""
-
-    return await _start_agent_session_payload(
-        db, session_id, task_description=request.task_description
-    )
-
-
 @router.post("/sessions/{session_id}/start-openclaw")
 async def start_openclaw_session_compat(
     session_id: int,

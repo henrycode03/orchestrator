@@ -64,6 +64,7 @@ def _make_ctx(tmp_path):
     ]
 
     return SimpleNamespace(
+        db=None,
         prompt="Build a TypeScript module with tests in the current workspace",
         execution_profile="full_lifecycle",
         orchestration_state=state,
@@ -109,10 +110,40 @@ def test_assembled_prompts_trim_dense_context_but_keep_workspace_inventory(tmp_p
 
     assert "Current workspace inventory:" in planning_prompt
     assert "src/main.ts" in planning_prompt
-    assert len(planning_prompt) < 5200
+    assert len(planning_prompt) < 5800
     assert "Current workspace inventory:" in execution_prompt
     assert "tests/main.test.ts" in execution_prompt
-    assert len(execution_prompt) < 6200
+    assert len(execution_prompt) < 6800
+
+
+def test_compact_execution_prompt_is_smaller_but_keeps_workspace_truth(tmp_path):
+    ctx = _make_ctx(tmp_path)
+
+    regular_prompt = assemble_execution_prompt(
+        ctx,
+        {
+            "description": "Run tests",
+            "commands": ["npm test"],
+            "verification": "npm test",
+            "rollback": None,
+            "expected_files": ["tests/main.test.ts"],
+        },
+    )
+    compact_prompt = assemble_execution_prompt(
+        ctx,
+        {
+            "description": "Run tests",
+            "commands": ["npm test"],
+            "verification": "npm test",
+            "rollback": None,
+            "expected_files": ["tests/main.test.ts"],
+        },
+        compact=True,
+    )
+
+    assert "Current workspace inventory:" in compact_prompt
+    assert "tests/main.test.ts" in compact_prompt
+    assert len(compact_prompt) < len(regular_prompt)
 
 
 def test_completion_repair_inputs_are_summary_only_and_workspace_driven(tmp_path):

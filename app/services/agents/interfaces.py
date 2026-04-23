@@ -9,6 +9,10 @@ class AgentRuntimeError(Exception):
     """Backend-neutral runtime failure raised by provider adapters."""
 
 
+class UnsupportedCapabilityError(AgentRuntimeError):
+    """Raised when the active backend does not support a requested capability."""
+
+
 class AgentRuntime(Protocol):
     """Minimal runtime contract shared by orchestration entrypoints."""
 
@@ -44,16 +48,5 @@ class AgentRuntime(Protocol):
     ) -> dict[str, Any]: ...
 
     def get_backend_metadata(self) -> dict[str, Any]: ...
-
-    def build_cli_agent_command(
-        self,
-        prompt: str,
-        *,
-        source_brain: str = "local",
-        timeout_seconds: int = 180,
-        session_prefix: str = "planning",
-    ) -> list[str]: ...
-
-    def parse_cli_response(self, proc: Any) -> dict[str, Any]: ...
 
     def reports_context_overflow(self, result: Optional[dict[str, Any]]) -> bool: ...

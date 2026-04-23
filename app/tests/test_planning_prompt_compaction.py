@@ -110,34 +110,6 @@ def test_clarification_payload_parser_falls_back_on_invalid_json():
     }
 
 
-def test_openclaw_command_honors_source_brain(monkeypatch):
-    class _FakeQuery:
-        def filter(self, *args, **kwargs):
-            return self
-
-        def first(self):
-            return None
-
-    class _FakeDb:
-        def query(self, *args, **kwargs):
-            return _FakeQuery()
-
-    service = PlanningSessionService(db=_FakeDb())  # type: ignore[arg-type]
-
-    monkeypatch.setattr(
-        OpenClawSessionService,
-        "_resolve_openclaw_command",
-        lambda self: ["/usr/bin/openclaw"],
-    )
-
-    local_cmd = service._build_openclaw_command("plan locally", source_brain="local")
-    cloud_cmd = service._build_openclaw_command("plan in cloud", source_brain="cloud")
-
-    assert local_cmd[:3] == ["/usr/bin/openclaw", "agent", "--local"]
-    assert "--local" not in cloud_cmd
-    assert cloud_cmd[:2] == ["/usr/bin/openclaw", "agent"]
-
-
 def test_synthesis_prompt_uses_db_selected_adaptation_profile(db_session):
     db_session.add(
         SystemSetting(

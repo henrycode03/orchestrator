@@ -1,8 +1,7 @@
 from app.config import settings
 from app.services.agents.agent_backends import UnsupportedAgentBackendError
-from app.services.agents.interfaces import AgentRuntimeError
+from app.services.agents.interfaces import AgentRuntimeError, UnsupportedCapabilityError
 from app.services.agents.agent_runtime import (
-    build_runtime_cli_agent_command,
     create_agent_runtime,
     invoke_runtime_prompt,
     runtime_reports_context_overflow,
@@ -52,23 +51,8 @@ def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
     assert runtime.backend_descriptor.name == "local_openclaw"
 
 
-def test_build_runtime_cli_agent_command_uses_active_runtime(db_session, monkeypatch):
-    monkeypatch.setattr(
-        OpenClawSessionService,
-        "_resolve_openclaw_command",
-        lambda self: ["/usr/bin/openclaw"],
-    )
-
-    command = build_runtime_cli_agent_command(
-        db_session,
-        "Generate planning artifacts",
-        source_brain="local",
-        timeout_seconds=90,
-    )
-
-    assert command[:3] == ["/usr/bin/openclaw", "agent", "--local"]
-    assert "--timeout" in command
-    assert "90" in command
+def test_unsupported_capability_error_is_runtime_neutral():
+    assert issubclass(UnsupportedCapabilityError, AgentRuntimeError)
 
 
 def test_runtime_reports_context_overflow_matches_openclaw_detector(db_session):

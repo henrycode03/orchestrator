@@ -24,7 +24,6 @@ from app.models import (
 )
 from app.schemas import PlannerTaskCandidate
 from app.services.agents.agent_runtime import (
-    build_runtime_cli_agent_command,
     invoke_runtime_prompt,
     runtime_reports_context_overflow,
 )
@@ -456,23 +455,6 @@ class PlanningSessionService:
         session.completed_at = datetime.now(timezone.utc)
         session.updated_at = datetime.now(timezone.utc)
         session.last_error = None
-
-    def _build_openclaw_command(
-        self,
-        prompt: str,
-        *,
-        source_brain: str = "local",
-        timeout_seconds: int = 180,
-    ) -> list[str]:
-        return build_runtime_cli_agent_command(
-            self.db,
-            prompt,
-            session_id=None,
-            task_id=None,
-            source_brain=source_brain,
-            timeout_seconds=timeout_seconds,
-            session_prefix="planning",
-        )
 
     def _run_openclaw(
         self, prompt: str, *, source_brain: str = "local"

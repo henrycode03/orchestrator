@@ -260,6 +260,30 @@ def execute_step_loop(
                 timeout_seconds=step_timeout_seconds,
             )
         )
+        if runtime_service.reports_context_overflow(step_result):
+            logger.warning(
+                "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
+                "retrying with compact prompt",
+                step_index + 1,
+            )
+            emit_live(
+                "WARN",
+                f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
+                metadata={
+                    "phase": "executing",
+                    "step_index": step_index + 1,
+                    "compact_retry": True,
+                },
+            )
+            compact_execution_prompt = assemble_execution_prompt(
+                ctx, step, compact=True
+            )
+            step_result = asyncio.run(
+                runtime_service.execute_task(
+                    compact_execution_prompt,
+                    timeout_seconds=step_timeout_seconds,
+                )
+            )
         step_result = coerce_execution_step_result(
             step_result,
             expected_files=expected_files,

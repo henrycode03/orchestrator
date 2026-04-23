@@ -11,14 +11,11 @@ from .agent_backends import (
     require_backend_descriptor,
 )
 from .agent_runtime import (
-    build_runtime_cli_agent_command,
     create_agent_runtime,
     invoke_runtime_prompt,
-    parse_runtime_cli_response,
     runtime_reports_context_overflow,
 )
-from .interfaces import AgentRuntime, AgentRuntimeError
-from .openclaw_service import OpenClawSessionError, OpenClawSessionService
+from .interfaces import AgentRuntime, AgentRuntimeError, UnsupportedCapabilityError
 
 __all__ = [
     "BackendCapabilities",
@@ -31,11 +28,8 @@ __all__ = [
     "require_backend_descriptor",
     "AgentRuntime",
     "AgentRuntimeError",
-    "build_runtime_cli_agent_command",
+    "UnsupportedCapabilityError",
     "create_agent_runtime",
     "invoke_runtime_prompt",
-    "parse_runtime_cli_response",
     "runtime_reports_context_overflow",
-    "OpenClawSessionError",
-    "OpenClawSessionService",
 ]
