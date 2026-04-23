@@ -100,7 +100,7 @@ Most important values:
 - `CELERY_BROKER_URL`: Redis broker URL
 - `CELERY_RESULT_BACKEND`: Redis result backend URL
 - `VITE_API_URL`: frontend API base, default `/api/v1`
-- `VITE_API_WS_HOST`: optional override when the backend is on another host
+- `VITE_API_WS_HOST`: optional override when WebSockets should use a different host than the API base
 
 Optional values:
 

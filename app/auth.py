@@ -1,6 +1,6 @@
 """Authentication utilities - JWT and Ed25519"""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from jose import JWTError, jwt
 import bcrypt
@@ -33,9 +33,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """Create JWT access token."""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(
+        expire = datetime.now(timezone.utc) + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
 
@@ -48,9 +48,9 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) 
     """Create JWT refresh token."""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(days=7)
+        expire = datetime.now(timezone.utc) + timedelta(days=7)
 
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
@@ -125,7 +125,9 @@ def generate_ed25519_keypair() -> tuple[str, str]:
     from nacl import signing
 
     key_pair = signing.SigningKey.generate()
-    public_key = nacl.encoding.Base64.encode(key_pair.verify_key).decode("utf-8")
-    private_key = nacl.encoding.Base64.encode(key_pair).decode("utf-8")
+    public_key = nacl.encoding.Base64Encoder.encode(bytes(key_pair.verify_key)).decode(
+        "utf-8"
+    )
+    private_key = nacl.encoding.Base64Encoder.encode(bytes(key_pair)).decode("utf-8")
 
     return public_key, private_key

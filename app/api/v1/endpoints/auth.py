@@ -1,12 +1,21 @@
 """Authentication endpoints"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import hashlib
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    BackgroundTasks,
+    Header,
+    Request,
+)
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models import User, APIKey, Device
 from app.schemas import (
@@ -33,9 +42,9 @@ from app.auth import (
     generate_ed25519_keypair,
 )
 from app.dependencies import get_current_user, get_current_active_user
+from app.services.auth_rate_limit import enforce_auth_rate_limit
 
 router = APIRouter()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
 
 
 # Helper dependency to get user by API key
@@ -48,7 +57,7 @@ def get_user_by_api_key(api_key: str, db: Session) -> Optional[User]:
         return None
 
     # Update last_used timestamp
-    api_key_record.last_used = datetime.utcnow()
+    api_key_record.last_used = datetime.now(timezone.utc)
     db.commit()
 
     return db.query(User).filter(User.id == api_key_record.user_id).first()
@@ -91,7 +100,10 @@ def get_api_key_dependency():
     "/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED
 )
 def register(
-    user: UserCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+    user: UserCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
 ):
     """
     Register a new user.
@@ -101,6 +113,8 @@ def register(
 
     Returns the user object (without password).
     """
+    enforce_auth_rate_limit(request, "register")
+
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == user.email).first()
     if existing_user:
@@ -126,7 +140,9 @@ def register(
 
 @router.post("/login", response_model=Token, deprecated=True)
 def login_login_form(
-    form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
 ):
     """
     Legacy login endpoint (deprecated). Use /tokens endpoint instead.
@@ -134,6 +150,8 @@ def login_login_form(
     - **username**: User's email
     - **password**: User's password
     """
+    enforce_auth_rate_limit(request, "login")
+
     user = db.query(User).filter(User.email == form_data.username).first()
 
     if not user or not verify_password(form_data.password, user.hashed_password):
@@ -160,13 +178,15 @@ def login_login_form(
 
 
 @router.post("/tokens", response_model=Token)
-def get_tokens(credentials: UserLogin, db: Session = Depends(get_db)):
+def get_tokens(credentials: UserLogin, request: Request, db: Session = Depends(get_db)):
     """
     Login and get access/refresh tokens.
 
     - **email**: User's email
     - **password**: User's password
     """
+    enforce_auth_rate_limit(request, "tokens")
+
     user = db.query(User).filter(User.email == credentials.email).first()
 
     if not user or not verify_password(credentials.password, user.hashed_password):
@@ -191,12 +211,16 @@ def get_tokens(credentials: UserLogin, db: Session = Depends(get_db)):
 
 
 @router.post("/refresh", response_model=Token)
-def refresh_token(token_data: TokenRefresh, db: Session = Depends(get_db)):
+def refresh_token(
+    token_data: TokenRefresh, request: Request, db: Session = Depends(get_db)
+):
     """
     Refresh access token using refresh token.
 
     - **refresh_token**: Valid refresh token
     """
+    enforce_auth_rate_limit(request, "refresh")
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate refresh token",
@@ -432,6 +456,12 @@ def generate_keypair():
     ⚠️ **Production use**: Clients should generate their own keypairs
     locally and never transmit private keys over the network.
     """
+    if not settings.ALLOW_TEST_KEYPAIR_ENDPOINT:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
+
     public_key, private_key = generate_ed25519_keypair()
 
     return {

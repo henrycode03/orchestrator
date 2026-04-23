@@ -18,7 +18,9 @@ def _create_project(db_session, name: str = "Planning Background Project") -> Pr
     return project
 
 
-def test_start_session_processes_inline_under_pytest(db_session, monkeypatch):
+def test_start_session_processes_inline_when_force_inline_enabled(
+    db_session, monkeypatch
+):
     project = _create_project(db_session)
 
     monkeypatch.setattr(

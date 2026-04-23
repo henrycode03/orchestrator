@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # Auth
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 5
 
     # OpenClaw integration
     # Default to the local OpenClaw gateway, not the LLM-only port.
@@ -61,6 +63,8 @@ class Settings(BaseSettings):
 
     # Demo mode flag - set to True for testing, False for real execution
     DEMO_MODE: bool = False  # Disabled (real execution enabled)
+    ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
+    ORCHESTRATOR_FORCE_INLINE_PLANNING: bool = False
 
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"

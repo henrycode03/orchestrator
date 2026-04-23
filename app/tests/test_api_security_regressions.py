@@ -1,4 +1,11 @@
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+from app.config import settings
 from app.models import Project, Session as SessionModel, Task, TaskStatus
+from app.api.v1.endpoints.auth import generate_keypair
+from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_auth_rate_limit
 
 
 def test_session_create_starts_pending_and_inactive(authenticated_client, db_session):
@@ -90,3 +97,67 @@ def test_session_routes_require_authentication(api_client, db_session):
     response = api_client.get(f"/api/v1/sessions/{session.id}")
 
     assert response.status_code == 401
+
+
+def _build_request(client_host: str = "127.0.0.1") -> Request:
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v1/auth/tokens",
+        "headers": [],
+        "client": (client_host, 12345),
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "query_string": b"",
+    }
+    return Request(scope)
+
+
+def test_generate_keypair_is_disabled_by_default():
+    with pytest.raises(HTTPException) as exc_info:
+        generate_keypair()
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Not found"
+
+
+def test_generate_keypair_can_be_enabled_for_testing():
+    settings.ALLOW_TEST_KEYPAIR_ENDPOINT = True
+
+    payload = generate_keypair()
+    assert payload["public_key"]
+    assert payload["private_key"]
+
+
+def test_auth_token_endpoint_is_rate_limited():
+    settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS = 2
+    settings.AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
+    clear_auth_rate_limits()
+
+    request = _build_request()
+    enforce_auth_rate_limit(request, "tokens")
+    enforce_auth_rate_limit(request, "tokens")
+
+    with pytest.raises(HTTPException) as exc_info:
+        enforce_auth_rate_limit(request, "tokens")
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers["Retry-After"]
+
+
+def test_auth_refresh_endpoint_is_rate_limited_per_action_and_client():
+    settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS = 1
+    settings.AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
+    clear_auth_rate_limits()
+
+    first_client = _build_request("127.0.0.1")
+    second_client = _build_request("127.0.0.2")
+
+    enforce_auth_rate_limit(first_client, "refresh")
+    enforce_auth_rate_limit(second_client, "refresh")
+    enforce_auth_rate_limit(first_client, "tokens")
+
+    with pytest.raises(HTTPException) as exc_info:
+        enforce_auth_rate_limit(first_client, "refresh")
+
+    assert exc_info.value.status_code == 429

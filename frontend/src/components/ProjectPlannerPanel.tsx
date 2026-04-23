@@ -480,7 +480,7 @@ export function ProjectPlannerPanel({
       <div className="space-y-3">
         {tasks.map((task, index) => (
           <div
-            key={`${task.title}-${index}`}
+            key={index}
             className="rounded-xl border border-slate-700 bg-slate-900/60 p-4"
           >
             <div className="flex items-start gap-3">

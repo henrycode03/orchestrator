@@ -3,7 +3,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 import { ProjectPlannerPanel } from '../ProjectPlannerPanel'
-import { plannerAPI, planningAPI, projectsAPI } from '@/api/client'
+import { planningAPI, projectsAPI } from '@/api/client'
+
 import type {
   PlannerTaskCandidate,
   PlanningCommitPreview,

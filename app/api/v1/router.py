@@ -89,7 +89,6 @@ api_router.include_router(
 api_router.include_router(
     sessions.router,
     tags=["sessions"],
-    dependencies=[Depends(get_current_active_user)],
 )
 
 api_router.include_router(

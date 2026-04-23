@@ -87,6 +87,7 @@ export default function SessionDetail() {
   const [checkpointCount, setCheckpointCount] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldReconnectRef = useRef(true);
 
   const parseApiDate = useCallback((value?: string | null): Date | null => {
     if (!value) return null;
@@ -245,6 +246,10 @@ export default function SessionDetail() {
       return;
     }
 
+    if (wsRef.current) {
+      return;
+    }
+
     try {
       wsRef.current = sessionsAPI.getLogsStream(session_id);
       console.log('Attempting WebSocket connection:', wsRef.current.url);
@@ -317,6 +322,13 @@ export default function SessionDetail() {
       };
 
       wsRef.current.onclose = () => {
+        if (!shouldReconnectRef.current) {
+          console.log('WebSocket closed');
+          setWsConnected(false);
+          wsRef.current = null;
+          return;
+        }
+
         console.log('WebSocket closed, reconnecting...');
         setWsConnected(false);
         wsRef.current = null;
@@ -329,6 +341,27 @@ export default function SessionDetail() {
       setWsConnected(false);
     }
   }, [applyLogView, formatLogTimestamp, logVerbosity, logViewMode, pushTimelineEvent]);
+
+  const scheduleWebSocketConnect = useCallback(
+    (session_id: number, delayMs: number = 0) => {
+      shouldReconnectRef.current = true;
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      if (wsRef.current) {
+        return;
+      }
+
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        setupWebSocket(session_id);
+      }, delayMs);
+    },
+    [setupWebSocket]
+  );
 
   useEffect(() => {
     if (!sessionId) {
@@ -350,7 +383,7 @@ export default function SessionDetail() {
         
         // Only connect WebSocket if session is running or paused
         if (sessionRes.data.status === 'running' || sessionRes.data.status === 'paused') {
-          setupWebSocket(sessionRes.data.id);
+          scheduleWebSocketConnect(sessionRes.data.id);
         } else {
           console.log(`Session is ${sessionRes.data.status}, not connecting WebSocket yet`);
         }
@@ -403,7 +436,7 @@ export default function SessionDetail() {
         // If session changed to running/paused, connect WebSocket
         if ((currentStatus === 'running' || currentStatus === 'paused') && !wsRef.current) {
           console.log(`Session is now ${currentStatus}, connecting WebSocket...`);
-          setupWebSocket(Number(sessionId));
+          scheduleWebSocketConnect(Number(sessionId), 1000);
         }
 
         if (currentStatus === 'stopped' || currentStatus === 'paused') {
@@ -416,6 +449,7 @@ export default function SessionDetail() {
 
     // Cleanup WebSocket and interval on unmount
     return () => {
+      shouldReconnectRef.current = false;
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -453,11 +487,8 @@ export default function SessionDetail() {
       console.log('Updated session:', updated.data);
       setSession(updated.data);
       if (updated.data.status === 'running' || updated.data.status === 'paused') {
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
         if (!wsRef.current) {
-          setupWebSocket(Number(sessionId));
+          scheduleWebSocketConnect(Number(sessionId), 1000);
         }
       }
       pushTimelineEvent(`Session started with status: ${updated.data.status}`, 'INFO');
@@ -520,6 +551,14 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       await loadCheckpointCount(Number(sessionId));
+      shouldReconnectRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     } catch (error) {
       setSession(previousSession);
       console.error('Failed to pause session:', error);
@@ -564,11 +603,8 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       await loadCheckpointCount(Number(sessionId));
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
       if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
-        setupWebSocket(Number(sessionId));
+        scheduleWebSocketConnect(Number(sessionId), 1200);
       }
     } catch (error) {
       setSession(previousSession);
@@ -613,13 +649,13 @@ export default function SessionDetail() {
       setSession(updatedSession.data);
       setTasks(updatedTasks.data || []);
       if (!wsRef.current) {
-        setupWebSocket(Number(sessionId));
+        scheduleWebSocketConnect(Number(sessionId), 800);
       }
     } catch (error) {
       console.error('Failed to run task manually:', error);
       alert('Failed to queue the selected task');
     }
-  }, [pushTimelineEvent, sessionId, setupWebSocket]);
+  }, [pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   const handleExecutionModeChange = useCallback(async (mode: 'automatic' | 'manual') => {
     if (!sessionId || !session) return;

@@ -133,6 +133,7 @@ def list_sessions(
 def get_project_sessions(
     project_id: int,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
     skip: int = 0,
     limit: int = 100,
     is_active: Optional[bool] = None,
@@ -591,7 +592,10 @@ async def resume_session(
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")
 def get_prompt_template(
-    session_id: int, template_name: str, db: Session = Depends(get_db)
+    session_id: int,
+    template_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     """Get a prompt template for the session"""
     template = PromptTemplates.get_template(template_name)
@@ -611,6 +615,7 @@ def get_prompt_template(
 def get_session_logs(
     session_id: int,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
     limit: Optional[int] = 100,
     offset: int = 0,
 ):
@@ -635,6 +640,7 @@ def get_session_logs(
 def get_sorted_logs(
     session_id: int,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
     order: str = "asc",  # "asc" for oldest first, "desc" for newest first
     deduplicate: bool = True,  # Remove duplicate entries
     level: Optional[str] = None,  # Optional filter by log level
@@ -673,6 +679,7 @@ async def generate_steps_from_description(
     request: Request,
     body: dict,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     """Generate task steps using OpenClaw AI"""
     task_name = body.get("task_name", "Task")

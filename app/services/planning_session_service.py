@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess as _subprocess
 import uuid
@@ -15,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
     Plan,
     PlanningArtifact,
@@ -367,10 +367,7 @@ class PlanningSessionService:
 
     @staticmethod
     def _should_process_inline() -> bool:
-        return (
-            os.environ.get("PYTEST_CURRENT_TEST") is not None
-            or os.environ.get("ORCHESTRATOR_FORCE_INLINE_PLANNING") == "1"
-        )
+        return settings.ORCHESTRATOR_FORCE_INLINE_PLANNING
 
     def _advance_or_finalize(self, session: PlanningSession, project: Project) -> None:
         question_count = len([m for m in session.messages if m.role == "assistant"])
@@ -498,28 +495,17 @@ class PlanningSessionService:
             raise RuntimeError("Planning synthesis timed out after 180s")
         return service._parse_openclaw_response(proc)
 
-    def _invoke_openclaw(
-        self, prompt: str, *, source_brain: str = "local"
-    ) -> dict[str, Any]:
-        """Call _run_openclaw with backward compatibility for older monkeypatched tests."""
-        try:
-            return self._run_openclaw(prompt, source_brain=source_brain)
-        except TypeError as exc:
-            if "source_brain" not in str(exc) and "positional argument" not in str(exc):
-                raise
-            return self._run_openclaw(prompt)  # type: ignore[call-arg]
-
     def _run_openclaw_with_fallback(
         self, prompt: str, *, source_brain: str = "local"
     ) -> dict[str, Any]:
-        result = self._invoke_openclaw(prompt, source_brain=source_brain)
+        result = self._run_openclaw(prompt, source_brain=source_brain)
         if not OpenClawSessionService._is_context_overflow_result(result):
             return result
 
         compact_prompt = self._build_compact_synthesis_prompt(prompt)
         if compact_prompt == prompt:
             return result
-        return self._invoke_openclaw(compact_prompt, source_brain=source_brain)
+        return self._run_openclaw(compact_prompt, source_brain=source_brain)
 
     def _parse_finalization_payload(self, result: dict[str, Any]) -> dict[str, str]:
         if result.get("status") == "failed":

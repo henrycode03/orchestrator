@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskStatus
@@ -119,7 +119,7 @@ def execute_step_loop(
                 db, session_id, task_id, prompt, orchestration_state
             )
             task.status = TaskStatus.CANCELLED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
             if session_task_link:
                 session_task_link.status = TaskStatus.CANCELLED
                 session_task_link.completed_at = task.completed_at
@@ -199,7 +199,7 @@ def execute_step_loop(
                 task.error_message = manual_gate_message
                 if session_task_link:
                     session_task_link.status = TaskStatus.FAILED
-                    session_task_link.completed_at = datetime.utcnow()
+                    session_task_link.completed_at = datetime.now(timezone.utc)
                 session.status = "paused"
                 session.is_active = False
                 set_session_alert(session, "error", manual_gate_message)
@@ -253,7 +253,7 @@ def execute_step_loop(
             task_prompt=prompt,
         )
 
-        step_started_at = datetime.utcnow()
+        step_started_at = datetime.now(timezone.utc)
         step_result = asyncio.run(
             openclaw_service.execute_task(
                 execution_prompt,
@@ -418,6 +418,7 @@ def execute_step_loop(
             )
             continue
 
+        extra_context = ""
         if step_status == "failed":
             cleanup_summary = ExecutorService.cleanup_failed_step_artefacts(
                 project_dir=orchestration_state.project_dir,
@@ -434,8 +435,6 @@ def execute_step_loop(
                     "and have been removed so you must regenerate their full content: "
                     + ", ".join(cleanup_summary["removed_files"][:10])
                 )
-            else:
-                extra_context = ""
 
             if scope_violations:
                 extra_context += (
@@ -518,6 +517,9 @@ def execute_step_loop(
             orchestration_state.abort_reason = manual_gate_message
             task.status = TaskStatus.FAILED
             task.error_message = manual_gate_message
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
             set_session_alert(session, "error", manual_gate_message)
             restore_workspace_snapshot_if_needed("repeated tool/path failures")
@@ -574,6 +576,9 @@ def execute_step_loop(
                 f"Step failed after {current_attempt} attempts: "
                 f"{step_record.error_message[:500]}"
             )
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
             restore_workspace_snapshot_if_needed("max step attempts reached")
             write_project_state_snapshot_fn(db, project, task, session_id)

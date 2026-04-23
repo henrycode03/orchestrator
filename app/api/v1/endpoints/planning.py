@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Project
+from app.dependencies import get_current_active_user
+from app.models import Project, User
 from app.schemas import (
     PlanResponse,
     PlanningSessionCommitRequest,
@@ -32,6 +33,7 @@ class PlanningCommitResponse(PlanningSessionResponse):
 def list_planning_sessions(
     project_id: Optional[int] = None,
     db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
 ):
     return PlanningSessionService(db).list_sessions(project_id=project_id)
 
@@ -42,7 +44,9 @@ def list_planning_sessions(
     status_code=status.HTTP_201_CREATED,
 )
 def start_planning_session(
-    payload: PlanningSessionCreateRequest, db: Session = Depends(get_db)
+    payload: PlanningSessionCreateRequest,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
 ):
     project = (
         db.query(Project)
@@ -60,7 +64,11 @@ def start_planning_session(
 
 
 @router.get("/sessions/{session_id}", response_model=PlanningSessionResponse)
-def get_planning_session(session_id: int, db: Session = Depends(get_db)):
+def get_planning_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
+):
     service = PlanningSessionService(db)
     session = service.get_session(session_id)
     return service.build_session_payload(session)
@@ -71,6 +79,7 @@ def respond_to_planning_session(
     session_id: int,
     payload: PlanningSessionRespondRequest,
     db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
 ):
     service = PlanningSessionService(db)
     session = service.respond(session_id, payload.response)
@@ -78,7 +87,11 @@ def respond_to_planning_session(
 
 
 @router.post("/sessions/{session_id}/cancel", response_model=PlanningSessionResponse)
-def cancel_planning_session(session_id: int, db: Session = Depends(get_db)):
+def cancel_planning_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
+):
     service = PlanningSessionService(db)
     session = service.cancel(session_id)
     return service.build_session_payload(session)
@@ -89,6 +102,7 @@ def commit_planning_session(
     session_id: int,
     payload: PlanningSessionCommitRequest,
     db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
 ):
     service = PlanningSessionService(db)
     session, plan, tasks = service.commit(

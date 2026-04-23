@@ -28,45 +28,52 @@ const getBrowserSafeHost = (host: string): string => {
   if (!host) {
     return host;
   }
+
+  const [hostname, ...portParts] = host.split(':');
+  const portSuffix = portParts.length > 0 ? `:${portParts.join(':')}` : '';
+
   // 0.0.0.0 is valid bind address for servers, but not a stable browser target.
-  if (host.startsWith('0.0.0.0')) {
+  if (hostname === '0.0.0.0') {
     const fallbackHost = window.location.hostname || '127.0.0.1';
-    const withPort = host.includes(':') ? `:${host.split(':')[1]}` : '';
-    return `${fallbackHost}${withPort}`;
+    return `${fallbackHost}${portSuffix}`;
   }
+
+  // Firefox can prefer IPv6 for localhost during WebSocket connection attempts,
+  // while local dev servers are commonly bound only on IPv4.
+  if (hostname === 'localhost') {
+    return `127.0.0.1${portSuffix}`;
+  }
+
   return host;
 };
 
 const getWebSocketHost = (): string => {
-  // When the dev frontend is using the Vite proxy on the same origin,
-  // keep WebSockets on that same origin too so proxying works consistently.
-  if (import.meta.env.DEV) {
-    try {
-      const apiUrl = new URL(API_BASE_URL, window.location.origin);
-      if (apiUrl.host === window.location.host) {
-        return window.location.host;
-      }
-    } catch {
-      return window.location.host;
-    }
-  }
-
   const wsHostFromEnv = import.meta.env.VITE_API_WS_HOST;
   if (wsHostFromEnv) {
     return getBrowserSafeHost(wsHostFromEnv);
   }
 
-  // In dev, prefer same-origin websocket + Vite proxy to avoid host/CORS mismatches.
   if (import.meta.env.DEV) {
-    return window.location.host;
+    try {
+      const apiUrl = new URL(API_BASE_URL, window.location.origin);
+      if (apiUrl.origin !== window.location.origin) {
+        return getBrowserSafeHost(apiUrl.host);
+      }
+    } catch {
+      // Fall through to the local backend default below.
+    }
+
+    // In local dev, a relative API base like "/api/v1" means the HTTP calls
+    // are using the Vite proxy. WebSockets should target the backend directly.
+    return `${getBrowserSafeHost(window.location.hostname || '127.0.0.1')}:8080`;
   }
 
   // Keep WS host aligned with the API base URL when possible.
   try {
-    const apiUrl = new URL(API_BASE_URL);
+    const apiUrl = new URL(API_BASE_URL, window.location.origin);
     return getBrowserSafeHost(apiUrl.host);
   } catch {
-    return `${window.location.hostname || '127.0.0.1'}:8080`;
+    return `${getBrowserSafeHost(window.location.hostname || '127.0.0.1')}:8080`;
   }
 };
 
@@ -102,10 +109,7 @@ apiClient.interceptors.response.use(
 
       try {
         const refreshToken = localStorage.getItem('refresh_token');
-        console.log('Attempting token refresh with refresh_token:', refreshToken ? 'exists' : 'missing');
-        
         if (!refreshToken) {
-          console.error('No refresh token found, redirecting to login');
           localStorage.removeItem('access_token');
           localStorage.removeItem('refresh_token');
           window.location.href = '/login';
@@ -116,7 +120,6 @@ apiClient.interceptors.response.use(
           refresh_token: refreshToken,
         });
 
-        console.log('Token refresh successful');
         const { access_token, refresh_token } = response.data;
         localStorage.setItem('access_token', access_token);
         if (refresh_token) {
@@ -126,7 +129,6 @@ apiClient.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${access_token}`;
         return apiClient(originalRequest);
       } catch (refreshError) {
-        console.error('Token refresh failed:', refreshError);
         localStorage.removeItem('access_token');
         localStorage.removeItem('refresh_token');
         window.location.href = '/login';
