@@ -19,6 +19,7 @@ import type {
   WorkspaceInfo,
   SessionFilters,
   CheckpointInspection,
+  OrchestrationEvent,
   AppSettings,
 } from '../types/api';
 
@@ -480,6 +481,15 @@ export const sessionsAPI = {
     apiClient.get<CheckpointInspection>(
       `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`
     ),
+
+  getTaskEvents: (sessionId: number, taskId: number, eventType?: string) =>
+    apiClient.get<{
+      session_id: number;
+      task_id: number;
+      events: OrchestrationEvent[];
+    }>(`/sessions/${sessionId}/tasks/${taskId}/events`, {
+      params: eventType ? { event_type: eventType } : undefined,
+    }),
 
   replayCheckpoint: (sessionId: number, checkpointName: string) =>
     apiClient.post<{ 

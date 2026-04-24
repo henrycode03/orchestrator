@@ -22,6 +22,9 @@ type TimelineEventType =
   | 'revising_plan'
   | 'summarizing'
   | 'checkpoint'
+  | 'validation'
+  | 'repair'
+  | 'task'
   | 'error'
   | 'status'
   | 'info';
@@ -333,6 +336,9 @@ export function SessionLogsPanel({
                         event.type === 'revising_plan' && 'text-fuchsia-400',
                         event.type === 'summarizing' && 'text-teal-400',
                         event.type === 'checkpoint' && 'text-emerald-400',
+                        event.type === 'validation' && 'text-lime-400',
+                        event.type === 'repair' && 'text-orange-400',
+                        event.type === 'task' && 'text-sky-400',
                         event.type === 'status' && 'text-cyan-400',
                         event.type === 'info' && 'text-slate-300'
                       )}

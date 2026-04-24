@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
-import type { Checkpoint, CheckpointInspection, Session, Task, Project } from '@/types/api';
+import type {
+  Checkpoint,
+  CheckpointInspection,
+  OrchestrationEvent,
+  Project,
+  Session,
+  Task,
+} from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { LoadingSpinner } from '@/components/ui';
 import {
@@ -22,6 +29,9 @@ type TimelineEventType =
   | 'revising_plan'
   | 'summarizing'
   | 'checkpoint'
+  | 'validation'
+  | 'repair'
+  | 'task'
   | 'error'
   | 'status'
   | 'info';
@@ -69,6 +79,8 @@ const NOISY_LOG_PATTERNS = [
   /^"skills":\s*{$/,
 ];
 
+const MAX_TIMELINE_EVENTS = 150;
+
 export default function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
@@ -90,6 +102,7 @@ export default function SessionDetail() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
+  const seenOrchestrationTimelineKeysRef = useRef<Set<string>>(new Set());
 
   const parseApiDate = useCallback((value?: string | null): Date | null => {
     if (!value) return null;
@@ -229,8 +242,289 @@ export default function SessionDetail() {
 
   const pushTimelineEvent = useCallback((message: string, level?: string, at?: string) => {
     const event = classifyTimelineEvent(message, level, at);
-    setTimelineEvents(prev => [...prev.slice(-99), event]);
+    setTimelineEvents(prev => [...prev.slice(-(MAX_TIMELINE_EVENTS - 1)), event]);
   }, [classifyTimelineEvent]);
+
+  const humanizeToken = useCallback((value?: string | null) => {
+    return (value || '')
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }, []);
+
+  const buildOrchestrationTimelineKey = useCallback((event: OrchestrationEvent) => {
+    return JSON.stringify([
+      event.timestamp || '',
+      event.event_type || '',
+      event.task_id ?? null,
+      event.details || {},
+    ]);
+  }, []);
+
+  const detailToText = useCallback((value: unknown): string | null => {
+    if (typeof value === 'string') {
+      return value.trim() || null;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    if (Array.isArray(value)) {
+      const joined = value
+        .map((item) => detailToText(item))
+        .filter((item): item is string => Boolean(item))
+        .join(', ');
+      return joined || null;
+    }
+    return null;
+  }, []);
+
+  const toTimelineEventFromOrchestrationEvent = useCallback((event: OrchestrationEvent): TimelineEvent => {
+    const details = event.details || {};
+    const phase = typeof details.phase === 'string' ? details.phase : '';
+    const phaseLabel = humanizeToken(phase || event.event_type);
+    const stepIndex =
+      typeof details.step_index === 'number'
+        ? details.step_index
+        : typeof details.step_number === 'number'
+          ? details.step_number
+          : null;
+    const stepTotal = typeof details.step_total === 'number' ? details.step_total : null;
+    const checkpointName =
+      typeof details.checkpoint_name === 'string'
+        ? details.checkpoint_name
+        : typeof details.resolved_checkpoint_name === 'string'
+          ? details.resolved_checkpoint_name
+          : null;
+    const statusText = detailToText(details.status);
+    const reasonsText = detailToText(details.reasons);
+    const messageText = detailToText(details.message);
+
+    let type: TimelineEventType = 'info';
+    let title = humanizeToken(event.event_type);
+    let detail = title;
+
+    switch (event.event_type) {
+      case 'phase_started':
+        type =
+          phase === 'planning'
+            ? 'planning'
+            : phase === 'executing'
+              ? 'executing'
+              : phase === 'debugging'
+                ? 'debugging'
+                : phase === 'revising_plan'
+                  ? 'revising_plan'
+                  : phase === 'summarizing'
+                    ? 'summarizing'
+                    : 'info';
+        title = `${phaseLabel} Started`;
+        detail = `${phaseLabel} phase started`;
+        break;
+      case 'phase_finished':
+        type =
+          phase === 'planning'
+            ? 'planning'
+            : phase === 'executing'
+              ? 'executing'
+              : phase === 'debugging'
+                ? 'debugging'
+                : phase === 'revising_plan'
+                  ? 'revising_plan'
+                  : phase === 'summarizing'
+                    ? 'summarizing'
+                    : 'info';
+        title = `${phaseLabel} Finished`;
+        detail = statusText
+          ? `${phaseLabel} phase finished with status: ${statusText}`
+          : `${phaseLabel} phase finished`;
+        break;
+      case 'step_started':
+        type = 'executing';
+        title = 'Step Started';
+        detail = stepIndex && stepTotal
+          ? `Step ${stepIndex} of ${stepTotal} started`
+          : stepIndex
+            ? `Step ${stepIndex} started`
+            : 'Execution step started';
+        break;
+      case 'step_finished':
+        type = statusText === 'failed' ? 'error' : 'executing';
+        title = 'Step Finished';
+        detail = stepIndex && statusText
+          ? `Step ${stepIndex} finished with status: ${statusText}`
+          : stepIndex
+            ? `Step ${stepIndex} finished`
+            : statusText
+              ? `Step finished with status: ${statusText}`
+              : 'Execution step finished';
+        break;
+      case 'tool_invoked':
+        type = 'executing';
+        title = 'Tool Invoked';
+        detail = messageText || detailToText(details.tool_name) || 'A tool was invoked';
+        break;
+      case 'tool_failed':
+        type = 'error';
+        title = 'Tool Failed';
+        detail = messageText || detailToText(details.tool_name) || 'A tool failed';
+        break;
+      case 'waiting_for_input':
+        type = 'status';
+        title = 'Waiting For Input';
+        detail = messageText || 'Runtime is blocked waiting for input';
+        break;
+      case 'checkpoint_saved':
+        type = 'checkpoint';
+        title = 'Checkpoint Saved';
+        detail = checkpointName
+          ? `Saved checkpoint ${checkpointName}`
+          : 'Checkpoint saved';
+        break;
+      case 'checkpoint_loaded':
+        type = 'checkpoint';
+        title = 'Checkpoint Loaded';
+        detail = checkpointName
+          ? `Loaded checkpoint ${checkpointName}`
+          : 'Checkpoint loaded';
+        break;
+      case 'checkpoint_redirected':
+        type = 'checkpoint';
+        title = 'Checkpoint Redirected';
+        detail = checkpointName
+          ? `Resume redirected to checkpoint ${checkpointName}`
+          : 'Checkpoint selection was redirected';
+        break;
+      case 'retry_entered':
+        type = 'debugging';
+        title = 'Retry Entered';
+        detail = messageText || 'A retry/debug cycle started';
+        break;
+      case 'plan_revised':
+        type = 'revising_plan';
+        title = 'Plan Revised';
+        detail = messageText || 'The orchestration plan was revised';
+        break;
+      case 'task_started':
+        type = 'task';
+        title = 'Task Started';
+        detail = messageText || `Task ${event.task_id} started`;
+        break;
+      case 'task_completed':
+        type = 'task';
+        title = 'Task Completed';
+        detail = messageText || `Task ${event.task_id} completed`;
+        break;
+      case 'task_failed':
+        type = 'error';
+        title = 'Task Failed';
+        detail = messageText || `Task ${event.task_id} failed`;
+        break;
+      case 'validation_result':
+        type = statusText === 'rejected' || statusText === 'failed' ? 'error' : 'validation';
+        title = 'Validation Result';
+        detail = [
+          detailToText(details.stage) ? `${humanizeToken(detailToText(details.stage))} validation` : null,
+          statusText ? `status: ${statusText}` : null,
+          reasonsText,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ') || 'Validation result recorded';
+        break;
+      case 'repair_generated':
+      case 'repair_applied':
+      case 'repair_rejected':
+        type = event.event_type === 'repair_rejected' ? 'error' : 'repair';
+        title = humanizeToken(event.event_type);
+        detail = messageText || reasonsText || title;
+        break;
+      case 'workspace_restore_skipped':
+      case 'workspace_preserved':
+      case 'resume_workspace_drift':
+        type = 'checkpoint';
+        title = humanizeToken(event.event_type);
+        detail = messageText || reasonsText || title;
+        break;
+      case 'evaluator_result':
+        type = 'validation';
+        title = 'Evaluator Result';
+        detail = messageText || reasonsText || 'Completion evaluator recorded a result';
+        break;
+      default:
+        title = humanizeToken(event.event_type);
+        detail =
+          messageText ||
+          reasonsText ||
+          `${title}${Object.keys(details).length > 0 ? `: ${JSON.stringify(details)}` : ''}`;
+        break;
+    }
+
+    return {
+      id: buildOrchestrationTimelineKey(event),
+      at: event.timestamp || new Date().toISOString(),
+      type,
+      title,
+      detail,
+    };
+  }, [buildOrchestrationTimelineKey, detailToText, humanizeToken]);
+
+  const replaceTimelineWithOrchestrationEvents = useCallback((events: OrchestrationEvent[]) => {
+    const nextSeen = new Set<string>();
+    const nextTimeline = events
+      .slice()
+      .sort((a, b) => {
+        const aTime = parseApiDate(a.timestamp)?.getTime() || 0;
+        const bTime = parseApiDate(b.timestamp)?.getTime() || 0;
+        return aTime - bTime;
+      })
+      .filter((event) => {
+        const key = buildOrchestrationTimelineKey(event);
+        if (nextSeen.has(key)) {
+          return false;
+        }
+        nextSeen.add(key);
+        return true;
+      })
+      .map(toTimelineEventFromOrchestrationEvent)
+      .slice(-MAX_TIMELINE_EVENTS);
+
+    seenOrchestrationTimelineKeysRef.current = nextSeen;
+    setTimelineEvents(nextTimeline);
+  }, [buildOrchestrationTimelineKey, parseApiDate, toTimelineEventFromOrchestrationEvent]);
+
+  const appendOrchestrationTimelineEvent = useCallback((event: OrchestrationEvent) => {
+    const key = buildOrchestrationTimelineKey(event);
+    if (seenOrchestrationTimelineKeysRef.current.has(key)) {
+      return;
+    }
+    seenOrchestrationTimelineKeysRef.current.add(key);
+    const timelineEvent = toTimelineEventFromOrchestrationEvent(event);
+    setTimelineEvents((prev) => [...prev.slice(-(MAX_TIMELINE_EVENTS - 1)), timelineEvent]);
+  }, [buildOrchestrationTimelineKey, toTimelineEventFromOrchestrationEvent]);
+
+  const loadTimelineEvents = useCallback(async (currentSessionId: number, sessionTasks: Task[]) => {
+    const relevantTaskIds = Array.from(
+      new Set(
+        (sessionTasks || [])
+          .filter((task) => task.session_id === currentSessionId)
+          .map((task) => task.id)
+      )
+    );
+
+    if (relevantTaskIds.length === 0) {
+      seenOrchestrationTimelineKeysRef.current = new Set();
+      setTimelineEvents([]);
+      return;
+    }
+
+    try {
+      const responses = await Promise.all(
+        relevantTaskIds.map((taskId) => sessionsAPI.getTaskEvents(currentSessionId, taskId))
+      );
+      const events = responses.flatMap((response) => response.data.events || []);
+      replaceTimelineWithOrchestrationEvents(events);
+    } catch (loadError) {
+      console.error('Failed to load orchestration event timeline:', loadError);
+    }
+  }, [replaceTimelineWithOrchestrationEvents]);
 
   const loadCheckpointCount = useCallback(async (id: number) => {
     try {
@@ -313,17 +607,8 @@ export default function SessionDetail() {
               applyLogView(next, logViewMode);
               return next;
             });
-            pushTimelineEvent(data.message, data.level, data.timestamp);
           } else if (data.type === 'orchestration_event') {
-            const detailsPreview =
-              data.details && Object.keys(data.details).length > 0
-                ? ` ${JSON.stringify(data.details)}`
-                : '';
-            pushTimelineEvent(
-              `${data.event_type}${detailsPreview}`,
-              'INFO',
-              data.timestamp
-            );
+            appendOrchestrationTimelineEvent(data as OrchestrationEvent);
           } else if (data.type === 'ping') {
             console.debug('Received ping, sending pong');
             wsRef.current?.send(JSON.stringify({ type: 'pong' }));
@@ -366,7 +651,7 @@ export default function SessionDetail() {
       console.error('Failed to create WebSocket:', error);
       setWsConnected(false);
     }
-  }, [applyLogView, formatLogTimestamp, logVerbosity, logViewMode, pushTimelineEvent]);
+  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, logVerbosity, logViewMode]);
 
   const scheduleWebSocketConnect = useCallback(
     (session_id: number, delayMs: number = 0) => {
@@ -423,6 +708,7 @@ export default function SessionDetail() {
         setTasks(tasksRes.data || []);
         setProject(projectRes.data);
         await loadCheckpointCount(Number(sessionId));
+        await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
         
         // Only connect WebSocket if session is running or paused
         if (sessionRes.data.status === 'running' || sessionRes.data.status === 'paused') {
@@ -448,11 +734,6 @@ export default function SessionDetail() {
         const terminalLogs = loadedLogs.map(toTerminalLogEntry);
         setAllLogs(terminalLogs);
         applyLogView(terminalLogs, logViewMode);
-        setTimelineEvents(
-          loadedLogs
-            .slice(-50)
-            .map((log) => classifyTimelineEvent(log.message, log.level, log.timestamp || log.created_at))
-        );
       } catch (err) {
         console.error('Failed to load logs:', err);
       }
@@ -501,7 +782,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, classifyTimelineEvent, loadCheckpointCount, logVerbosity, logViewMode, scheduleWebSocketConnect, session?.status, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, session?.status, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSession = async () => {
     if (!session || !sessionId) {

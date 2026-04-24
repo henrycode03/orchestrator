@@ -21,6 +21,11 @@ import json
 from app.database import get_db
 from app.models import Project
 from app.services.log_stream_service import LogStreamService
+from app.services.streaming_health import (
+    record_stream_error,
+    register_stream_connection,
+    unregister_stream_connection,
+)
 
 router = APIRouter()
 
@@ -179,6 +184,7 @@ async def websocket_project_logs(
 
     # Accept connection
     await websocket.accept()
+    register_stream_connection("project_logs")
 
     try:
         log_service = LogStreamService(db)
@@ -214,5 +220,8 @@ async def websocket_project_logs(
     except WebSocketDisconnect:
         logging.info(f"WebSocket disconnected for project {project_id}")
     except Exception as e:
+        record_stream_error("project_logs", e)
         logging.error(f"WebSocket error for project {project_id}: {e}")
         await websocket.close(code=4001, reason=str(e))
+    finally:
+        unregister_stream_connection("project_logs")

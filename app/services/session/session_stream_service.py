@@ -16,6 +16,11 @@ from app.auth import verify_token
 from app.database import get_db_session as create_db_session
 from app.models import LogEntry, Session as SessionModel, User
 from app.services.log_stream_service import LogStreamService
+from app.services.streaming_health import (
+    record_stream_error,
+    register_stream_connection,
+    unregister_stream_connection,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -159,6 +164,7 @@ async def stream_session_logs(
         return
 
     await websocket.accept()
+    register_stream_connection("session_logs")
     logger.info(
         "WebSocket connected for session %s, instance: %s",
         session_id,
@@ -358,10 +364,12 @@ async def stream_session_logs(
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected gracefully for session %s", session_id)
     except Exception as exc:
+        record_stream_error("session_logs", exc)
         logger.error("WebSocket error for session %s: %s", session_id, str(exc))
     finally:
         heartbeat_task.cancel()
         _remove_active_websocket(session_id, websocket)
+        unregister_stream_connection("session_logs")
 
 
 async def stream_session_status(
@@ -378,6 +386,7 @@ async def stream_session_status(
         return
 
     await websocket.accept()
+    register_stream_connection("session_status")
     await websocket.send_json(
         {
             "type": "connected",
@@ -513,7 +522,9 @@ async def stream_session_status(
     except WebSocketDisconnect:
         logger.info("Status websocket disconnected for session %s", session_id)
     except Exception as exc:
+        record_stream_error("session_status", exc)
         logger.error("Status websocket error for session %s: %s", session_id, str(exc))
     finally:
         status_task.cancel()
         heartbeat_task.cancel()
+        unregister_stream_connection("session_status")

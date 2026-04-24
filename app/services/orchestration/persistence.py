@@ -134,6 +134,20 @@ def save_orchestration_checkpoint(
             serialize_step_result(r) for r in orchestration_state.execution_results
         ],
     )
+    try:
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.CHECKPOINT_SAVED,
+            details={
+                "checkpoint_name": checkpoint_name,
+                "current_step_index": orchestration_state.current_step_index,
+                "status": orchestration_state.status.value,
+            },
+        )
+    except Exception:
+        pass
 
 
 def record_validation_verdict(

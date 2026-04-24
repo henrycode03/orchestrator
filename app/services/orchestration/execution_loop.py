@@ -234,6 +234,20 @@ def execute_step_loop(
                 "step_total": len(orchestration_state.plan),
             },
         )
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.STEP_STARTED,
+                details={
+                    "step_index": step_index + 1,
+                    "step_total": len(orchestration_state.plan),
+                    "description": step_description[:240],
+                },
+            )
+        except Exception:
+            pass
 
         logger.info(
             "[ORCHESTRATION] Step data: commands=%s, verification=%s",
@@ -411,6 +425,21 @@ def execute_step_loop(
             error_message=step_result.get("error", ""),
             attempt=current_attempt,
         )
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.STEP_FINISHED,
+                details={
+                    "step_index": step_index + 1,
+                    "step_total": len(orchestration_state.plan),
+                    "status": step_status,
+                    "error": step_record.error_message[:240],
+                },
+            )
+        except Exception:
+            pass
 
         if step_status == "success":
             # Chain-of-Verification: confirm and surface the actual workspace changes
@@ -483,6 +512,34 @@ def execute_step_loop(
             f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase",
             metadata={"phase": "debugging", "step_index": step_index + 1},
         )
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.PHASE_STARTED,
+                details={
+                    "phase": "debugging",
+                    "step_index": step_index + 1,
+                    "attempt": current_attempt,
+                },
+            )
+        except Exception:
+            pass
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.RETRY_ENTERED,
+                details={
+                    "step_index": step_index + 1,
+                    "attempt": current_attempt,
+                    "reason": step_record.error_message[:240],
+                },
+            )
+        except Exception:
+            pass
 
         if ExecutorService.is_repeated_tool_path_failure(
             orchestration_state.debug_attempts, step_record.error_message
@@ -547,6 +604,20 @@ def execute_step_loop(
                 session_task_link.status = TaskStatus.FAILED
                 session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
+            try:
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    details={
+                        "phase": "debugging",
+                        "status": "manual_review_required",
+                        "step_index": step_index + 1,
+                    },
+                )
+            except Exception:
+                pass
             set_session_alert(session, "error", manual_gate_message)
             restore_workspace_snapshot_if_needed("repeated tool/path failures")
             write_project_state_snapshot_fn(db, project, task, session_id)
@@ -610,6 +681,20 @@ def execute_step_loop(
                 session_task_link.status = TaskStatus.FAILED
                 session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
+            try:
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    details={
+                        "phase": "debugging",
+                        "status": "max_attempts_reached",
+                        "step_index": step_index + 1,
+                    },
+                )
+            except Exception:
+                pass
             restore_workspace_snapshot_if_needed("max step attempts reached")
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "max_attempts_reached"}
@@ -683,6 +768,33 @@ def execute_step_loop(
                     "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase",
                     metadata={"phase": "plan_revision", "step_index": step_index + 1},
                 )
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PHASE_FINISHED,
+                        details={
+                            "phase": "debugging",
+                            "status": "handed_off_to_plan_revision",
+                            "step_index": step_index + 1,
+                        },
+                    )
+                except Exception:
+                    pass
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PHASE_STARTED,
+                        details={
+                            "phase": "plan_revision",
+                            "step_index": step_index + 1,
+                        },
+                    )
+                except Exception:
+                    pass
                 revise_prompt = assemble_plan_revision_prompt(
                     ctx,
                     failed_steps=[step_record],
@@ -748,6 +860,20 @@ def execute_step_loop(
                         },
                     )
                     db.commit()
+                    try:
+                        append_orchestration_event(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type=EventType.PHASE_FINISHED,
+                            details={
+                                "phase": "plan_revision",
+                                "status": "revised_plan_validation_failed",
+                                "step_index": step_index + 1,
+                            },
+                        )
+                    except Exception:
+                        pass
                     restore_workspace_snapshot_if_needed(
                         "revised plan validation failure"
                     )
@@ -770,6 +896,34 @@ def execute_step_loop(
                         "strategy": strategy_info,
                     },
                 )
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PLAN_REVISED,
+                        details={
+                            "step_index": step_index + 1,
+                            "steps": len(orchestration_state.plan),
+                            "strategy": strategy_info,
+                        },
+                    )
+                except Exception:
+                    pass
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PHASE_FINISHED,
+                        details={
+                            "phase": "plan_revision",
+                            "status": "completed",
+                            "step_index": step_index + 1,
+                        },
+                    )
+                except Exception:
+                    pass
                 continue
 
             if fix_type in {"code_fix", "command_fix"}:
@@ -817,6 +971,21 @@ def execute_step_loop(
                     db, session_id, task_id, prompt, orchestration_state
                 )
                 db.commit()
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PHASE_FINISHED,
+                        details={
+                            "phase": "debugging",
+                            "status": "retrying_step",
+                            "step_index": step_index + 1,
+                            "fix_type": fix_type,
+                        },
+                    )
+                except Exception:
+                    pass
                 continue
 
         except workspace_violation_error_cls as exc:
@@ -825,6 +994,20 @@ def execute_step_loop(
             task.status = TaskStatus.FAILED
             task.error_message = str(exc)
             db.commit()
+            try:
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    details={
+                        "phase": "debugging",
+                        "status": "workspace_isolation_violation",
+                        "step_index": step_index + 1,
+                    },
+                )
+            except Exception:
+                pass
             restore_workspace_snapshot_if_needed("debug workspace isolation violation")
             return {"status": "failed", "reason": "workspace_isolation_violation"}
         except Exception as exc:
@@ -834,6 +1017,20 @@ def execute_step_loop(
             task.status = TaskStatus.FAILED
             task.error_message = str(exc)
             db.commit()
+            try:
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    details={
+                        "phase": "debugging",
+                        "status": "debug_parse_error",
+                        "step_index": step_index + 1,
+                    },
+                )
+            except Exception:
+                pass
             restore_workspace_snapshot_if_needed("debug parse error")
             return {"status": "failed", "reason": "debug_parse_error"}
 

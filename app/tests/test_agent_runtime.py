@@ -1,4 +1,5 @@
 from app.config import settings
+from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.agents.agent_backends import UnsupportedAgentBackendError
 from app.services.agents.interfaces import AgentRuntimeError, UnsupportedCapabilityError
 from app.services.agents.agent_runtime import (
@@ -77,6 +78,97 @@ def test_provider_registry_exposes_runtime_factory():
     assert get_runtime_factory("remote_openclaw_gateway") is not None
     assert get_runtime_factory("openai_responses_api") is not None
     assert get_runtime_factory("unknown_backend") is None
+
+
+def test_permission_request_emits_waiting_for_input_event(
+    db_session, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.workspace.project_isolation_service.get_effective_workspace_root",
+        lambda db=None: tmp_path,
+    )
+
+    project = Project(name="Permission Events", workspace_path="permission-events")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="Permission gated task",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-9",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Permission Session",
+        description="needs approval",
+        status="running",
+        is_active=True,
+        execution_mode="manual",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    class _FakePermission:
+        id = 77
+
+    class _FakePermissionService:
+        def __init__(self, db):
+            self.db = db
+
+        def check_permission_required(self, operation_type, target_path):
+            return True
+
+        def is_permission_granted(
+            self, project_id, operation_type, target_path, session_id
+        ):
+            return False
+
+        def create_permission_request(self, **kwargs):
+            return _FakePermission()
+
+    monkeypatch.setattr(
+        "app.services.agents.openclaw_service.PermissionApprovalService",
+        _FakePermissionService,
+    )
+
+    service = OpenClawSessionService(db_session, session.id, task.id)
+
+    import asyncio
+    import json
+
+    granted = asyncio.run(
+        service._check_and_request_permission(
+            operation_type="write_file",
+            target_path="src/app.py",
+            command="echo hi > src/app.py",
+            description="Write src/app.py",
+        )
+    )
+
+    assert granted is False
+
+    log_path = (
+        tmp_path
+        / "permission-events"
+        / "task-9"
+        / ".openclaw"
+        / "events"
+        / f"session_{session.id}_task_{task.id}.jsonl"
+    )
+    lines = [
+        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert lines[-1]["event_type"] == "waiting_for_input"
+    assert lines[-1]["details"]["kind"] == "permission_request"
+    assert lines[-1]["details"]["permission_request_id"] == 77
 
 
 def test_invoke_runtime_prompt_supports_openai_backend(db_session, monkeypatch):

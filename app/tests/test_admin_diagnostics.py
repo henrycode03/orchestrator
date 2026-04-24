@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from app.models import LogEntry
+from app.services.streaming_health import clear_streaming_health, record_stream_error
 
 
 def test_diagnostics_endpoint_returns_expected_shape(authenticated_client):
@@ -16,6 +15,7 @@ def test_diagnostics_endpoint_returns_expected_shape(authenticated_client):
     assert "overall_status" in body
     assert "backends" in body
     assert "queue" in body
+    assert "streaming" in body
     assert "sessions" in body
     assert "recent_audit_events" in body
     assert "checked_at" in body
@@ -42,6 +42,37 @@ def test_diagnostics_queue_shape(authenticated_client):
     assert "status" in q
     assert "active_tasks" in q
     assert "worker_count" in q
+
+
+def test_diagnostics_streaming_shape(authenticated_client):
+    clear_streaming_health()
+    resp = authenticated_client.get("/api/v1/admin/diagnostics")
+    body = resp.json()
+    streaming = body["streaming"]
+    assert "status" in streaming
+    assert "active_connections" in streaming
+    assert "streams" in streaming
+    for key in (
+        "session_logs",
+        "session_status",
+        "project_logs",
+        "mobile_session_logs",
+    ):
+        assert key in streaming["streams"]
+        assert "active_connections" in streaming["streams"][key]
+        assert "errors" in streaming["streams"][key]
+        assert "recent_errors" in streaming["streams"][key]
+
+
+def test_diagnostics_streaming_recent_errors_are_reported(authenticated_client):
+    clear_streaming_health()
+    record_stream_error("session_logs", RuntimeError("test stream failure"))
+
+    resp = authenticated_client.get("/api/v1/admin/diagnostics")
+    body = resp.json()
+    assert body["streaming"]["status"] == "warning"
+    assert body["streaming"]["recent_error_count"] >= 1
+    assert body["streaming"]["streams"]["session_logs"]["recent_errors"]
 
 
 def test_diagnostics_sessions_shape(authenticated_client):

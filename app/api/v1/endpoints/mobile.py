@@ -72,6 +72,11 @@ class MobilePermissionApproveBody(BaseModel):
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.streaming_health import (
+    record_stream_error,
+    register_stream_connection,
+    unregister_stream_connection,
+)
 from app.services.workspace.system_settings import get_effective_mobile_gateway_key
 from app.services.task_service import TaskService
 
@@ -989,6 +994,7 @@ async def mobile_log_stream(
         return
 
     await websocket.accept()
+    register_stream_connection("mobile_session_logs")
     TERMINAL_STATES = {"stopped", "failed", "done", "completed", "error"}
     last_log_id = 0
     try:
@@ -1031,7 +1037,11 @@ async def mobile_log_stream(
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
+    except Exception as exc:
+        record_stream_error("mobile_session_logs", exc)
+        raise
     finally:
+        unregister_stream_connection("mobile_session_logs")
         try:
             await websocket.close()
         except Exception:

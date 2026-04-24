@@ -6,11 +6,17 @@ debugging, and analytics.
 
 import json
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
-from app.models import LogEntry, Session as SessionModel
+from app.models import LogEntry, Project, Session as SessionModel, Task
 from app.config import settings
+from app.services.orchestration.event_types import EventType
+from app.services.orchestration.persistence import append_orchestration_event
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +43,7 @@ class ToolExecution:
         self.session_id = session_id
         self.task_id = task_id
         self.session_instance_id = session_instance_id  # NEW: For isolation
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(UTC)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -95,6 +101,15 @@ class ToolTrackingService:
         )
 
         logger.info(f"Tool execution started: {tool_name} (id={execution_id})")
+        self._emit_orchestration_tool_event(
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.TOOL_INVOKED,
+            details={
+                "tool_name": tool_name,
+                "execution_id": execution_id,
+            },
+        )
 
     def complete_execution(
         self,
@@ -123,7 +138,7 @@ class ToolTrackingService:
         execution.result = result
         execution.success = success
         execution.execution_time_ms = (
-            datetime.utcnow() - execution.timestamp
+            datetime.now(UTC) - execution.timestamp
         ).total_seconds() * 1000
 
         # Log execution
@@ -138,6 +153,20 @@ class ToolTrackingService:
 
         # Clean up active executions
         del self.active_executions[execution_id]
+
+        self._emit_orchestration_tool_event(
+            session_id=execution.session_id,
+            task_id=execution.task_id,
+            event_type=(EventType.TOOL_INVOKED if success else EventType.TOOL_FAILED),
+            details={
+                "tool_name": execution.tool_name,
+                "execution_id": execution_id,
+                "success": success,
+                "execution_time_ms": round(execution.execution_time_ms, 2),
+                "error": error_message,
+            },
+            skip_if_invoked=success,
+        )
 
         return execution
 
@@ -197,6 +226,52 @@ class ToolTrackingService:
             execution_id, tool_name, params, session_id, task_id, session_instance_id
         )
         return self.complete_execution(execution_id, result, success, error_message)
+
+    def _emit_orchestration_tool_event(
+        self,
+        *,
+        session_id: int,
+        task_id: Optional[int],
+        event_type: str,
+        details: Dict[str, Any],
+        skip_if_invoked: bool = False,
+    ) -> None:
+        if task_id is None:
+            return
+
+        if skip_if_invoked and event_type == EventType.TOOL_INVOKED:
+            return
+
+        try:
+            session = (
+                self.db.query(SessionModel)
+                .filter(SessionModel.id == session_id)
+                .first()
+            )
+            task = self.db.query(Task).filter(Task.id == task_id).first()
+            if not session or not task or not session.project_id:
+                return
+
+            project = (
+                self.db.query(Project).filter(Project.id == session.project_id).first()
+            )
+            if not project or not project.workspace_path:
+                return
+
+            workspace_root = resolve_project_workspace_path(
+                project.workspace_path, project.name
+            )
+            task_subfolder = str(task.task_subfolder or f"task-{task.id}")
+            project_dir = Path(workspace_root) / task_subfolder
+            append_orchestration_event(
+                project_dir=project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=event_type,
+                details={k: v for k, v in details.items() if v is not None},
+            )
+        except Exception:
+            pass
 
     def get_execution_history(
         self,

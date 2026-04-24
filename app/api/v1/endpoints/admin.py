@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_current_active_user, get_db
 from app.models import LogEntry, Session as SessionModel
 from app.services.agents.agent_backends import list_supported_backends
+from app.services.streaming_health import get_streaming_health_snapshot
 from app.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -138,17 +139,21 @@ def get_diagnostics(
     Returns:
     - backend health for each registered provider
     - Celery queue depth and worker count
+    - websocket/session streaming health
     - session counts by status and recent failure detail
     - recent structured audit log events
     """
     backends = [b.to_dict() for b in list_supported_backends()]
     queue = _get_queue_health()
+    streaming = get_streaming_health_snapshot()
     sessions = _get_session_stats(db)
     audit = _get_recent_audit_events(db)
 
     overall = "healthy"
     if queue["status"] in ("no_workers", "unreachable"):
         overall = "degraded"
+    elif streaming["status"] == "warning":
+        overall = "warning"
     elif sessions["failed_last_24h"] > 0:
         overall = "warning"
 
@@ -157,6 +162,7 @@ def get_diagnostics(
         "checked_at": datetime.now(UTC).isoformat(),
         "backends": backends,
         "queue": queue,
+        "streaming": streaming,
         "sessions": sessions,
         "recent_audit_events": audit,
     }

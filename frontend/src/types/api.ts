@@ -281,6 +281,14 @@ export interface CheckpointInspection {
   step_results_preview: Array<Record<string, unknown>>;
 }
 
+export interface OrchestrationEvent {
+  timestamp: string;
+  event_type: string;
+  session_id: number;
+  task_id: number;
+  details: Record<string, unknown>;
+}
+
 export interface BackendDescriptor {
   name: string;
   display_name: string;

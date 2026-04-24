@@ -42,6 +42,8 @@ from app.services.workspace.project_isolation_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.services.orchestration.event_types import EventType
+from app.services.orchestration.persistence import append_orchestration_event
 from app.services.permission_service import PermissionApprovalService
 from app.services.task_service import TaskService
 from app.services.performance_optimizations import (
@@ -244,6 +246,29 @@ class OpenClawSessionService:
                 f"[OPENCLAW] Failed to resolve execution cwd, falling back to default: {exc}",
             )
             return None
+
+    def _append_runtime_event(
+        self, event_type: str, details: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Best-effort typed runtime event append for local OpenClaw flows."""
+
+        if not self.task_model:
+            return
+
+        project_dir = self._resolve_execution_cwd()
+        if not project_dir:
+            return
+
+        try:
+            append_orchestration_event(
+                project_dir=project_dir,
+                session_id=self.session_id,
+                task_id=self.task_model.id,
+                event_type=event_type,
+                details=details or {},
+            )
+        except Exception:
+            pass
 
     async def create_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
@@ -475,6 +500,17 @@ class OpenClawSessionService:
             self._log_entry(
                 "INFO",
                 f"Permission request created: {permission.id}, waiting for approval",
+            )
+            self._append_runtime_event(
+                EventType.WAITING_FOR_INPUT,
+                {
+                    "kind": "permission_request",
+                    "permission_request_id": permission.id,
+                    "operation_type": operation_type,
+                    "target_path": target_path,
+                    "command": command,
+                    "description": description,
+                },
             )
 
             # Return False to indicate permission is pending
