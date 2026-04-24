@@ -261,6 +261,15 @@ def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
                 "step_results": [],
             }
 
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 35,
+                "status": "low",
+                "summary": "Checkpoint replay is fragile; important state is missing",
+                "present_signals": ["task id", "task description"],
+                "warnings": ["missing workspace path", "missing execution plan"],
+            }
+
     class _FakeDelayResult:
         id = "celery-resume-1"
 
@@ -291,6 +300,7 @@ def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
     db_session.refresh(task)
 
     assert result["status"] == "resumed"
+    assert result["restore_fidelity"]["status"] == "low"
     assert captured["requested_checkpoint_name"] == "paused_20260424_034703"
     assert (
         captured["delay_kwargs"]["resume_checkpoint_name"] == "paused_20260424_034703"

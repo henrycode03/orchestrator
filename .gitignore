@@ -97,3 +97,5 @@ alembic.ini
 # ai agent
 .codex
 .claude/
+.agents/
+plugins/

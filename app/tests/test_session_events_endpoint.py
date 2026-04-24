@@ -20,9 +20,12 @@ def _make_project(db, *, workspace_path="/tmp/evt_test"):
 
 
 def _make_session(db, project, *, status="stopped"):
+    existing_count = (
+        db.query(SessionModel).filter(SessionModel.project_id == project.id).count()
+    )
     session = SessionModel(
         project_id=project.id,
-        name="Events Session",
+        name=f"Events Session {existing_count + 1}",
         description="test",
         status=status,
         is_active=False,
@@ -166,3 +169,231 @@ def test_events_endpoint_returns_404_for_nonexistent_session(authenticated_clien
 def test_events_endpoint_requires_auth(api_client, db_session):
     resp = api_client.get("/api/v1/sessions/1/tasks/1/events")
     assert resp.status_code == 401
+
+
+def test_session_diff_endpoint_returns_structured_delta(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task_id = 5
+
+        from app.models import SessionTask, Task, TaskStatus
+        from app.services.orchestration.persistence import (
+            write_orchestration_state_snapshot,
+        )
+        from app.services.prompt_templates import OrchestrationState
+
+        task = Task(
+            project_id=project.id,
+            title="Diff Task",
+            status=TaskStatus.PENDING,
+            task_subfolder="task-5",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+
+        db_session.add(
+            SessionTask(
+                session_id=session.id,
+                task_id=task.id,
+                status=TaskStatus.PENDING,
+            )
+        )
+        db_session.commit()
+
+        state = OrchestrationState(
+            session_id=str(session.id),
+            task_description="Diff me",
+            project_name=project.name,
+            task_id=task.id,
+        )
+        state._project_dir_override = tmpdir
+        state.plan = [{"description": "first"}]
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-0",
+            trigger="phase_boundary",
+        )
+        state.current_step_index = 1
+        state.changed_files = ["src/demo.py"]
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-1",
+            trigger="phase_boundary",
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/diff",
+            params={"task_id": task.id, "from_checkpoint": 0, "to_checkpoint": 1},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task_id"] == task.id
+        assert body["delta"]["current_step_index"]["change"] == 1
+        assert body["delta"]["files_touched"]["added"] == ["src/demo.py"]
+
+
+def test_session_diff_endpoint_defaults_to_latest_two_snapshots(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+
+        from app.models import SessionTask, Task, TaskStatus
+        from app.services.orchestration.persistence import (
+            write_orchestration_state_snapshot,
+        )
+        from app.services.prompt_templates import OrchestrationState
+
+        task = Task(
+            project_id=project.id,
+            title="Diff Task Default",
+            status=TaskStatus.PENDING,
+            task_subfolder="task-9",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+
+        db_session.add(
+            SessionTask(
+                session_id=session.id,
+                task_id=task.id,
+                status=TaskStatus.PENDING,
+            )
+        )
+        db_session.commit()
+
+        state = OrchestrationState(
+            session_id=str(session.id),
+            task_description="Diff me later",
+            project_name=project.name,
+            task_id=task.id,
+        )
+        state._project_dir_override = tmpdir
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-0",
+            trigger="phase_boundary",
+        )
+        state.current_step_index = 1
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-1",
+            trigger="phase_boundary",
+        )
+        state.current_step_index = 2
+        state.changed_files = ["src/last.py"]
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-2",
+            trigger="phase_boundary",
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/diff",
+            params={"task_id": task.id},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["from_checkpoint"] == 1
+        assert body["to_checkpoint"] == 2
+        assert body["delta"]["current_step_index"]["change"] == 1
+
+
+def test_compare_divergence_endpoint_returns_similar_sessions(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session_a = _make_session(db_session, project, status="stopped")
+        session_b = _make_session(db_session, project, status="stopped")
+
+        from app.models import SessionTask, Task, TaskStatus
+
+        task_a = Task(
+            project_id=project.id,
+            title="Task A",
+            status=TaskStatus.FAILED,
+            task_subfolder="task-a",
+        )
+        task_b = Task(
+            project_id=project.id,
+            title="Task B",
+            status=TaskStatus.FAILED,
+            task_subfolder="task-b",
+        )
+        db_session.add(task_a)
+        db_session.add(task_b)
+        db_session.commit()
+        db_session.refresh(task_a)
+        db_session.refresh(task_b)
+
+        db_session.add(SessionTask(session_id=session_a.id, task_id=task_a.id))
+        db_session.add(SessionTask(session_id=session_b.id, task_id=task_b.id))
+        db_session.commit()
+
+        base_events = [
+            {
+                "event_id": "root-1",
+                "event_type": "retry_entered",
+                "session_id": session_a.id,
+                "task_id": task_a.id,
+                "details": {"attempt": 1},
+            },
+            {
+                "event_id": "div-1",
+                "parent_event_id": "root-1",
+                "event_type": "divergence_detected",
+                "session_id": session_a.id,
+                "task_id": task_a.id,
+                "details": {"reason": "retry_cluster"},
+            },
+        ]
+        compare_events = [
+            {
+                "event_id": "root-2",
+                "event_type": "retry_entered",
+                "session_id": session_b.id,
+                "task_id": task_b.id,
+                "details": {"attempt": 1},
+            },
+            {
+                "event_id": "div-2",
+                "parent_event_id": "root-2",
+                "event_type": "divergence_detected",
+                "session_id": session_b.id,
+                "task_id": task_b.id,
+                "details": {"reason": "retry_cluster"},
+            },
+        ]
+        _write_events(f"{tmpdir}/task-a", session_a.id, task_a.id, base_events)
+        _write_events(f"{tmpdir}/task-b", session_b.id, task_b.id, compare_events)
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session_a.id}/compare-divergence",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["current"]["session_id"] == session_a.id
+        assert len(body["matches"]) >= 1
+        assert body["matches"][0]["session_id"] == session_b.id

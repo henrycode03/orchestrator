@@ -13,10 +13,16 @@ from sqlalchemy.orm import Session
 from app.models import LogEntry, Project, Session as SessionModel, Task
 from app.config import settings
 from app.services.orchestration.event_types import EventType
-from app.services.orchestration.persistence import append_orchestration_event
+from app.services.orchestration.persistence import (
+    append_orchestration_event,
+    find_latest_orchestration_event,
+    maybe_emit_divergence_detected,
+    write_checkpoint_state_snapshot,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.checkpoint_service import CheckpointService
 
 logger = logging.getLogger(__name__)
 
@@ -263,13 +269,48 @@ class ToolTrackingService:
             )
             task_subfolder = str(task.task_subfolder or f"task-{task.id}")
             project_dir = Path(workspace_root) / task_subfolder
-            append_orchestration_event(
+            parent_event = find_latest_orchestration_event(
+                project_dir,
+                session_id,
+                task_id,
+                event_types={
+                    EventType.STEP_STARTED,
+                    EventType.RETRY_ENTERED,
+                    EventType.PHASE_STARTED,
+                },
+            )
+            emitted = append_orchestration_event(
                 project_dir=project_dir,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=event_type,
+                parent_event_id=(parent_event or {}).get("event_id"),
                 details={k: v for k, v in details.items() if v is not None},
             )
+            if event_type == EventType.TOOL_FAILED:
+                try:
+                    checkpoint_payload = CheckpointService(self.db).load_checkpoint(
+                        session_id, "autosave_latest"
+                    )
+                    write_checkpoint_state_snapshot(
+                        project_dir=project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        checkpoint_payload=checkpoint_payload,
+                        trigger="tool_failed",
+                        related_event_id=emitted.get("event_id"),
+                    )
+                except Exception:
+                    pass
+                try:
+                    maybe_emit_divergence_detected(
+                        project_dir=project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        parent_event_id=emitted.get("event_id"),
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 

@@ -15,7 +15,9 @@ from app.services.orchestration.context_assembly import (
 from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
+    maybe_emit_divergence_detected,
     record_validation_verdict,
+    write_orchestration_state_snapshot,
 )
 from app.services.orchestration.planner import PlannerService
 from app.services.orchestration.policy import clamp_planning_timeout
@@ -47,13 +49,22 @@ def execute_planning_phase(
             "task_chars": len(ctx.prompt or ""),
         },
     )
+    planning_phase_event = None
     try:
-        append_orchestration_event(
+        planning_phase_event = append_orchestration_event(
             project_dir=ctx.orchestration_state.project_dir,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.PHASE_STARTED,
             details={"phase": "planning"},
+        )
+        write_orchestration_state_snapshot(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            orchestration_state=ctx.orchestration_state,
+            trigger="phase_started",
+            related_event_id=planning_phase_event.get("event_id"),
         )
     except Exception:
         pass
@@ -350,19 +361,39 @@ def execute_planning_phase(
                 ctx.task_id,
                 ctx.orchestration_state,
                 plan_verdict,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
             )
+            if not plan_verdict.accepted or plan_verdict.warning:
+                try:
+                    maybe_emit_divergence_detected(
+                        project_dir=ctx.orchestration_state.project_dir,
+                        session_id=ctx.session_id,
+                        task_id=ctx.task_id,
+                        parent_event_id=(planning_phase_event or {}).get("event_id"),
+                    )
+                except Exception:
+                    pass
             ctx.db.commit()
             try:
-                append_orchestration_event(
+                phase_finished_event = append_orchestration_event(
                     project_dir=ctx.orchestration_state.project_dir,
                     session_id=ctx.session_id,
                     task_id=ctx.task_id,
                     event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(planning_phase_event or {}).get("event_id"),
                     details={
                         "phase": "planning",
                         "status": plan_verdict.status,
                         "step_count": len(ctx.orchestration_state.plan),
                     },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=ctx.orchestration_state.project_dir,
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    orchestration_state=ctx.orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
                 )
             except Exception:
                 pass
@@ -463,15 +494,24 @@ def execute_planning_phase(
             details={"reason": "planning_timeout_or_context_overflow"},
         )
         try:
-            append_orchestration_event(
+            phase_finished_event = append_orchestration_event(
                 project_dir=ctx.orchestration_state.project_dir,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PHASE_FINISHED,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
                 details={
                     "phase": "planning",
                     "status": "timeout_or_context_overflow",
                 },
+            )
+            write_orchestration_state_snapshot(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                orchestration_state=ctx.orchestration_state,
+                trigger="phase_finished",
+                related_event_id=phase_finished_event.get("event_id"),
             )
         except Exception:
             pass
@@ -496,15 +536,24 @@ def execute_planning_phase(
             details={"reason": "planning_parse_error"},
         )
         try:
-            append_orchestration_event(
+            phase_finished_event = append_orchestration_event(
                 project_dir=ctx.orchestration_state.project_dir,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PHASE_FINISHED,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
                 details={
                     "phase": "planning",
                     "status": "parse_error",
                 },
+            )
+            write_orchestration_state_snapshot(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                orchestration_state=ctx.orchestration_state,
+                trigger="phase_finished",
+                related_event_id=phase_finished_event.get("event_id"),
             )
         except Exception:
             pass

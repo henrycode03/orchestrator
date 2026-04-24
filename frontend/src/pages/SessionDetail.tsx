@@ -7,6 +7,8 @@ import type {
   OrchestrationEvent,
   Project,
   Session,
+  SessionDivergenceCompareResponse,
+  SessionStateDiffResponse,
   Task,
 } from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
@@ -19,6 +21,7 @@ import {
   SessionStats,
   SessionTabs,
   SessionTasksPanel,
+  type TimelineSpan,
 } from '@/components/SessionDetailSections';
 import { Pause, Play, Square, XCircle } from 'lucide-react';
 
@@ -96,9 +99,12 @@ export default function SessionDetail() {
   const [logViewMode, setLogViewMode] = useState<'newest' | 'oldest' | 'success' | 'errors' | 'all'>('newest');
   const [logVerbosity, setLogVerbosity] = useState<'clean' | 'verbose'>('clean');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [orchestrationEvents, setOrchestrationEvents] = useState<OrchestrationEvent[]>([]);
   const [checkpointCount, setCheckpointCount] = useState(0);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [checkpointInspection, setCheckpointInspection] = useState<CheckpointInspection | null>(null);
+  const [compareMatches, setCompareMatches] = useState<SessionDivergenceCompareResponse | null>(null);
+  const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
@@ -253,12 +259,33 @@ export default function SessionDetail() {
 
   const buildOrchestrationTimelineKey = useCallback((event: OrchestrationEvent) => {
     return JSON.stringify([
+      event.event_id || '',
       event.timestamp || '',
       event.event_type || '',
       event.task_id ?? null,
+      event.parent_event_id ?? null,
       event.details || {},
     ]);
   }, []);
+
+  const normalizeOrchestrationEvents = useCallback((events: OrchestrationEvent[]) => {
+    const seen = new Set<string>();
+    return events
+      .slice()
+      .sort((a, b) => {
+        const aTime = parseApiDate(a.timestamp)?.getTime() || 0;
+        const bTime = parseApiDate(b.timestamp)?.getTime() || 0;
+        return aTime - bTime;
+      })
+      .filter((event) => {
+        const key = buildOrchestrationTimelineKey(event);
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+  }, [buildOrchestrationTimelineKey, parseApiDate]);
 
   const detailToText = useCallback((value: unknown): string | null => {
     if (typeof value === 'string') {
@@ -429,6 +456,51 @@ export default function SessionDetail() {
           .filter((item): item is string => Boolean(item))
           .join(' | ') || 'Validation result recorded';
         break;
+      case 'health_score_updated': {
+        const score =
+          typeof details.score === 'number'
+            ? details.score
+            : typeof details.score === 'string'
+              ? Number(details.score)
+              : null;
+        const slope =
+          typeof details.slope === 'number'
+            ? details.slope
+            : typeof details.slope === 'string'
+              ? Number(details.slope)
+              : null;
+        type = score !== null && score < 50 ? 'error' : 'status';
+        title = 'Health Score';
+        detail = score !== null
+          ? `Health ${score}/100${typeof slope === 'number' ? ` • slope ${slope > 0 ? '+' : ''}${slope}` : ''}`
+          : 'Health score updated';
+        break;
+      }
+      case 'divergence_detected':
+        type = 'error';
+        title = 'Off-Track Detected';
+        detail = [
+          detailToText(details.reason),
+          detailToText(details.last_known_good_event_id)
+            ? `last good: ${detailToText(details.last_known_good_event_id)}`
+            : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ') || 'Session divergence detected';
+        break;
+      case 'intent_outcome_mismatch':
+        type = 'repair';
+        title = 'Intent Gap';
+        detail = [
+          detailToText(details.declared_intent),
+          detailToText(details.mismatch_score)
+            ? `score: ${detailToText(details.mismatch_score)}`
+            : null,
+          detailToText(details.missing_expected_files),
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ') || 'Intent and outcome drift detected';
+        break;
       case 'repair_generated':
       case 'repair_applied':
       case 'repair_rejected':
@@ -467,28 +539,18 @@ export default function SessionDetail() {
   }, [buildOrchestrationTimelineKey, detailToText, humanizeToken]);
 
   const replaceTimelineWithOrchestrationEvents = useCallback((events: OrchestrationEvent[]) => {
-    const nextSeen = new Set<string>();
-    const nextTimeline = events
-      .slice()
-      .sort((a, b) => {
-        const aTime = parseApiDate(a.timestamp)?.getTime() || 0;
-        const bTime = parseApiDate(b.timestamp)?.getTime() || 0;
-        return aTime - bTime;
-      })
-      .filter((event) => {
-        const key = buildOrchestrationTimelineKey(event);
-        if (nextSeen.has(key)) {
-          return false;
-        }
-        nextSeen.add(key);
-        return true;
-      })
+    const normalizedEvents = normalizeOrchestrationEvents(events);
+    const nextSeen = new Set<string>(
+      normalizedEvents.map((event) => buildOrchestrationTimelineKey(event))
+    );
+    const nextTimeline = normalizedEvents
       .map(toTimelineEventFromOrchestrationEvent)
       .slice(-MAX_TIMELINE_EVENTS);
 
     seenOrchestrationTimelineKeysRef.current = nextSeen;
+    setOrchestrationEvents(normalizedEvents);
     setTimelineEvents(nextTimeline);
-  }, [buildOrchestrationTimelineKey, parseApiDate, toTimelineEventFromOrchestrationEvent]);
+  }, [buildOrchestrationTimelineKey, normalizeOrchestrationEvents, toTimelineEventFromOrchestrationEvent]);
 
   const appendOrchestrationTimelineEvent = useCallback((event: OrchestrationEvent) => {
     const key = buildOrchestrationTimelineKey(event);
@@ -496,9 +558,154 @@ export default function SessionDetail() {
       return;
     }
     seenOrchestrationTimelineKeysRef.current.add(key);
+    setOrchestrationEvents((prev) => normalizeOrchestrationEvents([...prev, event]));
     const timelineEvent = toTimelineEventFromOrchestrationEvent(event);
     setTimelineEvents((prev) => [...prev.slice(-(MAX_TIMELINE_EVENTS - 1)), timelineEvent]);
-  }, [buildOrchestrationTimelineKey, toTimelineEventFromOrchestrationEvent]);
+  }, [buildOrchestrationTimelineKey, normalizeOrchestrationEvents, toTimelineEventFromOrchestrationEvent]);
+
+  const loadStateDiff = useCallback(async (currentSessionId: number, sessionTasks: Task[] = []) => {
+    try {
+      const relevantTask = (sessionTasks || [])
+        .filter((task) => task.session_id === currentSessionId)
+        .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))[0];
+      const response = await sessionsAPI.getSessionDiff(currentSessionId, {
+        task_id: relevantTask?.id,
+      });
+      setStateDiff(response.data);
+    } catch (loadError) {
+      console.debug('State diff unavailable:', loadError);
+      setStateDiff(null);
+    }
+  }, []);
+
+  const loadDivergenceCompare = useCallback(async (currentSessionId: number) => {
+    try {
+      const response = await sessionsAPI.getSessionDivergenceCompare(currentSessionId, 5);
+      setCompareMatches(response.data);
+    } catch (loadError) {
+      console.debug('Divergence compare unavailable:', loadError);
+      setCompareMatches(null);
+    }
+  }, []);
+
+  const healthEvents = orchestrationEvents
+    .filter((event) => event.event_type === 'health_score_updated')
+    .map((event) => {
+      const rawScore = event.details?.score;
+      const rawSlope = event.details?.slope;
+      const score =
+        typeof rawScore === 'number'
+          ? rawScore
+          : typeof rawScore === 'string'
+            ? Number(rawScore)
+            : NaN;
+      const slope =
+        typeof rawSlope === 'number'
+          ? rawSlope
+          : typeof rawSlope === 'string'
+            ? Number(rawSlope)
+            : null;
+      return {
+        timestamp: event.timestamp,
+        score,
+        slope: typeof slope === 'number' && Number.isFinite(slope) ? slope : null,
+      };
+    })
+    .filter((event) => Number.isFinite(event.score));
+
+  const anomalyEvents = timelineEvents.filter(
+    (event) => event.title === 'Off-Track Detected' || event.title === 'Intent Gap'
+  );
+
+  const timelineSpans: TimelineSpan[] = (() => {
+    if (orchestrationEvents.length === 0) {
+      return [];
+    }
+
+    const childrenByParent = new Map<string, OrchestrationEvent[]>();
+    for (const event of orchestrationEvents) {
+      if (!event.parent_event_id) {
+        continue;
+      }
+      const existing = childrenByParent.get(event.parent_event_id) || [];
+      existing.push(event);
+      childrenByParent.set(event.parent_event_id, existing);
+    }
+
+    const classifyLane = (eventType: string): TimelineSpan['lane'] => {
+      if (['tool_invoked', 'tool_failed'].includes(eventType)) return 'tool';
+      if (
+        [
+          'checkpoint_saved',
+          'checkpoint_loaded',
+          'checkpoint_redirected',
+          'workspace_restore_skipped',
+          'workspace_preserved',
+          'resume_workspace_drift',
+        ].includes(eventType)
+      ) {
+        return 'workspace';
+      }
+      if (
+        [
+          'validation_result',
+          'health_score_updated',
+          'divergence_detected',
+          'intent_outcome_mismatch',
+          'evaluator_result',
+        ].includes(eventType)
+      ) {
+        return 'validation';
+      }
+      if (
+        ['phase_started', 'phase_finished', 'step_started', 'step_finished', 'retry_entered', 'plan_revised'].includes(
+          eventType
+        )
+      ) {
+        return 'reasoning';
+      }
+      return 'system';
+    };
+
+    const deriveStatus = (events: OrchestrationEvent[]): TimelineSpan['status'] => {
+      const types = events.map((event) => event.event_type);
+      if (
+        types.some((type) =>
+          ['tool_failed', 'task_failed', 'divergence_detected'].includes(type)
+        )
+      ) {
+        return 'error';
+      }
+      if (
+        types.some((type) =>
+          ['retry_entered', 'intent_outcome_mismatch', 'validation_result'].includes(type)
+        )
+      ) {
+        return 'warning';
+      }
+      return 'healthy';
+    };
+
+    return orchestrationEvents
+      .filter((event) => !event.parent_event_id || childrenByParent.has(event.event_id || ''))
+      .map((rootEvent) => {
+        const relatedEvents = [
+          rootEvent,
+          ...(childrenByParent.get(rootEvent.event_id || '') || []),
+        ];
+        const titles = relatedEvents.map((event) => humanizeToken(event.event_type));
+        return {
+          id: rootEvent.event_id || buildOrchestrationTimelineKey(rootEvent),
+          title: humanizeToken(rootEvent.event_type),
+          lane: classifyLane(rootEvent.event_type),
+          status: deriveStatus(relatedEvents),
+          started_at: rootEvent.timestamp,
+          event_count: relatedEvents.length,
+          summary: titles.slice(0, 4).join(' -> '),
+        };
+      })
+      .slice(-24);
+  })();
 
   const loadTimelineEvents = useCallback(async (currentSessionId: number, sessionTasks: Task[]) => {
     const relevantTaskIds = Array.from(
@@ -532,11 +739,13 @@ export default function SessionDetail() {
       const events = responses.flatMap((response) => response.data.events || []);
       if (events.length > 0) {
         replaceTimelineWithOrchestrationEvents(events);
+        await loadStateDiff(currentSessionId, sessionTasks);
+        await loadDivergenceCompare(currentSessionId);
       }
     } catch (loadError) {
       console.error('Failed to load orchestration event timeline:', loadError);
     }
-  }, [replaceTimelineWithOrchestrationEvents]);
+  }, [loadDivergenceCompare, loadStateDiff, replaceTimelineWithOrchestrationEvents]);
 
   const loadCheckpointCount = useCallback(async (id: number) => {
     try {
@@ -621,6 +830,14 @@ export default function SessionDetail() {
             });
           } else if (data.type === 'orchestration_event') {
             appendOrchestrationTimelineEvent(data as OrchestrationEvent);
+            if (
+              sessionId &&
+              ['phase_finished', 'checkpoint_saved', 'retry_entered', 'tool_failed', 'validation_result'].includes(
+                String(data.event_type || '')
+              )
+            ) {
+              void loadStateDiff(Number(sessionId), tasks);
+            }
           } else if (data.type === 'ping') {
             console.debug('Received ping, sending pong');
             wsRef.current?.send(JSON.stringify({ type: 'pong' }));
@@ -663,7 +880,7 @@ export default function SessionDetail() {
       console.error('Failed to create WebSocket:', error);
       setWsConnected(false);
     }
-  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, logVerbosity, logViewMode]);
+  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadStateDiff, logVerbosity, logViewMode, sessionId, tasks]);
 
   const scheduleWebSocketConnect = useCallback(
     (session_id: number, delayMs: number = 0) => {
@@ -697,6 +914,7 @@ export default function SessionDetail() {
         const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
         setTasks(tasksRes.data || []);
         await loadTimelineEvents(updated.data.id, tasksRes.data || []);
+        await loadStateDiff(updated.data.id, tasksRes.data || []);
       }
       await loadCheckpointCount(Number(sessionId));
       if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
@@ -708,7 +926,7 @@ export default function SessionDetail() {
       const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
       alert(`Failed to replay checkpoint: ${errorMsg}`);
     }
-  }, [loadCheckpointCount, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
+  }, [loadCheckpointCount, loadStateDiff, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -728,6 +946,7 @@ export default function SessionDetail() {
         setProject(projectRes.data);
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
+        await loadStateDiff(sessionRes.data.id, tasksRes.data || []);
         
         // Only connect WebSocket if session is running or paused
         if (sessionRes.data.status === 'running' || sessionRes.data.status === 'paused') {
@@ -774,6 +993,7 @@ export default function SessionDetail() {
         if (currentSession.data.project_id) {
           const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id);
           setTasks(currentTasks.data || []);
+          await loadStateDiff(Number(sessionId), currentTasks.data || []);
         }
         
         // If session changed to running/paused, connect WebSocket
@@ -801,7 +1021,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, session?.status, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, session?.status, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSession = async () => {
     if (!session || !sessionId) {
@@ -867,6 +1087,7 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       await loadCheckpointCount(Number(sessionId));
+      await loadStateDiff(Number(sessionId), tasks);
     } catch (error) {
       setSession(previousSession);
       console.error('Failed to stop session:', error);
@@ -894,6 +1115,7 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       await loadCheckpointCount(Number(sessionId));
+      await loadStateDiff(Number(sessionId), tasks);
       shouldReconnectRef.current = false;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -949,6 +1171,7 @@ export default function SessionDetail() {
         const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
         setTasks(tasksRes.data || []);
         await loadTimelineEvents(updated.data.id, tasksRes.data || []);
+        await loadStateDiff(updated.data.id, tasksRes.data || []);
       }
       await loadCheckpointCount(Number(sessionId));
       if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
@@ -971,6 +1194,7 @@ export default function SessionDetail() {
       ]);
       setTasks(tasksRes.data || []);
       setSession(updatedSession.data);
+      await loadStateDiff(Number(sessionId), tasksRes.data || []);
       if (refreshRes.data.queued_task) {
         pushTimelineEvent(
           `Queued next task: ${refreshRes.data.queued_task.task_name}`,
@@ -983,7 +1207,7 @@ export default function SessionDetail() {
       console.error('Failed to refresh session tasks:', error);
       alert('Failed to refresh session tasks');
     }
-  }, [pushTimelineEvent, session, sessionId]);
+  }, [loadStateDiff, pushTimelineEvent, session, sessionId]);
 
   const handleExecuteTask = useCallback(async (task: Task) => {
     if (!sessionId) return;
@@ -996,6 +1220,7 @@ export default function SessionDetail() {
       ]);
       setSession(updatedSession.data);
       setTasks(updatedTasks.data || []);
+      await loadStateDiff(Number(sessionId), updatedTasks.data || []);
       if (!wsRef.current) {
         scheduleWebSocketConnect(Number(sessionId), 800);
       }
@@ -1003,7 +1228,7 @@ export default function SessionDetail() {
       console.error('Failed to run task manually:', error);
       alert('Failed to queue the selected task');
     }
-  }, [pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
+  }, [loadStateDiff, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   const handleExecutionModeChange = useCallback(async (mode: 'automatic' | 'manual') => {
     if (!sessionId || !session) return;
@@ -1164,8 +1389,11 @@ export default function SessionDetail() {
       <div className="min-h-[400px]">
         {activeTab === 'logs' && (
           <SessionLogsPanel
+            anomalyEvents={anomalyEvents}
+            compareMatches={compareMatches}
             displayLogs={displayLogs}
             formatDateTime={formatDateTime}
+            healthEvents={healthEvents}
             handleRefreshLogs={handleRefreshLogs}
             logVerbosity={logVerbosity}
             logViewMode={logViewMode}
@@ -1174,7 +1402,9 @@ export default function SessionDetail() {
               setLogViewMode(mode);
               applyLogView(allLogs, mode);
             }}
+            stateDiff={stateDiff}
             timelineEvents={timelineEvents}
+            timelineSpans={timelineSpans}
             wsConnected={wsConnected}
           />
         )}

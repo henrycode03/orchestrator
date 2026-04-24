@@ -142,6 +142,79 @@ class CheckpointService:
             "resume_reason": "Checkpoint is missing replay state: no task, plan, or workspace context was saved",
         }
 
+    def _checkpoint_restore_fidelity(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        context = data.get("context", {}) or {}
+        orchestration_state = data.get("orchestration_state", {}) or {}
+        step_results = data.get("step_results", []) or []
+        score = 0
+        reasons: List[str] = []
+        warnings: List[str] = []
+
+        if context.get("task_id"):
+            score += 10
+            reasons.append("task id")
+        else:
+            warnings.append("missing task id")
+        if context.get("task_description"):
+            score += 10
+            reasons.append("task description")
+        else:
+            warnings.append("missing task description")
+        if context.get("project_dir_override") or context.get("task_subfolder"):
+            score += 10
+            reasons.append("workspace path")
+        else:
+            warnings.append("missing workspace path")
+        if orchestration_state.get("plan"):
+            score += 35
+            reasons.append("execution plan")
+        else:
+            warnings.append("missing execution plan")
+        if orchestration_state.get("status"):
+            score += 10
+            reasons.append("orchestration status")
+        if step_results or orchestration_state.get("execution_results"):
+            score += 25
+            reasons.append("step results")
+        else:
+            warnings.append("missing step results")
+
+        current_step_index = (
+            orchestration_state.get("current_step_index")
+            or data.get("current_step_index")
+            or 0
+        )
+        if int(current_step_index or 0) > 0:
+            score += 10
+            reasons.append("progress cursor")
+
+        if (
+            orchestration_state.get("plan")
+            and (step_results or orchestration_state.get("execution_results"))
+            and int(current_step_index or 0) > 0
+        ):
+            score += 15
+            reasons.append("replay coverage")
+
+        score = max(0, min(100, score))
+        status = "high" if score >= 80 else "medium" if score >= 55 else "low"
+        summary = (
+            "Checkpoint has strong replay state coverage"
+            if status == "high"
+            else (
+                "Checkpoint can resume but some replay state is incomplete"
+                if status == "medium"
+                else "Checkpoint replay is fragile; important state is missing"
+            )
+        )
+        return {
+            "score": score,
+            "status": status,
+            "summary": summary,
+            "present_signals": reasons,
+            "warnings": warnings,
+        }
+
     def _checkpoint_name_priority(self, checkpoint_name: str) -> int:
         lowered = str(checkpoint_name or "").lower()
         if lowered == "autosave_latest":
@@ -483,6 +556,7 @@ class CheckpointService:
                         "progress_score": entry["progress_score"],
                         "recommended": entry["name"] == recommended_name,
                         **self._checkpoint_resume_metadata(data),
+                        "restore_fidelity": self._checkpoint_restore_fidelity(data),
                     }
                 )
 

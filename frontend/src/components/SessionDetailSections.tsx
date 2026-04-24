@@ -1,5 +1,13 @@
 import type { ReactNode } from 'react';
-import type { Checkpoint, CheckpointInspection, Project, Session, Task } from '@/types/api';
+import type {
+  Checkpoint,
+  CheckpointInspection,
+  Project,
+  Session,
+  SessionDivergenceCompareResponse,
+  SessionStateDiffResponse,
+  Task,
+} from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { TerminalViewer } from '@/components/TerminalViewer';
 import { StatusBadge } from '@/components/ui';
@@ -35,6 +43,16 @@ export interface TimelineEvent {
   type: TimelineEventType;
   title: string;
   detail: string;
+}
+
+export interface TimelineSpan {
+  id: string;
+  title: string;
+  lane: 'reasoning' | 'tool' | 'workspace' | 'validation' | 'system';
+  status: 'healthy' | 'warning' | 'error';
+  started_at: string;
+  event_count: number;
+  summary: string;
 }
 
 interface SessionHeaderProps {
@@ -234,28 +252,40 @@ export function SessionTabs({
 }
 
 interface SessionLogsPanelProps {
+  anomalyEvents?: Array<{ title: string; detail: string; at: string }>;
+  compareMatches?: SessionDivergenceCompareResponse | null;
   displayLogs: TerminalLogEntry[];
   formatDateTime: (value?: string | null) => string;
   handleRefreshLogs: () => Promise<void>;
+  healthEvents?: Array<{ timestamp: string; score: number; slope?: number | null }>;
   logVerbosity: 'clean' | 'verbose';
   logViewMode: 'newest' | 'oldest' | 'success' | 'errors' | 'all';
   onLogVerbosityChange: (mode: 'clean' | 'verbose') => void;
   onLogViewModeChange: (mode: 'newest' | 'oldest' | 'success' | 'errors' | 'all') => void;
+  timelineSpans?: TimelineSpan[];
+  stateDiff?: SessionStateDiffResponse | null;
   timelineEvents: TimelineEvent[];
   wsConnected: boolean;
 }
 
 export function SessionLogsPanel({
+  anomalyEvents = [],
+  compareMatches,
   displayLogs,
   formatDateTime,
   handleRefreshLogs,
+  healthEvents = [],
   logVerbosity,
   logViewMode,
   onLogVerbosityChange,
   onLogViewModeChange,
+  timelineSpans = [],
+  stateDiff,
   timelineEvents,
   wsConnected,
 }: SessionLogsPanelProps) {
+  const latestHealth = healthEvents[healthEvents.length - 1] || null;
+
   return (
     <div className="space-y-4">
       <TerminalViewer
@@ -307,6 +337,204 @@ export function SessionLogsPanel({
             <option value="all">Show All</option>
           </select>
         </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Health Score</h3>
+            {latestHealth ? (
+              <span
+                className={cn(
+                  'text-xs font-medium',
+                  latestHealth.score >= 80
+                    ? 'text-emerald-400'
+                    : latestHealth.score >= 50
+                      ? 'text-amber-400'
+                      : 'text-red-400'
+                )}
+              >
+                {latestHealth.score}/100
+              </span>
+            ) : (
+              <span className="text-xs text-slate-500">No score yet</span>
+            )}
+          </div>
+          {healthEvents.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              Health history appears after orchestration events start landing.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {healthEvents.slice(-5).reverse().map((event) => (
+                <div
+                  key={`${event.timestamp}-${event.score}`}
+                  className="flex items-center justify-between rounded-md border border-slate-800 px-3 py-2 text-sm"
+                >
+                  <div>
+                    <p className="font-medium text-slate-200">{event.score}/100</p>
+                    <p className="text-xs text-slate-500">{formatDateTime(event.timestamp)}</p>
+                  </div>
+                  <span
+                    className={cn(
+                      'text-xs font-medium',
+                      typeof event.slope !== 'number' || event.slope === 0
+                        ? 'text-slate-400'
+                        : event.slope > 0
+                          ? 'text-emerald-400'
+                          : 'text-red-400'
+                    )}
+                  >
+                    {typeof event.slope === 'number'
+                      ? `${event.slope > 0 ? '+' : ''}${event.slope}`
+                      : 'stable'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Latest State Diff</h3>
+            <span className="text-xs text-slate-500">
+              {stateDiff
+                ? `Snapshots ${stateDiff.from_checkpoint} → ${stateDiff.to_checkpoint}`
+                : 'Unavailable'}
+            </span>
+          </div>
+          {!stateDiff ? (
+            <p className="text-sm text-slate-500">
+              Diff data appears after at least two state snapshots exist.
+            </p>
+          ) : (
+            <div className="space-y-2 text-sm">
+              <p className="text-slate-300">
+                Step index change: <span className="font-medium text-white">{stateDiff.delta.current_step_index.change}</span>
+              </p>
+              <p className="text-slate-300">
+                Retry budget: <span className="font-medium text-white">{stateDiff.delta.retry_budget_remaining.from}</span> →{' '}
+                <span className="font-medium text-white">{stateDiff.delta.retry_budget_remaining.to}</span>
+              </p>
+              <p className="text-slate-300">
+                Files added: <span className="font-medium text-white">{stateDiff.delta.files_touched.added.length}</span>
+                {stateDiff.delta.files_touched.added.length > 0
+                  ? ` • ${stateDiff.delta.files_touched.added.slice(0, 3).join(', ')}`
+                  : ''}
+              </p>
+              <p className="text-slate-300">
+                New validations: <span className="font-medium text-white">{stateDiff.delta.validation_verdicts.new_entries.length}</span>
+              </p>
+              <p className="text-slate-300">
+                Workspace hash changed:{' '}
+                <span className={cn('font-medium', stateDiff.delta.workspace_hash_changed ? 'text-amber-300' : 'text-emerald-400')}>
+                  {stateDiff.delta.workspace_hash_changed ? 'yes' : 'no'}
+                </span>
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {anomalyEvents.length > 0 && (
+        <div className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-amber-200">Anomaly Pins</h3>
+            <span className="text-xs text-amber-300">{anomalyEvents.length}</span>
+          </div>
+          <div className="space-y-2">
+            {anomalyEvents.slice(-3).reverse().map((event) => (
+              <div key={`${event.at}-${event.title}`} className="rounded-md border border-amber-900/60 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-medium uppercase text-amber-300">{event.title}</span>
+                  <span className="text-xs text-slate-500">{formatDateTime(event.at)}</span>
+                </div>
+                <p className="mt-1 text-sm text-slate-200">{event.detail}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {compareMatches && compareMatches.matches.length > 0 && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Similar Failed Sessions</h3>
+            <span className="text-xs text-slate-400">{compareMatches.matches.length} matches</span>
+          </div>
+          <div className="space-y-2">
+            {compareMatches.matches.slice(0, 3).map((match) => (
+              <div key={match.session_id} className="rounded-md border border-slate-800 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-slate-200">
+                    #{match.session_id} {match.session_name}
+                  </p>
+                  <span className="text-xs text-sky-400">
+                    {(match.similarity_score * 100).toFixed(0)}% similar
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  Retries {match.retry_count} • Tool failures {match.tool_failure_count} • Intent gaps {match.intent_gap_count}
+                </p>
+                {match.shared_tags.length > 0 && (
+                  <p className="mt-1 text-xs text-slate-400">
+                    Shared: {match.shared_tags.slice(0, 4).join(', ')}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-200">Causal Spans</h3>
+          <span className="text-xs text-slate-400">{timelineSpans.length} spans</span>
+        </div>
+        {timelineSpans.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            Span grouping appears when parent-linked orchestration events are present.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {timelineSpans.slice().reverse().map((span) => (
+              <div key={span.id} className="rounded-md border border-slate-800 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={cn(
+                        'text-xs font-medium uppercase',
+                        span.lane === 'reasoning' && 'text-violet-400',
+                        span.lane === 'tool' && 'text-sky-400',
+                        span.lane === 'workspace' && 'text-emerald-400',
+                        span.lane === 'validation' && 'text-lime-400',
+                        span.lane === 'system' && 'text-cyan-400'
+                      )}
+                    >
+                      {span.lane}
+                    </span>
+                    <span
+                      className={cn(
+                        'text-xs font-medium',
+                        span.status === 'healthy' && 'text-emerald-400',
+                        span.status === 'warning' && 'text-amber-400',
+                        span.status === 'error' && 'text-red-400'
+                      )}
+                    >
+                      {span.status}
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-500">{formatDateTime(span.started_at)}</span>
+                </div>
+                <p className="mt-2 text-sm font-medium text-slate-200">{span.title}</p>
+                <p className="mt-1 text-sm text-slate-400">{span.summary}</p>
+                <p className="mt-1 text-xs text-slate-500">{span.event_count} linked events</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
@@ -578,6 +806,20 @@ export function SessionSettingsPanel({
                     <p className="text-xs text-slate-500">
                       {formatDateTime(checkpoint.created_at)} • Step {checkpoint.step_index ?? 0} • Completed {checkpoint.completed_steps ?? 0}
                     </p>
+                    {checkpoint.restore_fidelity ? (
+                      <p
+                        className={cn(
+                          'mt-1 text-xs',
+                          checkpoint.restore_fidelity.status === 'high'
+                            ? 'text-emerald-300'
+                            : checkpoint.restore_fidelity.status === 'medium'
+                              ? 'text-amber-300'
+                              : 'text-red-300'
+                        )}
+                      >
+                        Replay fidelity: {checkpoint.restore_fidelity.status} ({checkpoint.restore_fidelity.score}/100)
+                      </p>
+                    ) : null}
                     {checkpoint.resume_reason ? (
                       <p
                         className={cn(
@@ -644,6 +886,20 @@ export function SessionSettingsPanel({
             <p className="mt-2 text-xs text-slate-300">
               Plan steps {checkpointInspection.summary.plan_step_count} • Completed {checkpointInspection.summary.completed_step_count} • Repairs {checkpointInspection.summary.completion_repair_attempts}
             </p>
+            {checkpointInspection.restore_fidelity ? (
+              <p
+                className={cn(
+                  'mt-2 text-xs',
+                  checkpointInspection.restore_fidelity.status === 'high'
+                    ? 'text-emerald-300'
+                    : checkpointInspection.restore_fidelity.status === 'medium'
+                      ? 'text-amber-300'
+                      : 'text-red-300'
+                )}
+              >
+                Replay fidelity {checkpointInspection.restore_fidelity.status} ({checkpointInspection.restore_fidelity.score}/100): {checkpointInspection.restore_fidelity.summary}
+              </p>
+            ) : null}
             {checkpointInspection.latest_validation && (
               <pre className="mt-3 overflow-x-auto rounded-lg bg-slate-950/80 p-3 text-xs text-slate-300">
                 {JSON.stringify(checkpointInspection.latest_validation, null, 2)}

@@ -5,7 +5,11 @@ import json
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.orchestration.persistence import (
     append_orchestration_event,
+    diff_orchestration_state_snapshots,
+    emit_intent_outcome_mismatch,
+    maybe_emit_divergence_detected,
     record_validation_verdict,
+    read_orchestration_state_snapshots,
     save_orchestration_checkpoint,
 )
 from app.services.orchestration.types import ValidationVerdict
@@ -39,9 +43,11 @@ def test_append_orchestration_event_writes_append_only_jsonl(tmp_path):
 
     assert [line["event_type"] for line in lines] == [
         "phase_started",
+        "health_score_updated",
         "phase_finished",
     ]
     assert lines[0]["details"]["phase"] == "planning"
+    assert lines[1]["details"]["score"] == 100
 
 
 def test_validation_verdict_also_persists_event(db_session, tmp_path):
@@ -75,9 +81,15 @@ def test_validation_verdict_also_persists_event(db_session, tmp_path):
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
 
-    assert lines[-1]["event_type"] == "validation_result"
-    assert lines[-1]["details"]["stage"] == "plan"
-    assert lines[-1]["details"]["status"] == "warning"
+    validation_event = next(
+        line for line in lines if line["event_type"] == "validation_result"
+    )
+    assert validation_event["details"]["stage"] == "plan"
+    assert validation_event["details"]["status"] == "warning"
+
+    snapshots = read_orchestration_state_snapshots(project_dir, 9, 5)
+    assert snapshots[-1]["trigger"] == "validation_plan"
+    assert snapshots[-1]["validation_verdicts"][-1]["status"] == "warning"
 
 
 def test_checkpoint_save_also_persists_checkpoint_saved_event(db_session, tmp_path):
@@ -105,8 +117,14 @@ def test_checkpoint_save_also_persists_checkpoint_saved_event(db_session, tmp_pa
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
 
-    assert lines[-1]["event_type"] == "checkpoint_saved"
-    assert lines[-1]["details"]["checkpoint_name"] == "autosave_latest"
+    checkpoint_event = next(
+        line for line in lines if line["event_type"] == "checkpoint_saved"
+    )
+    assert checkpoint_event["details"]["checkpoint_name"] == "autosave_latest"
+
+    snapshots = read_orchestration_state_snapshots(project_dir, 11, 8)
+    assert snapshots[-1]["checkpoint_name"] == "autosave_latest"
+    assert snapshots[-1]["trigger"] == "checkpoint_saved"
 
 
 def test_tool_tracking_also_persists_tool_events(db_session, tmp_path, monkeypatch):
@@ -166,6 +184,116 @@ def test_tool_tracking_also_persists_tool_events(db_session, tmp_path, monkeypat
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
 
+    tool_failed_event = next(
+        line for line in lines if line["event_type"] == "tool_failed"
+    )
     assert lines[0]["event_type"] == "tool_invoked"
-    assert lines[-1]["event_type"] == "tool_failed"
-    assert lines[-1]["details"]["tool_name"] == "rg"
+    assert tool_failed_event["details"]["tool_name"] == "rg"
+
+    health_event = lines[-1]
+    assert health_event["event_type"] == "health_score_updated"
+    assert health_event["details"]["score"] < 100
+
+
+def test_snapshot_diff_reports_step_and_file_delta(db_session, tmp_path):
+    project_dir = tmp_path / "diff-project"
+    project_dir.mkdir()
+    state = OrchestrationState(
+        session_id="12",
+        task_description="Diff event",
+        project_name="Diff Journal",
+        task_id=4,
+    )
+    state._project_dir_override = str(project_dir)
+    state.plan = [{"description": "one"}, {"description": "two"}]
+
+    save_orchestration_checkpoint(
+        db_session,
+        session_id=12,
+        task_id=4,
+        prompt="before",
+        orchestration_state=state,
+        checkpoint_name="before",
+    )
+
+    state.current_step_index = 1
+    state.changed_files = ["src/app.py"]
+    save_orchestration_checkpoint(
+        db_session,
+        session_id=12,
+        task_id=4,
+        prompt="after",
+        orchestration_state=state,
+        checkpoint_name="after",
+    )
+
+    diff = diff_orchestration_state_snapshots(
+        project_dir,
+        12,
+        4,
+        from_checkpoint=0,
+        to_checkpoint=1,
+    )
+
+    assert diff["delta"]["current_step_index"]["change"] == 1
+    assert diff["delta"]["files_touched"]["added"] == ["src/app.py"]
+
+
+def test_divergence_event_emitted_after_retry_cluster(tmp_path):
+    project_dir = tmp_path / "divergence-project"
+    project_dir.mkdir()
+
+    step_started = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=21,
+        task_id=2,
+        event_type="step_started",
+        details={"step_index": 1},
+    )
+    append_orchestration_event(
+        project_dir=project_dir,
+        session_id=21,
+        task_id=2,
+        event_type="retry_entered",
+        parent_event_id=step_started["event_id"],
+        details={"step_index": 1, "attempt": 1},
+    )
+    retry_two = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=21,
+        task_id=2,
+        event_type="retry_entered",
+        parent_event_id=step_started["event_id"],
+        details={"step_index": 1, "attempt": 2},
+    )
+
+    divergence = maybe_emit_divergence_detected(
+        project_dir=project_dir,
+        session_id=21,
+        task_id=2,
+        parent_event_id=retry_two["event_id"],
+    )
+
+    assert divergence is not None
+    assert divergence["event_type"] == "divergence_detected"
+    assert divergence["details"]["reason"] in {"retry_cluster", "health_drop"}
+
+
+def test_intent_outcome_mismatch_event_emitted_for_file_gap(tmp_path):
+    project_dir = tmp_path / "intent-gap-project"
+    project_dir.mkdir()
+
+    mismatch = emit_intent_outcome_mismatch(
+        project_dir=project_dir,
+        session_id=22,
+        task_id=3,
+        step_index=1,
+        step_description="Create src/app.ts and tests/app.test.ts",
+        expected_files=["src/app.ts", "tests/app.test.ts"],
+        actual_files=["README.md"],
+        actual_tool_calls=["rg", "sed"],
+    )
+
+    assert mismatch is not None
+    assert mismatch["event_type"] == "intent_outcome_mismatch"
+    assert mismatch["details"]["mismatch_score"] >= 40

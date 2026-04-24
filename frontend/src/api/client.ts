@@ -21,6 +21,8 @@ import type {
   Checkpoint,
   CheckpointInspection,
   OrchestrationEvent,
+  SessionStateDiffResponse,
+  SessionDivergenceCompareResponse,
   AppSettings,
 } from '../types/api';
 
@@ -484,6 +486,22 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/tasks/${taskId}/events`, {
       params: eventType ? { event_type: eventType } : undefined,
     }),
+
+  getSessionDiff: (
+    sessionId: number,
+    params?: { task_id?: number; from_checkpoint?: number; to_checkpoint?: number }
+  ) =>
+    apiClient.get<SessionStateDiffResponse>(`/sessions/${sessionId}/diff`, {
+      params,
+    }),
+
+  getSessionDivergenceCompare: (sessionId: number, limit: number = 5) =>
+    apiClient.get<SessionDivergenceCompareResponse>(
+      `/sessions/${sessionId}/compare-divergence`,
+      {
+        params: { limit },
+      }
+    ),
 
   replayCheckpoint: (sessionId: number, checkpointName: string) =>
     apiClient.post<{ 

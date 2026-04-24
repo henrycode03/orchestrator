@@ -226,6 +226,7 @@ def test_checkpoint_api_exposes_recommended_resume_checkpoint(
     assert (
         payload["checkpoints"][0]["resume_reason"] == "Saved execution plan available"
     )
+    assert payload["checkpoints"][0]["restore_fidelity"]["status"] == "high"
 
 
 def test_checkpoint_api_marks_hollow_paused_checkpoint_as_not_resumable(
@@ -297,6 +298,7 @@ def test_checkpoint_api_marks_hollow_paused_checkpoint_as_not_resumable(
     assert inspect_response.status_code == 200
     inspect_payload = inspect_response.json()
     assert inspect_payload["resume_readiness"]["resumable"] is False
+    assert inspect_payload["restore_fidelity"]["status"] == "low"
 
 
 def test_stop_session_resets_running_task_state_for_clean_resume(

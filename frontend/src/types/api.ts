@@ -238,6 +238,13 @@ export interface Checkpoint {
   recommended?: boolean;
   resumable?: boolean;
   resume_reason?: string | null;
+  restore_fidelity?: {
+    score: number;
+    status: 'high' | 'medium' | 'low';
+    summary: string;
+    present_signals: string[];
+    warnings: string[];
+  };
 }
 
 export interface CheckpointInspection {
@@ -282,17 +289,90 @@ export interface CheckpointInspection {
     resumable: boolean;
     resume_reason: string;
   };
+  restore_fidelity?: {
+    score: number;
+    status: 'high' | 'medium' | 'low';
+    summary: string;
+    present_signals: string[];
+    warnings: string[];
+  };
   validation_history: Record<string, unknown>[];
   plan_preview: Array<Record<string, unknown>>;
   step_results_preview: Array<Record<string, unknown>>;
 }
 
 export interface OrchestrationEvent {
+  event_id?: string;
   timestamp: string;
   event_type: string;
   session_id: number;
   task_id: number;
+  parent_event_id?: string | null;
   details: Record<string, unknown>;
+}
+
+export interface SessionStateDiffResponse {
+  session_id: number;
+  task_id: number;
+  from_checkpoint: number;
+  to_checkpoint: number;
+  from_snapshot: Record<string, unknown>;
+  to_snapshot: Record<string, unknown>;
+  delta: {
+    current_step_index: { from: number; to: number; change: number };
+    retry_budget_remaining: { from: number; to: number; change: number };
+    completion_repair_attempts: { from: number; to: number; change: number };
+    status: { from?: string | null; to?: string | null };
+    plan_step_count: { from: number; to: number; change: number };
+    validation_verdicts: {
+      from_count: number;
+      to_count: number;
+      new_entries: Array<Record<string, unknown>>;
+    };
+    files_touched: {
+      from_count: number;
+      to_count: number;
+      added: string[];
+      removed: string[];
+    };
+    prompt_byte_estimate: { from: number; to: number; change: number };
+    workspace_hash_changed: boolean;
+  };
+}
+
+export interface SessionDivergenceCompareResponse {
+  session_id: number;
+  project_id: number;
+  current: {
+    session_id: number;
+    session_name: string;
+    status: string;
+    created_at?: string | null;
+    task_count: number;
+    event_count: number;
+    retry_count: number;
+    tool_failure_count: number;
+    intent_gap_count: number;
+    divergence_count: number;
+    divergence_reasons: string[];
+    validation_statuses: string[];
+    min_health_score?: number | null;
+    anomaly_tags: string[];
+  };
+  matches: Array<{
+    session_id: number;
+    session_name: string;
+    status: string;
+    created_at?: string | null;
+    retry_count: number;
+    tool_failure_count: number;
+    intent_gap_count: number;
+    divergence_count: number;
+    divergence_reasons: string[];
+    anomaly_tags: string[];
+    similarity_score: number;
+    shared_tags: string[];
+  }>;
 }
 
 export interface BackendDescriptor {

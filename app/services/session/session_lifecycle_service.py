@@ -619,6 +619,9 @@ async def resume_session_lifecycle(
         checkpoint_name = checkpoint_data.get(
             "_resolved_checkpoint_name"
         ) or checkpoint_data.get("checkpoint_name")
+        restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(
+            checkpoint_data
+        )
         context_data = checkpoint_data.get("context", {})
         task_id = context_data.get("task_id")
         if not task_id:
@@ -681,6 +684,7 @@ async def resume_session_lifecycle(
                         "resolved_checkpoint_name": checkpoint_name,
                         "celery_task_id": result.id,
                         "task_id": task.id,
+                        "restore_fidelity": restore_fidelity,
                     }
                 ),
             )
@@ -692,6 +696,7 @@ async def resume_session_lifecycle(
             "session_id": session_id,
             "requested_checkpoint_name": requested_checkpoint_name,
             "resolved_checkpoint_name": checkpoint_name,
+            "restore_fidelity": restore_fidelity,
             "message": (
                 f"Session '{session.name}' resumed successfully"
                 + (

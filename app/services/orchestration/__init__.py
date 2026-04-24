@@ -46,12 +46,19 @@ from .policy import (
 from .event_types import EventType, is_known_event_type
 from .persistence import (
     append_orchestration_event,
+    diff_orchestration_state_snapshots,
+    emit_intent_outcome_mismatch,
+    find_latest_orchestration_event,
+    maybe_emit_divergence_detected,
     read_orchestration_events,
+    read_orchestration_state_snapshots,
     record_live_log,
     record_validation_verdict,
     restore_step_result,
     save_orchestration_checkpoint,
     set_session_alert,
+    write_checkpoint_state_snapshot,
+    write_orchestration_state_snapshot,
 )
 from .planner import PlannerService
 from .planning_flow import execute_planning_phase
@@ -92,7 +99,12 @@ __all__ = [
     "ValidationVerdict",
     "PlannerService",
     "append_orchestration_event",
+    "diff_orchestration_state_snapshots",
+    "emit_intent_outcome_mismatch",
+    "find_latest_orchestration_event",
+    "maybe_emit_divergence_detected",
     "read_orchestration_events",
+    "read_orchestration_state_snapshots",
     "assemble_completion_repair_inputs",
     "assemble_execution_prompt",
     "assemble_planning_prompt",
@@ -105,6 +117,8 @@ __all__ = [
     "restore_step_result",
     "save_orchestration_checkpoint",
     "set_session_alert",
+    "write_checkpoint_state_snapshot",
+    "write_orchestration_state_snapshot",
     "build_project_state_snapshot",
     "build_workspace_discovery_step",
     "get_state_manager_path",

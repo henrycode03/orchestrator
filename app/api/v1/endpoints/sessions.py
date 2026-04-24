@@ -30,6 +30,8 @@ from app.services import (
     delete_session_checkpoint_payload as _delete_session_checkpoint_payload,
     ensure_unique_session_name as _ensure_unique_session_name,
     get_session_logs_payload as _get_session_logs_payload,
+    get_session_divergence_compare_payload as _get_session_divergence_compare_payload,
+    get_session_state_diff_payload as _get_session_state_diff_payload,
     get_session_workspace_info_payload as _get_session_workspace_info_payload,
     get_session_statistics_payload as _get_session_statistics_payload,
     get_sorted_logs_payload as _get_sorted_logs_payload,
@@ -614,6 +616,42 @@ def get_session_task_events(
         event_type_filter=event_type,
     )
     return {"session_id": session_id, "task_id": task_id, "events": events}
+
+
+@router.get("/sessions/{session_id}/diff")
+def get_session_state_diff(
+    session_id: int,
+    from_checkpoint: Optional[int] = None,
+    to_checkpoint: Optional[int] = None,
+    task_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return a structured diff between two orchestration state snapshots."""
+
+    return _get_session_state_diff_payload(
+        db,
+        session_id,
+        from_checkpoint=from_checkpoint,
+        to_checkpoint=to_checkpoint,
+        task_id=task_id,
+    )
+
+
+@router.get("/sessions/{session_id}/compare-divergence")
+def get_session_divergence_compare(
+    session_id: int,
+    limit: int = 5,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Compare current session anomaly fingerprint with sibling sessions."""
+
+    return _get_session_divergence_compare_payload(
+        db,
+        session_id,
+        limit=limit,
+    )
 
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")

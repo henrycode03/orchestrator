@@ -5,6 +5,30 @@ import path from 'path'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return undefined
+          }
+          if (id.includes('react-router')) {
+            return 'router'
+          }
+          if (id.includes('react')) {
+            return 'react-vendor'
+          }
+          if (id.includes('axios')) {
+            return 'network'
+          }
+          if (id.includes('lucide-react')) {
+            return 'icons'
+          }
+          return 'vendor'
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

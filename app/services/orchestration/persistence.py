@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +17,7 @@ from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.prompt_templates import OrchestrationState, StepResult
 
 from .event_types import EventType
+from .policy import MAX_STEP_ATTEMPTS
 from .types import ValidationVerdict
 
 
@@ -28,6 +32,519 @@ def _orchestration_event_log_path(
     )
 
 
+def _orchestration_state_snapshot_log_path(
+    project_dir: Any, session_id: int, task_id: int
+) -> Path:
+    return (
+        Path(project_dir)
+        / ".openclaw"
+        / "events"
+        / f"session_{session_id}_task_{task_id}_state_snapshots.jsonl"
+    )
+
+
+def _safe_jsonl_length(log_path: Path) -> int:
+    if not log_path.exists():
+        return 0
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return 0
+
+
+def _compute_workspace_hash(project_dir: Any) -> Optional[str]:
+    path = Path(project_dir)
+    if not path.exists() or not path.is_dir():
+        return None
+
+    digest = hashlib.sha256()
+    try:
+        for file_path in sorted(
+            item
+            for item in path.rglob("*")
+            if item.is_file() and ".openclaw" not in item.parts
+        ):
+            rel_path = file_path.relative_to(path)
+            stat = file_path.stat()
+            digest.update(str(rel_path).encode("utf-8", errors="ignore"))
+            digest.update(str(stat.st_size).encode("utf-8"))
+            digest.update(str(int(stat.st_mtime_ns)).encode("utf-8"))
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _build_health_inputs(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    non_health_events = [
+        event
+        for event in events
+        if event.get("event_type") != EventType.HEALTH_SCORE_UPDATED
+    ]
+    recent = non_health_events[-25:]
+    tool_failures = sum(
+        1 for event in recent if event.get("event_type") == EventType.TOOL_FAILED
+    )
+    retries = sum(
+        1 for event in recent if event.get("event_type") == EventType.RETRY_ENTERED
+    )
+    repairs = sum(
+        1
+        for event in recent
+        if event.get("event_type")
+        in {
+            EventType.REPAIR_GENERATED,
+            EventType.REPAIR_APPLIED,
+            EventType.REPAIR_REJECTED,
+        }
+    )
+    validation_warnings = 0
+    validation_failures = 0
+    same_tool_streak = 0
+    current_same_tool_streak = 1
+    last_tool_name: Optional[str] = None
+    for event in recent:
+        if event.get("event_type") == EventType.VALIDATION_RESULT:
+            status = ((event.get("details") or {}).get("status") or "").lower()
+            if status == "warning":
+                validation_warnings += 1
+            elif status in {"rejected", "repair_required"}:
+                validation_failures += 1
+
+        if event.get("event_type") != EventType.TOOL_INVOKED:
+            continue
+        tool_name = str((event.get("details") or {}).get("tool_name") or "").strip()
+        if not tool_name:
+            continue
+        if tool_name == last_tool_name:
+            current_same_tool_streak += 1
+        else:
+            current_same_tool_streak = 1
+            last_tool_name = tool_name
+        same_tool_streak = max(same_tool_streak, current_same_tool_streak)
+
+    score = 100
+    score -= tool_failures * 18
+    score -= retries * 10
+    score -= repairs * 8
+    score -= validation_warnings * 6
+    score -= validation_failures * 12
+    score -= max(0, same_tool_streak - 2) * 5
+
+    return {
+        "score": max(0, min(100, score)),
+        "inputs": {
+            "tool_failures": tool_failures,
+            "retries": retries,
+            "repairs": repairs,
+            "validation_warnings": validation_warnings,
+            "validation_failures": validation_failures,
+            "same_tool_streak": same_tool_streak,
+            "window_event_count": len(recent),
+        },
+    }
+
+
+def _extract_declared_intent(step_description: str) -> str:
+    text = str(step_description or "").strip()
+    if not text:
+        return "unknown"
+    lowered = text.lower()
+    for marker in ("create ", "update ", "edit ", "fix ", "verify ", "test "):
+        if marker in lowered:
+            start = lowered.find(marker)
+            return text[start : start + 120].strip()
+    return text[:120]
+
+
+def _normalize_text_tokens(values: List[str]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        for token in re.findall(r"[a-z0-9_./-]+", str(value or "").lower()):
+            if len(token) >= 3:
+                tokens.add(token)
+    return tokens
+
+
+def _append_health_score_update(
+    *,
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+) -> Optional[Dict[str, Any]]:
+    events = read_orchestration_events(project_dir, session_id, task_id)
+    if not events:
+        return None
+
+    health_events = [
+        event
+        for event in events
+        if event.get("event_type") == EventType.HEALTH_SCORE_UPDATED
+    ]
+    latest_health = health_events[-1] if health_events else None
+    health_inputs = _build_health_inputs(events)
+    score = int(health_inputs["score"])
+    previous_score = None
+    if latest_health:
+        previous_score = (latest_health.get("details") or {}).get("score")
+    if previous_score == score:
+        return latest_health
+
+    slope = None
+    if isinstance(previous_score, int):
+        slope = score - previous_score
+
+    return append_orchestration_event(
+        project_dir=project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type=EventType.HEALTH_SCORE_UPDATED,
+        details={
+            "score": score,
+            "slope": slope,
+            "previous_score": previous_score,
+            **health_inputs["inputs"],
+        },
+    )
+
+
+def emit_intent_outcome_mismatch(
+    *,
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    step_index: int,
+    step_description: str,
+    expected_files: List[str],
+    actual_files: List[str],
+    actual_tool_calls: List[str],
+    parent_event_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    expected_files = list(dict.fromkeys(expected_files or []))
+    actual_files = list(dict.fromkeys(actual_files or []))
+    actual_tool_calls = list(dict.fromkeys(actual_tool_calls or []))
+    expected_tokens = _normalize_text_tokens(
+        expected_files + [step_description, _extract_declared_intent(step_description)]
+    )
+    actual_tokens = _normalize_text_tokens(actual_files + actual_tool_calls)
+    missing_expected_files = sorted(set(expected_files) - set(actual_files))
+    overlap = len(expected_tokens & actual_tokens)
+    expected_signal = max(1, len(expected_files) + min(5, len(expected_tokens)))
+    mismatch_score = max(
+        0,
+        min(
+            100,
+            int(
+                (len(missing_expected_files) * 25)
+                + (30 if actual_tool_calls and overlap == 0 else 0)
+                + max(0, 20 - overlap * 4)
+            ),
+        ),
+    )
+    if mismatch_score < 40:
+        return None
+
+    last_mismatch = find_latest_orchestration_event(
+        project_dir,
+        session_id,
+        task_id,
+        event_types={EventType.INTENT_OUTCOME_MISMATCH},
+    )
+    last_details = (last_mismatch or {}).get("details") or {}
+    if (
+        last_details.get("step_index") == step_index
+        and last_details.get("mismatch_score") == mismatch_score
+    ):
+        return None
+
+    return append_orchestration_event(
+        project_dir=project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type=EventType.INTENT_OUTCOME_MISMATCH,
+        parent_event_id=parent_event_id,
+        details={
+            "step_index": step_index,
+            "declared_intent": _extract_declared_intent(step_description),
+            "expected_artifacts": expected_files[:10],
+            "actual_files": actual_files[:10],
+            "actual_tool_calls": actual_tool_calls[:10],
+            "missing_expected_files": missing_expected_files[:10],
+            "mismatch_score": mismatch_score,
+            "overlap_signals": overlap,
+            "expected_signal_count": expected_signal,
+        },
+    )
+
+
+def maybe_emit_divergence_detected(
+    *,
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    parent_event_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    events = read_orchestration_events(project_dir, session_id, task_id)
+    if len(events) < 2:
+        return None
+
+    latest_divergence = None
+    for event in reversed(events):
+        if event.get("event_type") == EventType.DIVERGENCE_DETECTED:
+            latest_divergence = event
+            break
+
+    problem_event: Optional[Dict[str, Any]] = None
+    reason = None
+
+    recent_non_health = [
+        event
+        for event in events[-8:]
+        if event.get("event_type") != EventType.HEALTH_SCORE_UPDATED
+    ]
+    recent_retries = [
+        event
+        for event in recent_non_health
+        if event.get("event_type") == EventType.RETRY_ENTERED
+    ]
+    if len(recent_retries) >= 2:
+        problem_event = recent_retries[0]
+        reason = "retry_cluster"
+
+    latest_health = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("event_type") == EventType.HEALTH_SCORE_UPDATED
+        ),
+        None,
+    )
+    if latest_health and isinstance(
+        ((latest_health.get("details") or {}).get("slope")), int
+    ):
+        if int((latest_health.get("details") or {}).get("slope") or 0) <= -20:
+            problem_event = latest_health
+            reason = "health_drop"
+
+    latest_validation = next(
+        (
+            event
+            for event in reversed(recent_non_health)
+            if event.get("event_type") == EventType.VALIDATION_RESULT
+        ),
+        None,
+    )
+    if latest_validation:
+        validation_status = str(
+            ((latest_validation.get("details") or {}).get("status") or "")
+        ).lower()
+        prior_success = any(
+            str(((event.get("details") or {}).get("status") or "")).lower()
+            in {"accepted", "warning"}
+            for event in recent_non_health
+            if event is not latest_validation
+            and event.get("event_type") == EventType.VALIDATION_RESULT
+        )
+        if prior_success and validation_status in {
+            "warning",
+            "repair_required",
+            "rejected",
+        }:
+            problem_event = latest_validation
+            reason = "validation_regression"
+
+    if not problem_event or not reason:
+        return None
+
+    last_known_good_event = None
+    problem_index = next(
+        (index for index, event in enumerate(events) if event is problem_event),
+        len(events) - 1,
+    )
+    for candidate in reversed(events[:problem_index]):
+        if candidate.get("event_type") in {
+            EventType.STEP_FINISHED,
+            EventType.VALIDATION_RESULT,
+            EventType.CHECKPOINT_SAVED,
+            EventType.PHASE_FINISHED,
+        }:
+            candidate_details = candidate.get("details") or {}
+            status = str(candidate_details.get("status") or "").lower()
+            if (
+                candidate.get("event_type") == EventType.STEP_FINISHED
+                and status != "success"
+            ):
+                continue
+            if candidate.get(
+                "event_type"
+            ) == EventType.VALIDATION_RESULT and status not in {
+                "accepted",
+                "warning",
+            }:
+                continue
+            last_known_good_event = candidate
+            break
+
+    problem_event_id = problem_event.get("event_id")
+    if latest_divergence and (
+        (latest_divergence.get("details") or {}).get("problem_event_id")
+        == problem_event_id
+    ):
+        return None
+
+    return append_orchestration_event(
+        project_dir=project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type=EventType.DIVERGENCE_DETECTED,
+        parent_event_id=parent_event_id,
+        details={
+            "reason": reason,
+            "problem_event_id": problem_event_id,
+            "last_known_good_event_id": (last_known_good_event or {}).get("event_id"),
+            "problem_event_type": problem_event.get("event_type"),
+            "problem_timestamp": problem_event.get("timestamp"),
+        },
+    )
+
+
+def build_orchestration_state_snapshot(
+    *,
+    session_id: int,
+    task_id: int,
+    orchestration_state: OrchestrationState,
+    checkpoint_name: Optional[str] = None,
+    trigger: str,
+    related_event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    validation_history = list(orchestration_state.validation_history or [])
+    validation_verdicts = [
+        {
+            "stage": item.get("stage"),
+            "status": item.get("status"),
+            "profile": item.get("profile"),
+        }
+        for item in validation_history[-10:]
+    ]
+    retry_budget_remaining = max(
+        0,
+        MAX_STEP_ATTEMPTS
+        + (1 if getattr(orchestration_state, "relaxed_mode", False) else 0)
+        - len(getattr(orchestration_state, "debug_attempts", []) or []),
+    )
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "session_id": session_id,
+        "task_id": task_id,
+        "trigger": trigger,
+        "checkpoint_name": checkpoint_name,
+        "related_event_id": related_event_id,
+        "status": orchestration_state.status.value,
+        "plan_steps": list(orchestration_state.plan or []),
+        "current_step_index": int(orchestration_state.current_step_index or 0),
+        "retry_budget_remaining": retry_budget_remaining,
+        "validation_verdicts": validation_verdicts,
+        "files_touched": list(dict.fromkeys(orchestration_state.changed_files or [])),
+        "prompt_byte_estimate": len(
+            str(orchestration_state.task_description or "").encode("utf-8")
+        )
+        + len(str(orchestration_state.project_context or "").encode("utf-8")),
+        "workspace_hash": _compute_workspace_hash(orchestration_state.project_dir),
+        "completion_repair_attempts": int(
+            getattr(orchestration_state, "completion_repair_attempts", 0) or 0
+        ),
+    }
+
+
+def write_checkpoint_state_snapshot(
+    *,
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    checkpoint_payload: Dict[str, Any],
+    trigger: str,
+    related_event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    orchestration_state = checkpoint_payload.get("orchestration_state", {}) or {}
+    context = checkpoint_payload.get("context", {}) or {}
+    validation_history = list(orchestration_state.get("validation_history", []) or [])
+    validation_verdicts = [
+        {
+            "stage": item.get("stage"),
+            "status": item.get("status"),
+            "profile": item.get("profile"),
+        }
+        for item in validation_history[-10:]
+    ]
+    retry_budget_remaining = max(
+        0,
+        MAX_STEP_ATTEMPTS
+        + (1 if orchestration_state.get("relaxed_mode") else 0)
+        - len(orchestration_state.get("debug_attempts", []) or []),
+    )
+    log_path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
+    payload = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "session_id": session_id,
+        "task_id": task_id,
+        "trigger": trigger,
+        "checkpoint_name": checkpoint_payload.get("checkpoint_name"),
+        "related_event_id": related_event_id,
+        "status": orchestration_state.get("status"),
+        "plan_steps": list(orchestration_state.get("plan", []) or []),
+        "current_step_index": int(
+            orchestration_state.get(
+                "current_step_index", checkpoint_payload.get("current_step_index", 0)
+            )
+            or 0
+        ),
+        "retry_budget_remaining": retry_budget_remaining,
+        "validation_verdicts": validation_verdicts,
+        "files_touched": list(
+            dict.fromkeys(orchestration_state.get("changed_files", []) or [])
+        ),
+        "prompt_byte_estimate": len(
+            str(context.get("task_description", "")).encode("utf-8")
+        )
+        + len(str(context.get("project_context", "")).encode("utf-8")),
+        "workspace_hash": _compute_workspace_hash(project_dir),
+        "completion_repair_attempts": int(
+            orchestration_state.get("completion_repair_attempts", 0) or 0
+        ),
+        "snapshot_index": _safe_jsonl_length(log_path),
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str) + "\n")
+    return payload
+
+
+def write_orchestration_state_snapshot(
+    *,
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    orchestration_state: OrchestrationState,
+    checkpoint_name: Optional[str] = None,
+    trigger: str,
+    related_event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    log_path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
+    payload = build_orchestration_state_snapshot(
+        session_id=session_id,
+        task_id=task_id,
+        orchestration_state=orchestration_state,
+        checkpoint_name=checkpoint_name,
+        trigger=trigger,
+        related_event_id=related_event_id,
+    )
+    payload["snapshot_index"] = _safe_jsonl_length(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str) + "\n")
+    return payload
+
+
 def append_orchestration_event(
     *,
     project_dir: Any,
@@ -35,18 +552,30 @@ def append_orchestration_event(
     task_id: int,
     event_type: str,
     details: Optional[Dict[str, Any]] = None,
+    parent_event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = {
+        "event_id": str(uuid.uuid4()),
         "timestamp": datetime.now(UTC).isoformat(),
         "event_type": event_type,
         "session_id": session_id,
         "task_id": task_id,
+        "parent_event_id": parent_event_id,
         "details": details or {},
     }
     log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, default=str) + "\n")
+    if event_type != EventType.HEALTH_SCORE_UPDATED:
+        try:
+            _append_health_score_update(
+                project_dir=project_dir,
+                session_id=session_id,
+                task_id=task_id,
+            )
+        except Exception:
+            pass
     return payload
 
 
@@ -135,7 +664,7 @@ def save_orchestration_checkpoint(
         ],
     )
     try:
-        append_orchestration_event(
+        event = append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
@@ -145,6 +674,15 @@ def save_orchestration_checkpoint(
                 "current_step_index": orchestration_state.current_step_index,
                 "status": orchestration_state.status.value,
             },
+        )
+        write_orchestration_state_snapshot(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            orchestration_state=orchestration_state,
+            checkpoint_name=checkpoint_name,
+            trigger="checkpoint_saved",
+            related_event_id=event.get("event_id"),
         )
     except Exception:
         pass
@@ -158,6 +696,7 @@ def record_validation_verdict(
     verdict: ValidationVerdict,
     *,
     step_number: Optional[int] = None,
+    parent_event_id: Optional[str] = None,
 ) -> None:
     db.add(
         TaskCheckpoint(
@@ -172,11 +711,12 @@ def record_validation_verdict(
     verdict_payload = verdict.to_dict()
     orchestration_state.validation_history.append(verdict_payload)
     try:
-        append_orchestration_event(
+        event = append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.VALIDATION_RESULT,
+            parent_event_id=parent_event_id,
             details={
                 "stage": verdict.stage,
                 "status": verdict.status,
@@ -184,6 +724,14 @@ def record_validation_verdict(
                 "step_number": step_number,
                 "reasons": verdict.reasons[:10],
             },
+        )
+        write_orchestration_state_snapshot(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            orchestration_state=orchestration_state,
+            trigger=f"validation_{verdict.stage}",
+            related_event_id=event.get("event_id"),
         )
     except Exception:
         pass
@@ -226,6 +774,133 @@ def read_orchestration_events(
     except OSError:
         pass
     return events
+
+
+def find_latest_orchestration_event(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    event_types: Optional[set[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    events = read_orchestration_events(project_dir, session_id, task_id)
+    for event in reversed(events):
+        if event_types and event.get("event_type") not in event_types:
+            continue
+        return event
+    return None
+
+
+def read_orchestration_state_snapshots(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+) -> List[Dict[str, Any]]:
+    log_path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
+    if not log_path.exists():
+        return []
+
+    snapshots: List[Dict[str, Any]] = []
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    snapshots.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return snapshots
+
+
+def diff_orchestration_state_snapshots(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    from_checkpoint: Optional[int] = None,
+    to_checkpoint: Optional[int] = None,
+) -> Dict[str, Any]:
+    snapshots = read_orchestration_state_snapshots(project_dir, session_id, task_id)
+    if not snapshots:
+        raise ValueError("No orchestration state snapshots found")
+    if to_checkpoint is None:
+        to_checkpoint = len(snapshots) - 1
+    if from_checkpoint is None:
+        from_checkpoint = max(0, to_checkpoint - 1)
+    if from_checkpoint < 0 or to_checkpoint < 0:
+        raise ValueError("Checkpoint indexes must be non-negative")
+    if from_checkpoint >= len(snapshots) or to_checkpoint >= len(snapshots):
+        raise ValueError("Checkpoint index is out of range")
+
+    start = snapshots[from_checkpoint]
+    end = snapshots[to_checkpoint]
+    start_plan = list(start.get("plan_steps") or [])
+    end_plan = list(end.get("plan_steps") or [])
+    start_files = set(start.get("files_touched") or [])
+    end_files = set(end.get("files_touched") or [])
+    start_validations = list(start.get("validation_verdicts") or [])
+    end_validations = list(end.get("validation_verdicts") or [])
+
+    return {
+        "session_id": session_id,
+        "task_id": task_id,
+        "from_checkpoint": from_checkpoint,
+        "to_checkpoint": to_checkpoint,
+        "from_snapshot": start,
+        "to_snapshot": end,
+        "delta": {
+            "current_step_index": {
+                "from": start.get("current_step_index"),
+                "to": end.get("current_step_index"),
+                "change": (end.get("current_step_index") or 0)
+                - (start.get("current_step_index") or 0),
+            },
+            "retry_budget_remaining": {
+                "from": start.get("retry_budget_remaining"),
+                "to": end.get("retry_budget_remaining"),
+                "change": (end.get("retry_budget_remaining") or 0)
+                - (start.get("retry_budget_remaining") or 0),
+            },
+            "completion_repair_attempts": {
+                "from": start.get("completion_repair_attempts"),
+                "to": end.get("completion_repair_attempts"),
+                "change": (end.get("completion_repair_attempts") or 0)
+                - (start.get("completion_repair_attempts") or 0),
+            },
+            "status": {
+                "from": start.get("status"),
+                "to": end.get("status"),
+            },
+            "plan_step_count": {
+                "from": len(start_plan),
+                "to": len(end_plan),
+                "change": len(end_plan) - len(start_plan),
+            },
+            "validation_verdicts": {
+                "from_count": len(start_validations),
+                "to_count": len(end_validations),
+                "new_entries": end_validations[len(start_validations) :],
+            },
+            "files_touched": {
+                "from_count": len(start_files),
+                "to_count": len(end_files),
+                "added": sorted(end_files - start_files),
+                "removed": sorted(start_files - end_files),
+            },
+            "prompt_byte_estimate": {
+                "from": start.get("prompt_byte_estimate"),
+                "to": end.get("prompt_byte_estimate"),
+                "change": (end.get("prompt_byte_estimate") or 0)
+                - (start.get("prompt_byte_estimate") or 0),
+            },
+            "workspace_hash_changed": start.get("workspace_hash")
+            != end.get("workspace_hash"),
+        },
+    }
 
 
 def record_live_log(

@@ -17,9 +17,14 @@ from app.services.model_adaptation import get_adaptation_profile
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
+from app.services.orchestration.persistence import diff_orchestration_state_snapshots
+from app.services.orchestration.persistence import read_orchestration_events
 from app.services.workspace.overwrite_protection_service import (
     OverwriteProtectionError,
     OverwriteProtectionService,
+)
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
 )
 from app.services.workspace.system_settings import (
     get_effective_adaptation_profile,
@@ -38,6 +43,193 @@ def _get_session_or_404(db: Session, session_id: int) -> SessionModel:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+def _session_task_event_roots(
+    db: Session,
+    session: SessionModel,
+) -> List[Dict[str, Any]]:
+    from app.models import Project
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    if not project:
+        return []
+
+    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    links = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id)
+        .order_by(SessionTask.id.asc())
+        .all()
+    )
+    roots: List[Dict[str, Any]] = []
+    seen_task_ids: set[int] = set()
+    for link in links:
+        if link.task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(link.task_id)
+        task = db.query(Task).filter(Task.id == link.task_id).first()
+        if not task:
+            continue
+        task_subfolder = str(task.task_subfolder or f"task-{task.id}")
+        roots.append(
+            {
+                "task_id": task.id,
+                "task_title": task.title,
+                "project_dir": project_root / task_subfolder,
+            }
+        )
+    return roots
+
+
+def _build_session_divergence_fingerprint(
+    db: Session,
+    session: SessionModel,
+) -> Dict[str, Any]:
+    roots = _session_task_event_roots(db, session)
+    events: List[Dict[str, Any]] = []
+    for root in roots:
+        events.extend(
+            read_orchestration_events(
+                root["project_dir"],
+                session.id,
+                root["task_id"],
+            )
+        )
+    events.sort(key=lambda item: str(item.get("timestamp") or ""))
+
+    retries = [event for event in events if event.get("event_type") == "retry_entered"]
+    tool_failures = [
+        event for event in events if event.get("event_type") == "tool_failed"
+    ]
+    validation_results = [
+        event for event in events if event.get("event_type") == "validation_result"
+    ]
+    divergence_events = [
+        event for event in events if event.get("event_type") == "divergence_detected"
+    ]
+    intent_gaps = [
+        event
+        for event in events
+        if event.get("event_type") == "intent_outcome_mismatch"
+    ]
+    health_events = [
+        event for event in events if event.get("event_type") == "health_score_updated"
+    ]
+
+    anomaly_tags: set[str] = set()
+    divergence_reasons: List[str] = []
+    for event in divergence_events:
+        reason = str(((event.get("details") or {}).get("reason") or "")).strip()
+        if reason:
+            anomaly_tags.add(f"divergence:{reason}")
+            divergence_reasons.append(reason)
+    if tool_failures:
+        anomaly_tags.add("tool_failed")
+    if retries:
+        anomaly_tags.add("retry_entered")
+    if intent_gaps:
+        anomaly_tags.add("intent_gap")
+
+    validation_statuses = [
+        str(((event.get("details") or {}).get("status") or "")).lower()
+        for event in validation_results
+    ]
+    for status_value in validation_statuses:
+        if status_value:
+            anomaly_tags.add(f"validation:{status_value}")
+
+    min_health_score = None
+    for event in health_events:
+        score = (event.get("details") or {}).get("score")
+        if isinstance(score, int):
+            min_health_score = (
+                score if min_health_score is None else min(min_health_score, score)
+            )
+
+    return {
+        "session_id": session.id,
+        "session_name": session.name,
+        "status": session.status,
+        "created_at": (
+            session.created_at.isoformat()
+            if getattr(session, "created_at", None)
+            else None
+        ),
+        "task_count": len(roots),
+        "event_count": len(events),
+        "retry_count": len(retries),
+        "tool_failure_count": len(tool_failures),
+        "intent_gap_count": len(intent_gaps),
+        "divergence_count": len(divergence_events),
+        "divergence_reasons": sorted(set(divergence_reasons)),
+        "validation_statuses": validation_statuses[-10:],
+        "min_health_score": min_health_score,
+        "anomaly_tags": sorted(anomaly_tags),
+    }
+
+
+def get_session_divergence_compare_payload(
+    db: Session,
+    session_id: int,
+    *,
+    limit: int = 5,
+) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    current = _build_session_divergence_fingerprint(db, session)
+    current_tags = set(current.get("anomaly_tags", []))
+
+    siblings = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.project_id == session.project_id,
+            SessionModel.id != session.id,
+            SessionModel.deleted_at.is_(None),
+        )
+        .order_by(SessionModel.created_at.desc())
+        .limit(25)
+        .all()
+    )
+
+    matches: List[Dict[str, Any]] = []
+    for candidate in siblings:
+        fingerprint = _build_session_divergence_fingerprint(db, candidate)
+        candidate_tags = set(fingerprint.get("anomaly_tags", []))
+        union = current_tags | candidate_tags
+        overlap_score = 0.0
+        if union:
+            overlap_score = len(current_tags & candidate_tags) / len(union)
+        count_penalty = (
+            abs(
+                int(current.get("retry_count") or 0)
+                - int(fingerprint.get("retry_count") or 0)
+            )
+            * 0.05
+        )
+        similarity_score = max(0.0, round(overlap_score - count_penalty, 3))
+        matches.append(
+            {
+                **fingerprint,
+                "similarity_score": similarity_score,
+                "shared_tags": sorted(current_tags & candidate_tags),
+            }
+        )
+
+    matches.sort(
+        key=lambda item: (
+            item.get("similarity_score", 0),
+            item.get("divergence_count", 0),
+            item.get("retry_count", 0),
+        ),
+        reverse=True,
+    )
+
+    return {
+        "session_id": session_id,
+        "project_id": session.project_id,
+        "current": current,
+        "matches": matches[: max(1, min(limit, 10))],
+    }
 
 
 def _prepare_session_for_replay(db: Session, session: SessionModel) -> None:
@@ -277,6 +469,7 @@ def inspect_session_checkpoint_payload(
     checkpoint_service = CheckpointService(db)
     payload = checkpoint_service.load_checkpoint(session_id, checkpoint_name)
     resume_metadata = checkpoint_service._checkpoint_resume_metadata(payload)
+    restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(payload)
     orchestration_state = payload.get("orchestration_state", {}) or {}
     validation_history = orchestration_state.get("validation_history", []) or []
     plan = orchestration_state.get("plan", []) or []
@@ -356,6 +549,7 @@ def inspect_session_checkpoint_payload(
             "mode": payload.get("replay_mode") or "inspection",
         },
         "resume_readiness": resume_metadata,
+        "restore_fidelity": restore_fidelity,
         "validation_history": validation_history[-10:],
         "plan_preview": plan[:5],
         "step_results_preview": step_results[-5:],
@@ -408,6 +602,57 @@ async def replay_session_checkpoint_payload(
     }
     result["message"] = f"Replay started from checkpoint: {checkpoint_name}"
     return result
+
+
+def get_session_state_diff_payload(
+    db: Session,
+    session_id: int,
+    *,
+    from_checkpoint: Optional[int] = None,
+    to_checkpoint: Optional[int] = None,
+    task_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+
+    if task_id is None:
+        latest_link = (
+            db.query(SessionTask)
+            .filter(SessionTask.session_id == session_id)
+            .order_by(
+                SessionTask.started_at.desc().nullslast(),
+                SessionTask.completed_at.desc().nullslast(),
+                SessionTask.id.desc(),
+            )
+            .first()
+        )
+        if not latest_link:
+            raise HTTPException(status_code=404, detail="Session has no linked task")
+        task_id = latest_link.task_id
+
+    task = (
+        db.query(Task)
+        .filter(Task.id == task_id, Task.project_id == session.project_id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found for session")
+
+    from app.models import Project
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        return diff_orchestration_state_snapshots(
+            project.workspace_path,
+            session_id,
+            task_id,
+            from_checkpoint=from_checkpoint,
+            to_checkpoint=to_checkpoint,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def delete_session_checkpoint_payload(

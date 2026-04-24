@@ -1,36 +1,49 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import AppShell from '@/layouts/AppShell';
-import Dashboard from '@/pages/Dashboard';
-import ProjectsList from '@/pages/ProjectsList';
-import ProjectDetail from '@/pages/ProjectDetail';
-import SessionsList from '@/pages/SessionsList';
-import SessionDetail from '@/pages/SessionDetail';
-import NewSession from '@/pages/NewSession';
-import TasksList from '@/pages/TasksList';
-import TaskDetail from '@/pages/TaskDetail';
-import Login from '@/pages/Login';
-import Register from '@/pages/Register';
-import SettingsPage from '@/pages/SettingsPage';
+import { LoadingSpinner } from '@/components/ui';
+
+const AppShell = lazy(() => import('@/layouts/AppShell'));
+const Dashboard = lazy(() => import('@/pages/Dashboard'));
+const ProjectsList = lazy(() => import('@/pages/ProjectsList'));
+const ProjectDetail = lazy(() => import('@/pages/ProjectDetail'));
+const SessionsList = lazy(() => import('@/pages/SessionsList'));
+const SessionDetail = lazy(() => import('@/pages/SessionDetail'));
+const NewSession = lazy(() => import('@/pages/NewSession'));
+const TasksList = lazy(() => import('@/pages/TasksList'));
+const TaskDetail = lazy(() => import('@/pages/TaskDetail'));
+const Login = lazy(() => import('@/pages/Login'));
+const Register = lazy(() => import('@/pages/Register'));
+const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
+      <LoadingSpinner size="lg" />
+    </div>
+  );
+}
 
 function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/" element={<AppShell />}>
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          <Route path="dashboard" element={<Dashboard />} />
-          <Route path="projects" element={<ProjectsList />} />
-          <Route path="projects/:projectId" element={<ProjectDetail />} />
-          <Route path="sessions" element={<SessionsList />} />
-          <Route path="sessions/new" element={<NewSession />} />
-          <Route path="sessions/:sessionId" element={<SessionDetail />} />
-          <Route path="tasks" element={<TasksList />} />
-          <Route path="projects/:projectId/tasks/:taskId" element={<TaskDetail />} />
-          <Route path="settings" element={<SettingsPage />} />
-        </Route>
-      </Routes>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/" element={<AppShell />}>
+            <Route index element={<Navigate to="/dashboard" replace />} />
+            <Route path="dashboard" element={<Dashboard />} />
+            <Route path="projects" element={<ProjectsList />} />
+            <Route path="projects/:projectId" element={<ProjectDetail />} />
+            <Route path="sessions" element={<SessionsList />} />
+            <Route path="sessions/new" element={<NewSession />} />
+            <Route path="sessions/:sessionId" element={<SessionDetail />} />
+            <Route path="tasks" element={<TasksList />} />
+            <Route path="projects/:projectId/tasks/:taskId" element={<TaskDetail />} />
+            <Route path="settings" element={<SettingsPage />} />
+          </Route>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

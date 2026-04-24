@@ -25,9 +25,13 @@ from app.services.orchestration.executor import ExecutorService
 from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
+    emit_intent_outcome_mismatch,
+    maybe_emit_divergence_detected,
+    read_orchestration_events,
     record_validation_verdict,
     save_orchestration_checkpoint,
     set_session_alert,
+    write_orchestration_state_snapshot,
 )
 from app.services.orchestration.step_support import (
     coerce_debug_step_result,
@@ -93,13 +97,22 @@ def execute_step_loop(
         message=f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps",
         details={"steps": len(orchestration_state.plan)},
     )
+    executing_phase_event = None
     try:
-        append_orchestration_event(
+        executing_phase_event = append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.PHASE_STARTED,
             details={"phase": "executing", "steps": len(orchestration_state.plan)},
+        )
+        write_orchestration_state_snapshot(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            orchestration_state=orchestration_state,
+            trigger="phase_started",
+            related_event_id=executing_phase_event.get("event_id"),
         )
     except Exception:
         pass
@@ -234,12 +247,14 @@ def execute_step_loop(
                 "step_total": len(orchestration_state.plan),
             },
         )
+        step_started_event = None
         try:
-            append_orchestration_event(
+            step_started_event = append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.STEP_STARTED,
+                parent_event_id=(executing_phase_event or {}).get("event_id"),
                 details={
                     "step_index": step_index + 1,
                     "step_total": len(orchestration_state.plan),
@@ -390,8 +405,22 @@ def execute_step_loop(
                 orchestration_state,
                 assessment.validation_verdict,
                 step_number=step_index + 1,
+                parent_event_id=(step_started_event or {}).get("event_id"),
             )
             db.commit()
+            if (
+                not assessment.validation_verdict.accepted
+                or assessment.validation_verdict.warning
+            ):
+                try:
+                    maybe_emit_divergence_detected(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        parent_event_id=(step_started_event or {}).get("event_id"),
+                    )
+                except Exception:
+                    pass
             if assessment.validation_verdict.warning:
                 emit_live(
                     "WARN",
@@ -425,12 +454,14 @@ def execute_step_loop(
             error_message=step_result.get("error", ""),
             attempt=current_attempt,
         )
+        step_finished_event = None
         try:
-            append_orchestration_event(
+            step_finished_event = append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.STEP_FINISHED,
+                parent_event_id=(step_started_event or {}).get("event_id"),
                 details={
                     "step_index": step_index + 1,
                     "step_total": len(orchestration_state.plan),
@@ -460,6 +491,32 @@ def execute_step_loop(
                     },
                 )
             orchestration_state.record_success(step_record)
+            tool_events = [
+                event
+                for event in (
+                    read_orchestration_events(
+                        orchestration_state.project_dir, session_id, task_id
+                    )
+                )[-20:]
+                if event.get("event_type") == EventType.TOOL_INVOKED
+            ]
+            try:
+                emit_intent_outcome_mismatch(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    step_index=step_index + 1,
+                    step_description=step_description,
+                    expected_files=expected_files,
+                    actual_files=step_record.files_changed,
+                    actual_tool_calls=[
+                        str((event.get("details") or {}).get("tool_name") or "")
+                        for event in tool_events
+                    ],
+                    parent_event_id=(step_finished_event or {}).get("event_id"),
+                )
+            except Exception:
+                pass
             save_orchestration_checkpoint(
                 db, session_id, task_id, prompt, orchestration_state
             )
@@ -512,12 +569,16 @@ def execute_step_loop(
             f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase",
             metadata={"phase": "debugging", "step_index": step_index + 1},
         )
+        debugging_phase_event = None
         try:
-            append_orchestration_event(
+            debugging_phase_event = append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.PHASE_STARTED,
+                parent_event_id=(step_finished_event or step_started_event or {}).get(
+                    "event_id"
+                ),
                 details={
                     "phase": "debugging",
                     "step_index": step_index + 1,
@@ -527,16 +588,33 @@ def execute_step_loop(
         except Exception:
             pass
         try:
-            append_orchestration_event(
+            retry_event = append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.RETRY_ENTERED,
+                parent_event_id=(step_finished_event or step_started_event or {}).get(
+                    "event_id"
+                ),
                 details={
                     "step_index": step_index + 1,
                     "attempt": current_attempt,
                     "reason": step_record.error_message[:240],
                 },
+            )
+            write_orchestration_state_snapshot(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                orchestration_state=orchestration_state,
+                trigger="retry_entered",
+                related_event_id=retry_event.get("event_id"),
+            )
+            maybe_emit_divergence_detected(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                parent_event_id=retry_event.get("event_id"),
             )
         except Exception:
             pass
@@ -605,16 +683,25 @@ def execute_step_loop(
                 session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
             try:
-                append_orchestration_event(
+                phase_finished_event = append_orchestration_event(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
                     details={
                         "phase": "debugging",
                         "status": "manual_review_required",
                         "step_index": step_index + 1,
                     },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
                 )
             except Exception:
                 pass
@@ -682,16 +769,25 @@ def execute_step_loop(
                 session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
             try:
-                append_orchestration_event(
+                phase_finished_event = append_orchestration_event(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
                     details={
                         "phase": "debugging",
                         "status": "max_attempts_reached",
                         "step_index": step_index + 1,
                     },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
                 )
             except Exception:
                 pass
@@ -774,6 +870,7 @@ def execute_step_loop(
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
                         details={
                             "phase": "debugging",
                             "status": "handed_off_to_plan_revision",
@@ -782,16 +879,26 @@ def execute_step_loop(
                     )
                 except Exception:
                     pass
+                plan_revision_phase_event = None
                 try:
-                    append_orchestration_event(
+                    plan_revision_phase_event = append_orchestration_event(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_STARTED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
                         details={
                             "phase": "plan_revision",
                             "step_index": step_index + 1,
                         },
+                    )
+                    write_orchestration_state_snapshot(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        orchestration_state=orchestration_state,
+                        trigger="phase_started",
+                        related_event_id=plan_revision_phase_event.get("event_id"),
                     )
                 except Exception:
                     pass
@@ -840,6 +947,7 @@ def execute_step_loop(
                     task_id,
                     orchestration_state,
                     revised_plan_verdict,
+                    parent_event_id=(plan_revision_phase_event or {}).get("event_id"),
                 )
                 db.commit()
                 if not revised_plan_verdict.accepted:
@@ -861,16 +969,27 @@ def execute_step_loop(
                     )
                     db.commit()
                     try:
-                        append_orchestration_event(
+                        phase_finished_event = append_orchestration_event(
                             project_dir=orchestration_state.project_dir,
                             session_id=session_id,
                             task_id=task_id,
                             event_type=EventType.PHASE_FINISHED,
+                            parent_event_id=(plan_revision_phase_event or {}).get(
+                                "event_id"
+                            ),
                             details={
                                 "phase": "plan_revision",
                                 "status": "revised_plan_validation_failed",
                                 "step_index": step_index + 1,
                             },
+                        )
+                        write_orchestration_state_snapshot(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            orchestration_state=orchestration_state,
+                            trigger="phase_finished",
+                            related_event_id=phase_finished_event.get("event_id"),
                         )
                     except Exception:
                         pass
@@ -902,6 +1021,9 @@ def execute_step_loop(
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PLAN_REVISED,
+                        parent_event_id=(plan_revision_phase_event or {}).get(
+                            "event_id"
+                        ),
                         details={
                             "step_index": step_index + 1,
                             "steps": len(orchestration_state.plan),
@@ -911,16 +1033,27 @@ def execute_step_loop(
                 except Exception:
                     pass
                 try:
-                    append_orchestration_event(
+                    phase_finished_event = append_orchestration_event(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
+                        parent_event_id=(plan_revision_phase_event or {}).get(
+                            "event_id"
+                        ),
                         details={
                             "phase": "plan_revision",
                             "status": "completed",
                             "step_index": step_index + 1,
                         },
+                    )
+                    write_orchestration_state_snapshot(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        orchestration_state=orchestration_state,
+                        trigger="phase_finished",
+                        related_event_id=phase_finished_event.get("event_id"),
                     )
                 except Exception:
                     pass
@@ -972,17 +1105,26 @@ def execute_step_loop(
                 )
                 db.commit()
                 try:
-                    append_orchestration_event(
+                    phase_finished_event = append_orchestration_event(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
                         details={
                             "phase": "debugging",
                             "status": "retrying_step",
                             "step_index": step_index + 1,
                             "fix_type": fix_type,
                         },
+                    )
+                    write_orchestration_state_snapshot(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        orchestration_state=orchestration_state,
+                        trigger="phase_finished",
+                        related_event_id=phase_finished_event.get("event_id"),
                     )
                 except Exception:
                     pass
@@ -995,16 +1137,25 @@ def execute_step_loop(
             task.error_message = str(exc)
             db.commit()
             try:
-                append_orchestration_event(
+                phase_finished_event = append_orchestration_event(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
                     details={
                         "phase": "debugging",
                         "status": "workspace_isolation_violation",
                         "step_index": step_index + 1,
                     },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
                 )
             except Exception:
                 pass
@@ -1018,16 +1169,25 @@ def execute_step_loop(
             task.error_message = str(exc)
             db.commit()
             try:
-                append_orchestration_event(
+                phase_finished_event = append_orchestration_event(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
                     details={
                         "phase": "debugging",
                         "status": "debug_parse_error",
                         "step_index": step_index + 1,
                     },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
                 )
             except Exception:
                 pass
@@ -1035,12 +1195,21 @@ def execute_step_loop(
             return {"status": "failed", "reason": "debug_parse_error"}
 
     try:
-        append_orchestration_event(
+        phase_finished_event = append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.PHASE_FINISHED,
+            parent_event_id=(executing_phase_event or {}).get("event_id"),
             details={"phase": "executing", "status": "completed"},
+        )
+        write_orchestration_state_snapshot(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            orchestration_state=orchestration_state,
+            trigger="phase_finished",
+            related_event_id=phase_finished_event.get("event_id"),
         )
     except Exception:
         pass
