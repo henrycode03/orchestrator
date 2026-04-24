@@ -509,18 +509,30 @@ export default function SessionDetail() {
       )
     );
 
-    if (relevantTaskIds.length === 0) {
-      seenOrchestrationTimelineKeysRef.current = new Set();
-      setTimelineEvents([]);
-      return;
-    }
-
     try {
+      let taskIds = relevantTaskIds;
+      if (taskIds.length === 0) {
+        const logsResponse = await sessionsAPI.getLogs(currentSessionId);
+        taskIds = Array.from(
+          new Set(
+            (logsResponse.data.logs || [])
+              .map((entry) => entry.task_id)
+              .filter((taskId): taskId is number => typeof taskId === 'number' && taskId > 0)
+          )
+        );
+      }
+
+      if (taskIds.length === 0) {
+        return;
+      }
+
       const responses = await Promise.all(
-        relevantTaskIds.map((taskId) => sessionsAPI.getTaskEvents(currentSessionId, taskId))
+        taskIds.map((taskId) => sessionsAPI.getTaskEvents(currentSessionId, taskId))
       );
       const events = responses.flatMap((response) => response.data.events || []);
-      replaceTimelineWithOrchestrationEvents(events);
+      if (events.length > 0) {
+        replaceTimelineWithOrchestrationEvents(events);
+      }
     } catch (loadError) {
       console.error('Failed to load orchestration event timeline:', loadError);
     }
@@ -681,15 +693,22 @@ export default function SessionDetail() {
       pushTimelineEvent(`Replay requested from checkpoint ${checkpointName}`, 'INFO');
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
+      if (updated.data.project_id) {
+        const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
+        setTasks(tasksRes.data || []);
+        await loadTimelineEvents(updated.data.id, tasksRes.data || []);
+      }
       await loadCheckpointCount(Number(sessionId));
       if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
         scheduleWebSocketConnect(Number(sessionId), 1200);
       }
     } catch (error) {
       console.error('Failed to replay checkpoint:', error);
-      alert('Failed to replay checkpoint');
+      const apiError = error as ApiErrorLike;
+      const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
+      alert(`Failed to replay checkpoint: ${errorMsg}`);
     }
-  }, [loadCheckpointCount, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
+  }, [loadCheckpointCount, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -926,6 +945,11 @@ export default function SessionDetail() {
       await sessionsAPI.resume(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
+      if (updated.data.project_id) {
+        const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
+        setTasks(tasksRes.data || []);
+        await loadTimelineEvents(updated.data.id, tasksRes.data || []);
+      }
       await loadCheckpointCount(Number(sessionId));
       if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
         scheduleWebSocketConnect(Number(sessionId), 1200);

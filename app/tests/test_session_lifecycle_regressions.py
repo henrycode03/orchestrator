@@ -13,6 +13,7 @@ import pytest
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.session.session_lifecycle_service import (
     pause_session_lifecycle,
+    resume_session_lifecycle,
     start_session_lifecycle,
     stop_session_lifecycle,
 )
@@ -231,3 +232,78 @@ def test_start_manual_session_with_no_tasks_starts_without_queuing(
     assert result["status"] == "started"
     db_session.refresh(session)
     assert session.status == "running"
+
+
+def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            captured["requested_checkpoint_name"] = checkpoint_name
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": checkpoint_name or "paused_latest",
+                "checkpoint_name": checkpoint_name or "paused_latest",
+                "context": {
+                    "task_id": task.id,
+                    "task_description": "resume from checkpoint",
+                },
+                "orchestration_state": {},
+                "step_results": [],
+            }
+
+    class _FakeDelayResult:
+        id = "celery-resume-1"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            captured["delay_kwargs"] = kwargs
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    result = asyncio.run(
+        resume_session_lifecycle(
+            db_session,
+            session.id,
+            checkpoint_name="paused_20260424_034703",
+        )
+    )
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+
+    assert result["status"] == "resumed"
+    assert captured["requested_checkpoint_name"] == "paused_20260424_034703"
+    assert (
+        captured["delay_kwargs"]["resume_checkpoint_name"] == "paused_20260424_034703"
+    )
+    assert session.status == "running"
+    assert session.is_active is True
+    assert task.status == TaskStatus.RUNNING
+
+    session_task = (
+        db_session.query(SessionModel)
+        .filter(SessionModel.id == session.id)
+        .first()
+        .tasks[0]
+    )
+    assert session_task.task_id == task.id
+    assert session_task.status == TaskStatus.RUNNING

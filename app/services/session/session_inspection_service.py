@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import LogEntry, Session as SessionModel
+from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
 from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
@@ -26,7 +27,10 @@ from app.services.workspace.system_settings import (
     get_effective_agent_model_family,
     get_effective_policy_profile,
 )
-from app.services.session.session_runtime_service import get_session_task_subfolder
+from app.services.session.session_runtime_service import (
+    get_session_task_subfolder,
+    revoke_session_celery_tasks,
+)
 
 
 def _get_session_or_404(db: Session, session_id: int) -> SessionModel:
@@ -34,6 +38,60 @@ def _get_session_or_404(db: Session, session_id: int) -> SessionModel:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+def _prepare_session_for_replay(db: Session, session: SessionModel) -> None:
+    """Allow checkpoint replay even if the session is still marked running."""
+
+    if session.status in {"paused", "stopped"}:
+        return
+
+    if session.status not in {"running", "active"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot replay checkpoint while session status is '{session.status}'",
+        )
+
+    revoked_ids = revoke_session_celery_tasks(db, session.id, terminate=True)
+
+    running_links = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session.id,
+            SessionTask.status == TaskStatus.RUNNING,
+        )
+        .all()
+    )
+    seen_task_ids: set[int] = set()
+    for link in running_links:
+        link.status = TaskStatus.PENDING
+        link.completed_at = None
+        if link.task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(link.task_id)
+        task = db.query(Task).filter(Task.id == link.task_id).first()
+        if task and task.status == TaskStatus.RUNNING:
+            task.status = TaskStatus.PENDING
+            task.completed_at = None
+            task.error_message = None
+
+    session.status = "paused"
+    session.is_active = True
+    session.paused_at = datetime.now(UTC)
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            level="INFO",
+            message="Prepared running session for checkpoint replay",
+            log_metadata=json.dumps(
+                {
+                    "event_type": "session_replay_prepared",
+                    "revoked_task_ids": revoked_ids,
+                }
+            ),
+        )
+    )
+    db.commit()
 
 
 def get_session_logs_payload(
@@ -218,6 +276,7 @@ def inspect_session_checkpoint_payload(
     _get_session_or_404(db, session_id)
     checkpoint_service = CheckpointService(db)
     payload = checkpoint_service.load_checkpoint(session_id, checkpoint_name)
+    resume_metadata = checkpoint_service._checkpoint_resume_metadata(payload)
     orchestration_state = payload.get("orchestration_state", {}) or {}
     validation_history = orchestration_state.get("validation_history", []) or []
     plan = orchestration_state.get("plan", []) or []
@@ -296,6 +355,7 @@ def inspect_session_checkpoint_payload(
             or payload.get("checkpoint_name", checkpoint_name),
             "mode": payload.get("replay_mode") or "inspection",
         },
+        "resume_readiness": resume_metadata,
         "validation_history": validation_history[-10:],
         "plan_preview": plan[:5],
         "step_results_preview": step_results[-5:],
@@ -328,7 +388,18 @@ async def load_session_checkpoint_payload(
 async def replay_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
-    result = await load_session_checkpoint_payload(db, session_id, checkpoint_name)
+    from app.services.session.session_lifecycle_service import resume_session_lifecycle
+
+    session = _get_session_or_404(db, session_id)
+    _prepare_session_for_replay(db, session)
+
+    result = await resume_session_lifecycle(
+        db,
+        session_id,
+        checkpoint_name=checkpoint_name,
+    )
+    result["success"] = True
+    result["session_key"] = None
     result["replay_requested"] = True
     result["mode"] = "replay"
     result["replay_source"] = {

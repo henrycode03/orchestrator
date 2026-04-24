@@ -83,6 +83,7 @@ class CheckpointService:
 
     def _checkpoint_progress_score(self, data: Dict[str, Any]) -> int:
         orchestration_state = data.get("orchestration_state", {}) or {}
+        context = data.get("context", {}) or {}
         step_results = data.get("step_results", []) or []
         execution_results = orchestration_state.get("execution_results", []) or []
         plan = orchestration_state.get("plan", []) or []
@@ -92,7 +93,54 @@ class CheckpointService:
             or 0
         )
         completed_steps = max(len(step_results), len(execution_results))
-        return (completed_steps * 1000) + (int(current_step_index) * 10) + len(plan)
+        context_score = 0
+        if context.get("task_id"):
+            context_score += 25
+        if context.get("task_subfolder"):
+            context_score += 10
+        if context.get("project_dir_override"):
+            context_score += 10
+        if context.get("task_description"):
+            context_score += 5
+        if orchestration_state.get("status"):
+            context_score += 5
+        return (
+            (completed_steps * 1000)
+            + (int(current_step_index) * 10)
+            + len(plan)
+            + context_score
+        )
+
+    def _checkpoint_resume_metadata(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        context = data.get("context", {}) or {}
+        orchestration_state = data.get("orchestration_state", {}) or {}
+        step_results = data.get("step_results", []) or []
+        execution_results = orchestration_state.get("execution_results", []) or []
+        plan = orchestration_state.get("plan", []) or []
+
+        if plan:
+            return {
+                "resumable": True,
+                "resume_reason": "Saved execution plan available",
+            }
+        if step_results or execution_results:
+            return {
+                "resumable": True,
+                "resume_reason": "Saved step results available",
+            }
+        if context.get("task_id") and (
+            context.get("task_subfolder")
+            or context.get("project_dir_override")
+            or context.get("task_description")
+        ):
+            return {
+                "resumable": True,
+                "resume_reason": "Saved task/workspace context available",
+            }
+        return {
+            "resumable": False,
+            "resume_reason": "Checkpoint is missing replay state: no task, plan, or workspace context was saved",
+        }
 
     def _checkpoint_name_priority(self, checkpoint_name: str) -> int:
         lowered = str(checkpoint_name or "").lower()
@@ -434,6 +482,7 @@ class CheckpointService:
                         "completed_steps": len(data.get("step_results", [])),
                         "progress_score": entry["progress_score"],
                         "recommended": entry["name"] == recommended_name,
+                        **self._checkpoint_resume_metadata(data),
                     }
                 )
 

@@ -190,37 +190,47 @@ Rules:
             "[ORCHESTRATION] Planning output was not machine-parseable; "
             f"retrying with minimal prompt ({reason})"
         )
+        minimal_timeout = min(timeout_seconds, MINIMAL_PLANNING_TIMEOUT_SECONDS)
         emit_live(
             "WARN",
-            "[ORCHESTRATION] Planning output needed a strict JSON retry",
+            (
+                "[ORCHESTRATION] Planning output needed a strict JSON retry; "
+                f"starting minimal prompt attempt (timeout: {minimal_timeout}s)"
+            ),
             metadata={
                 "phase": "planning",
                 "retry": "minimal_prompt",
                 "reason": reason[:240],
+                "timeout_seconds": minimal_timeout,
             },
         )
         try:
             return asyncio.run(
                 runtime_service.execute_task(
                     cls.build_minimal_planning_prompt(task_description, project_dir),
-                    timeout_seconds=min(
-                        timeout_seconds, MINIMAL_PLANNING_TIMEOUT_SECONDS
-                    ),
+                    timeout_seconds=minimal_timeout,
                 )
             )
         except Exception as exc:
             if not cls._looks_like_timeout_error(exc):
                 raise
+            ultra_minimal_timeout = min(
+                timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
+            )
             logger.warning(
                 "[ORCHESTRATION] Minimal planning prompt timed out; retrying with ultra-minimal prompt"
             )
             emit_live(
                 "WARN",
-                "[ORCHESTRATION] Minimal planning timed out; retrying with ultra-minimal prompt",
+                (
+                    "[ORCHESTRATION] Minimal planning timed out; retrying with "
+                    f"ultra-minimal prompt (timeout: {ultra_minimal_timeout}s)"
+                ),
                 metadata={
                     "phase": "planning",
                     "retry": "ultra_minimal_prompt",
                     "reason": str(exc)[:240],
+                    "timeout_seconds": ultra_minimal_timeout,
                 },
             )
             return asyncio.run(
@@ -228,9 +238,7 @@ Rules:
                     cls.build_ultra_minimal_planning_prompt(
                         task_description, project_dir
                     ),
-                    timeout_seconds=min(
-                        timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
-                    ),
+                    timeout_seconds=ultra_minimal_timeout,
                 )
             )
 
@@ -251,13 +259,18 @@ Rules:
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
             f"attempting repair ({reason})"
         )
+        repair_timeout = min(timeout_seconds, PLANNING_REPAIR_TIMEOUT_SECONDS)
         emit_live(
             "WARN",
-            "[ORCHESTRATION] Planning output was malformed; attempting one repair pass",
+            (
+                "[ORCHESTRATION] Planning output was malformed; attempting one "
+                f"repair pass (timeout: {repair_timeout}s)"
+            ),
             metadata={
                 "phase": "planning",
                 "retry": "repair_prompt",
                 "reason": reason[:240],
+                "timeout_seconds": repair_timeout,
             },
         )
         try:
@@ -269,24 +282,29 @@ Rules:
                         project_dir,
                         rejection_reasons=rejection_reasons,
                     ),
-                    timeout_seconds=min(
-                        timeout_seconds, PLANNING_REPAIR_TIMEOUT_SECONDS
-                    ),
+                    timeout_seconds=repair_timeout,
                 )
             )
         except Exception as exc:
             if not cls._looks_like_timeout_error(exc):
                 raise
+            ultra_minimal_timeout = min(
+                timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
+            )
             logger.warning(
                 "[ORCHESTRATION] Planning repair prompt timed out; retrying with ultra-minimal prompt"
             )
             emit_live(
                 "WARN",
-                "[ORCHESTRATION] Planning repair timed out; retrying with ultra-minimal prompt",
+                (
+                    "[ORCHESTRATION] Planning repair timed out; retrying with "
+                    f"ultra-minimal prompt (timeout: {ultra_minimal_timeout}s)"
+                ),
                 metadata={
                     "phase": "planning",
                     "retry": "ultra_minimal_prompt",
                     "reason": str(exc)[:240],
+                    "timeout_seconds": ultra_minimal_timeout,
                 },
             )
             return asyncio.run(
@@ -294,8 +312,6 @@ Rules:
                     cls.build_ultra_minimal_planning_prompt(
                         task_description, project_dir
                     ),
-                    timeout_seconds=min(
-                        timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
-                    ),
+                    timeout_seconds=ultra_minimal_timeout,
                 )
             )

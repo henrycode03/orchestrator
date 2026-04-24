@@ -18,6 +18,7 @@ import type {
   ProjectLogsResponse,
   WorkspaceInfo,
   SessionFilters,
+  Checkpoint,
   CheckpointInspection,
   OrchestrationEvent,
   AppSettings,
@@ -457,14 +458,7 @@ export const sessionsAPI = {
       session_id: number;
       total_count: number;
       recommended_checkpoint_name?: string | null;
-      checkpoints: Array<{
-        name: string;
-        created_at: string | null;
-        step_index?: number;
-        completed_steps: number;
-        progress_score?: number;
-        recommended?: boolean;
-      }>;
+      checkpoints: Checkpoint[];
     }>(`/sessions/${sessionId}/checkpoints`),
 
   loadCheckpoint: (sessionId: number, checkpointName?: string) =>

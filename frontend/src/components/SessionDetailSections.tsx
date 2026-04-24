@@ -571,10 +571,23 @@ export function SessionSettingsPanel({
                       {checkpoint.recommended ? (
                         <span className="ml-2 text-xs text-emerald-400">Recommended</span>
                       ) : null}
+                      {checkpoint.resumable === false ? (
+                        <span className="ml-2 text-xs text-amber-400">Metadata Only</span>
+                      ) : null}
                     </p>
                     <p className="text-xs text-slate-500">
                       {formatDateTime(checkpoint.created_at)} • Step {checkpoint.step_index ?? 0} • Completed {checkpoint.completed_steps ?? 0}
                     </p>
+                    {checkpoint.resume_reason ? (
+                      <p
+                        className={cn(
+                          'mt-1 text-xs',
+                          checkpoint.resumable === false ? 'text-amber-300' : 'text-slate-400'
+                        )}
+                      >
+                        {checkpoint.resume_reason}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex gap-2">
                     <button
@@ -585,7 +598,18 @@ export function SessionSettingsPanel({
                     </button>
                     <button
                       onClick={() => onReplayCheckpoint?.(checkpoint.name)}
-                      className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-emerald-600"
+                      disabled={checkpoint.resumable === false}
+                      title={
+                        checkpoint.resumable === false
+                          ? checkpoint.resume_reason || 'This checkpoint is missing replay state'
+                          : undefined
+                      }
+                      className={cn(
+                        'rounded-lg px-3 py-1.5 text-xs text-white transition-colors',
+                        checkpoint.resumable === false
+                          ? 'cursor-not-allowed bg-slate-700/60 text-slate-400'
+                          : 'bg-emerald-700 hover:bg-emerald-600'
+                      )}
                     >
                       Replay
                     </button>
@@ -605,6 +629,18 @@ export function SessionSettingsPanel({
                 {checkpointInspection.summary.status || 'unknown'}
               </span>
             </div>
+            {checkpointInspection.resume_readiness ? (
+              <p
+                className={cn(
+                  'mt-2 text-xs',
+                  checkpointInspection.resume_readiness.resumable
+                    ? 'text-cyan-300'
+                    : 'text-amber-300'
+                )}
+              >
+                {checkpointInspection.resume_readiness.resume_reason}
+              </p>
+            ) : null}
             <p className="mt-2 text-xs text-slate-300">
               Plan steps {checkpointInspection.summary.plan_step_count} • Completed {checkpointInspection.summary.completed_step_count} • Repairs {checkpointInspection.summary.completion_repair_attempts}
             </p>

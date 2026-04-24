@@ -276,7 +276,29 @@ def get_project_tasks(
 
     task_service = TaskService(db)
     tasks = task_service.get_project_tasks(project_id)[skip : skip + limit]
-    return tasks
+    task_ids = [task.id for task in tasks]
+    latest_session_links: dict[int, int] = {}
+    if task_ids:
+        session_links = (
+            db.query(SessionTask)
+            .filter(SessionTask.task_id.in_(task_ids))
+            .order_by(
+                SessionTask.task_id.asc(),
+                SessionTask.started_at.desc().nullslast(),
+                SessionTask.completed_at.desc().nullslast(),
+                SessionTask.id.desc(),
+            )
+            .all()
+        )
+        for link in session_links:
+            latest_session_links.setdefault(link.task_id, link.session_id)
+
+    response_tasks = []
+    for task in tasks:
+        task_dict = task.__dict__.copy()
+        task_dict["session_id"] = latest_session_links.get(task.id)
+        response_tasks.append(task_dict)
+    return response_tasks
 
 
 @router.post("/tasks/{task_id}/execute")

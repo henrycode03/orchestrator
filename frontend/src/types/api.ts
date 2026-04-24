@@ -236,6 +236,8 @@ export interface Checkpoint {
   completed_steps?: number;
   progress_score?: number;
   recommended?: boolean;
+  resumable?: boolean;
+  resume_reason?: string | null;
 }
 
 export interface CheckpointInspection {
@@ -275,6 +277,10 @@ export interface CheckpointInspection {
     requested_checkpoint_name?: string | null;
     resolved_checkpoint_name?: string | null;
     mode: string;
+  };
+  resume_readiness?: {
+    resumable: boolean;
+    resume_reason: string;
   };
   validation_history: Record<string, unknown>[];
   plan_preview: Array<Record<string, unknown>>;

@@ -64,6 +64,73 @@ def _reset_running_session_tasks(
     return updated
 
 
+def _ensure_session_task_ready_for_resume(
+    db: Session,
+    *,
+    session: SessionModel,
+    task: Task,
+    resumed_at: datetime,
+) -> SessionTask:
+    """Restore the task/session link so resumed runs look active to the UI."""
+
+    session_task_link = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id, SessionTask.task_id == task.id)
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    if not session_task_link:
+        session_task_link = SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=resumed_at,
+        )
+        db.add(session_task_link)
+    else:
+        session_task_link.status = TaskStatus.RUNNING
+        session_task_link.started_at = resumed_at
+        session_task_link.completed_at = None
+
+    task.status = TaskStatus.RUNNING
+    task.started_at = resumed_at
+    task.completed_at = None
+    task.error_message = None
+    return session_task_link
+
+
+def _checkpoint_has_resume_state(payload: Dict[str, Any] | None) -> bool:
+    if not payload:
+        return False
+    context = payload.get("context", {}) or {}
+    orchestration_state = payload.get("orchestration_state", {}) or {}
+    step_results = payload.get("step_results", []) or []
+    return bool(
+        context.get("task_id")
+        or context.get("task_subfolder")
+        or context.get("project_dir_override")
+        or context.get("task_description")
+        or orchestration_state.get("plan")
+        or orchestration_state.get("status")
+        or step_results
+    )
+
+
+def _select_checkpoint_payload_for_pause(
+    checkpoint_service: CheckpointService, session_id: int
+) -> Dict[str, Any] | None:
+    for candidate_name in ("autosave_latest", "autosave_error", None):
+        try:
+            payload = checkpoint_service.load_checkpoint(
+                session_id, checkpoint_name=candidate_name
+            )
+        except Exception:
+            continue
+        if _checkpoint_has_resume_state(payload):
+            return payload
+    return None
+
+
 async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
     """Start a session and queue work if needed."""
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -434,7 +501,13 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         checkpoint_name = None
         checkpoint_service = CheckpointService(db)
         try:
-            latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
+            latest_checkpoint = _select_checkpoint_payload_for_pause(
+                checkpoint_service, session_id
+            )
+            if not latest_checkpoint:
+                raise CheckpointError(
+                    f"No structured checkpoint found for session {session_id}"
+                )
             checkpoint_name = f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_service.save_checkpoint(
                 session_id=session_id,
@@ -445,7 +518,20 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 step_results=latest_checkpoint.get("step_results", []),
             )
         except Exception:
-            runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
+            latest_session_task = (
+                db.query(SessionTask)
+                .filter(SessionTask.session_id == session_id)
+                .order_by(
+                    SessionTask.started_at.desc().nullslast(), SessionTask.id.desc()
+                )
+                .first()
+            )
+            runtime = create_agent_runtime(
+                db,
+                session_id,
+                latest_session_task.task_id if latest_session_task else None,
+                use_demo_mode=False,
+            )
             await runtime.pause_session()
 
         session.is_active = True
@@ -502,7 +588,12 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
+async def resume_session_lifecycle(
+    db: Session,
+    session_id: int,
+    *,
+    checkpoint_name: str | None = None,
+) -> Dict[str, Any]:
     """Resume a paused or stopped session from checkpoint."""
     from app.tasks.worker import execute_orchestration_task
 
@@ -515,7 +606,9 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
     try:
         checkpoint_service = CheckpointService(db)
         try:
-            checkpoint_data = checkpoint_service.load_resume_checkpoint(session_id)
+            checkpoint_data = checkpoint_service.load_resume_checkpoint(
+                session_id, checkpoint_name=checkpoint_name
+            )
         except CheckpointError as checkpoint_error:
             raise HTTPException(
                 status_code=404,
@@ -554,9 +647,16 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
             resume_checkpoint_name=checkpoint_name,
         )
 
+        resumed_at = datetime.now(timezone.utc)
+        _ensure_session_task_ready_for_resume(
+            db,
+            session=session,
+            task=task,
+            resumed_at=resumed_at,
+        )
         session.status = "running"
         session.is_active = True
-        session.resumed_at = datetime.now(timezone.utc)
+        session.resumed_at = resumed_at
         db.commit()
 
         db.add(

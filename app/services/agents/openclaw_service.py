@@ -387,7 +387,7 @@ class OpenClawSessionService:
             if result_status == "completed":
                 self._log_entry(
                     "INFO",
-                    "[OPENCLAW] Request completed successfully; awaiting orchestration validation",
+                    "[OPENCLAW] Request returned output; awaiting orchestration validation",
                 )
             elif result_status == "failed":
                 self._log_entry(
@@ -1783,6 +1783,38 @@ class OpenClawSessionService:
 
             # Get current session context
             context_data = await self.get_session_context()
+            task_context = context_data.get("task") or {}
+            if self.task_model:
+                context_data["task_id"] = self.task_model.id
+                context_data["task_description"] = (
+                    self.task_model.description or self.task_model.title
+                )
+                context_data["task_subfolder"] = getattr(
+                    self.task_model, "task_subfolder", None
+                )
+                if self.task_model.project:
+                    context_data["project_name"] = self.task_model.project.name
+                    if self.task_model.project.workspace_path:
+                        from app.services.workspace.project_isolation_service import (
+                            resolve_project_workspace_path,
+                        )
+
+                        workspace_path = str(
+                            resolve_project_workspace_path(
+                                self.task_model.project.workspace_path,
+                                self.task_model.project.name,
+                            )
+                        )
+                        context_data["workspace_path_override"] = workspace_path
+                        if context_data.get("task_subfolder"):
+                            context_data["project_dir_override"] = str(
+                                Path(workspace_path) / context_data["task_subfolder"]
+                            )
+            elif task_context:
+                context_data["task_id"] = task_context.get("id")
+                context_data["task_description"] = task_context.get(
+                    "description"
+                ) or task_context.get("title")
 
             # Save orchestration state if available
             orchestration_state = {}

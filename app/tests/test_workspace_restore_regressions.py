@@ -222,6 +222,81 @@ def test_checkpoint_api_exposes_recommended_resume_checkpoint(
     assert payload["recommended_checkpoint_name"] == "autosave_latest"
     assert payload["checkpoints"][0]["name"] == "autosave_latest"
     assert payload["checkpoints"][0]["recommended"] is True
+    assert payload["checkpoints"][0]["resumable"] is True
+    assert (
+        payload["checkpoints"][0]["resume_reason"] == "Saved execution plan available"
+    )
+
+
+def test_checkpoint_api_marks_hollow_paused_checkpoint_as_not_resumable(
+    authenticated_client, db_session, tmp_path: Path
+):
+    project = Project(
+        name="checkpoint-hollow-project",
+        workspace_path=str(tmp_path),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Checkpoint Hollow Session",
+        status="paused",
+        is_active=False,
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    checkpoint_service = CheckpointService(db_session)
+    checkpoint_service.checkpoint_dir = (tmp_path / "checkpoints-hollow").resolve()
+    checkpoint_service.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    hollow_path = (
+        checkpoint_service.checkpoint_dir
+        / f"session_{session.id}_paused_20260424_035730.json"
+    )
+    hollow_path.write_text(
+        json.dumps(
+            {
+                "session_id": session.id,
+                "checkpoint_name": "paused_20260424_035730",
+                "created_at": "2026-04-24T03:57:30",
+                "context": {},
+                "orchestration_state": {},
+                "current_step_index": 0,
+                "step_results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    original_init = CheckpointService.__init__
+
+    def patched_init(self, db):
+        original_init(self, db)
+        self.checkpoint_dir = checkpoint_service.checkpoint_dir
+
+    CheckpointService.__init__ = patched_init
+    try:
+        response = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/checkpoints"
+        )
+        inspect_response = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/checkpoints/paused_20260424_035730"
+        )
+    finally:
+        CheckpointService.__init__ = original_init
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["checkpoints"][0]["resumable"] is False
+    assert "missing replay state" in payload["checkpoints"][0]["resume_reason"].lower()
+
+    assert inspect_response.status_code == 200
+    inspect_payload = inspect_response.json()
+    assert inspect_payload["resume_readiness"]["resumable"] is False
 
 
 def test_stop_session_resets_running_task_state_for_clean_resume(

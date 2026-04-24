@@ -445,6 +445,44 @@ def execute_planning_phase(
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
         return {"status": "failed", "reason": "workspace_isolation_violation"}
+    except TimeoutError as exc:
+        ctx.logger.error(
+            "[ORCHESTRATION] Planning timed out or exceeded context before a valid plan was produced: %s",
+            exc,
+        )
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = (
+            f"Planning timed out or exceeded context: {exc}"
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=f"[ORCHESTRATION] Planning timed out or exceeded context: {exc}",
+            details={"reason": "planning_timeout_or_context_overflow"},
+        )
+        try:
+            append_orchestration_event(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                event_type=EventType.PHASE_FINISHED,
+                details={
+                    "phase": "planning",
+                    "status": "timeout_or_context_overflow",
+                },
+            )
+        except Exception:
+            pass
+        ctx.task.status = TaskStatus.FAILED
+        ctx.task.error_message = str(exc)
+        ctx.db.commit()
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed(
+                "planning timeout or context overflow"
+            )
+        return {"status": "failed", "reason": "planning_timeout_or_context_overflow"}
     except Exception as exc:
         ctx.logger.error("[ORCHESTRATION] Failed to parse planning result: %s", exc)
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED
@@ -457,6 +495,19 @@ def execute_planning_phase(
             message=f"[ORCHESTRATION] Failed to parse planning result: {exc}",
             details={"reason": "planning_parse_error"},
         )
+        try:
+            append_orchestration_event(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                event_type=EventType.PHASE_FINISHED,
+                details={
+                    "phase": "planning",
+                    "status": "parse_error",
+                },
+            )
+        except Exception:
+            pass
         ctx.task.status = TaskStatus.FAILED
         ctx.task.error_message = str(exc)
         ctx.db.commit()
