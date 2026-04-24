@@ -314,6 +314,16 @@ export default function SessionDetail() {
               return next;
             });
             pushTimelineEvent(data.message, data.level, data.timestamp);
+          } else if (data.type === 'orchestration_event') {
+            const detailsPreview =
+              data.details && Object.keys(data.details).length > 0
+                ? ` ${JSON.stringify(data.details)}`
+                : '';
+            pushTimelineEvent(
+              `${data.event_type}${detailsPreview}`,
+              'INFO',
+              data.timestamp
+            );
           } else if (data.type === 'ping') {
             console.debug('Received ping, sending pong');
             wsRef.current?.send(JSON.stringify({ type: 'pong' }));

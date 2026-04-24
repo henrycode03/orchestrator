@@ -456,6 +456,27 @@ class ValidatorService:
                 bad_steps.append(step.get("step_number"))
         return [step for step in bad_steps if step is not None]
 
+    @staticmethod
+    def _verification_plan_missing_workspace_files(
+        plan: List[Dict[str, Any]], project_dir: Optional[Path]
+    ) -> List[str]:
+        """Return expected source files in verification plans that do not exist yet."""
+
+        if not project_dir or not project_dir.exists():
+            return []
+
+        missing: List[str] = []
+        seen: set[str] = set()
+        for path_text in ValidatorService._core_expected_files(plan):
+            candidate = (project_dir / path_text).resolve()
+            if candidate.exists():
+                continue
+            if path_text in seen:
+                continue
+            seen.add(path_text)
+            missing.append(path_text)
+        return missing
+
     @classmethod
     def validate_plan(
         cls,
@@ -556,6 +577,18 @@ class ValidatorService:
                 rejected.append(
                     "Plan appears to generate placeholder or stub implementations"
                 )
+        elif profile == "verification":
+            missing_workspace_files = cls._verification_plan_missing_workspace_files(
+                plan, project_dir
+            )
+            if missing_workspace_files:
+                repairable.append(
+                    "Verification/review plan references source files that do not exist in the current workspace "
+                    f"(files: {missing_workspace_files[:5]})"
+                )
+                details["missing_workspace_expected_files"] = missing_workspace_files[
+                    :20
+                ]
 
         if cls._plan_contains_stack_conflict(plan, task_prompt):
             repairable.append(
@@ -867,7 +900,10 @@ class ValidatorService:
         details["completion_contract"] = contract
         if not contract["summary_generated"]:
             rejected.append("Completion contract requires a generated task summary")
-        if contract["execution_results_count"] <= 0:
+        if (
+            contract["requires_source_outputs"]
+            and contract["execution_results_count"] <= 0
+        ):
             rejected.append(
                 "Completion contract requires at least one recorded execution result"
             )

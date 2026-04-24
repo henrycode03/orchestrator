@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 60
     AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 5
+    API_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    API_RATE_LIMIT_MAX_ATTEMPTS: int = 20
 
     # OpenClaw integration
     # Default to the local OpenClaw gateway, not the LLM-only port.
@@ -92,6 +94,9 @@ settings = Settings()
 
 def validate_runtime_secrets() -> None:
     """Fail fast if production-critical secrets are unset or still defaulted."""
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     insecure_secret = not settings.SECRET_KEY or (
         settings.SECRET_KEY == "your-secret-key-change-in-production"
@@ -101,3 +106,35 @@ def validate_runtime_secrets() -> None:
             "SECRET_KEY is unset or still using the default value; "
             "configure a unique SECRET_KEY before starting the API"
         )
+
+    # Validate the configured backend is registered and its required env vars are set.
+    try:
+        from app.services.agents.agent_backends import require_backend_descriptor
+
+        descriptor = require_backend_descriptor(settings.ORCHESTRATOR_AGENT_BACKEND)
+        missing = [
+            var
+            for var in descriptor.config.required_env_vars
+            if not str(getattr(settings, var, "")).strip()
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Backend '{descriptor.name}' requires environment variable(s) that are not set: "
+                + ", ".join(missing)
+            )
+        if not descriptor.health.ready:
+            raise RuntimeError(
+                f"Backend '{descriptor.name}' is not ready: "
+                + ", ".join(descriptor.health.errors)
+            )
+        logger.info(
+            "Active backend: %s | model family: %s",
+            descriptor.name,
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:  # UnsupportedAgentBackendError or import error
+        raise RuntimeError(
+            f"Invalid ORCHESTRATOR_AGENT_BACKEND '{settings.ORCHESTRATOR_AGENT_BACKEND}': {exc}"
+        ) from exc

@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 import logging
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,16 @@ from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.planning.planning_session_service import PlanningSessionService
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_broker_url(url: str) -> str:
+    """Strip broker credentials before writing URLs to logs."""
+
+    parts = urlsplit(url or "")
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 @asynccontextmanager
@@ -59,10 +69,14 @@ async def lifespan(app: FastAPI):
             planning_db.close()
 
     logger.info("=" * 50)
-    logger.info("🚀 Orchestrator API starting up...")
-    logger.info(f"Version: {settings.VERSION}")
-    logger.info(f"Port: {settings.PORT}")
-    logger.info("Celery task queue initialized")
+    logger.info("Orchestrator API starting up")
+    logger.info("Version: %s | Port: %s", settings.VERSION, settings.PORT)
+    logger.info(
+        "Backend: %s | Model family: %s",
+        settings.ORCHESTRATOR_AGENT_BACKEND,
+        settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+    )
+    logger.info("Celery broker: %s", _redact_broker_url(settings.CELERY_BROKER_URL))
     logger.info("=" * 50)
 
     yield

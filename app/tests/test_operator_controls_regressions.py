@@ -169,6 +169,38 @@ def test_validator_rejects_non_consecutive_steps_missing_commands_and_unsafe_pat
     assert verdict.details["unsafe_expected_files"] == ["../escape.py"]
 
 
+def test_verification_plan_flags_invented_workspace_files(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "test").mkdir()
+    (project_dir / "test" / "replay.spec.ts").write_text(
+        "export const ok = true;\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Verify expected tests exist",
+                "commands": ["ls test", "ls tests"],
+                "verification": "test -f test/replay.spec.ts",
+                "expected_files": ["test/replay.spec.ts", "tests/index.test.js"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Review the current project structure and verify expected tests.",
+        execution_profile="review_only",
+        project_dir=project_dir,
+    )
+
+    assert verdict.repairable is True
+    assert "Verification/review plan references source files" in verdict.reasons[0]
+    assert verdict.details["missing_workspace_expected_files"] == [
+        "tests/index.test.js"
+    ]
+
+
 def test_policy_profile_lookup_falls_back_to_balanced():
     profile = get_policy_profile("does-not-exist")
 

@@ -50,6 +50,7 @@ from app.services.orchestration.context_assembly import (
     collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )
+from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event as _append_orchestration_event,
     record_live_log as _record_live_log,
@@ -496,7 +497,7 @@ def execute_orchestration_task(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
-                    event_type="workspace_restore_skipped",
+                    event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
                     details={
                         "reason": reason,
                         "policy": "preserve_on_non_isolation_failures",
@@ -566,7 +567,7 @@ def execute_orchestration_task(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
-                    event_type="workspace_restore_skipped",
+                    event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
                     details={
                         "reason": reason,
                         "policy": "empty_snapshot_preserved_existing_workspace",
@@ -577,7 +578,7 @@ def execute_orchestration_task(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
-                    event_type="workspace_preserved",
+                    event_type=EventType.WORKSPACE_PRESERVED,
                     details={
                         "reason": reason,
                         "restored_files": restore_result.get("files_restored", 0),
@@ -642,6 +643,16 @@ def execute_orchestration_task(
             f"[ORCHESTRATION] Starting multi-step execution for task {task_id}",
             metadata={"phase": "start"},
         )
+        try:
+            _append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.TASK_STARTED,
+                details={"execution_profile": execution_profile},
+            )
+        except Exception:
+            pass
 
         # Initialize the active runtime service
         runtime_service = create_agent_runtime(db, session_id, task_id)
@@ -731,7 +742,7 @@ def execute_orchestration_task(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
-                event_type="checkpoint_loaded",
+                event_type=EventType.CHECKPOINT_LOADED,
                 details={
                     "checkpoint_name": checkpoint_payload.get(
                         "_resolved_checkpoint_name"
@@ -825,7 +836,7 @@ def execute_orchestration_task(
                     project_dir=orchestration_state.project_dir,
                     session_id=session_id,
                     task_id=task_id,
-                    event_type="checkpoint_redirected",
+                    event_type=EventType.CHECKPOINT_REDIRECTED,
                     details={
                         "requested_checkpoint_name": requested_resume_checkpoint_name,
                         "resolved_checkpoint_name": resolved_resume_checkpoint_name,
@@ -866,7 +877,7 @@ def execute_orchestration_task(
                             project_dir=orchestration_state.project_dir,
                             session_id=session_id,
                             task_id=task_id,
-                            event_type="resume_workspace_drift",
+                            event_type=EventType.RESUME_WORKSPACE_DRIFT,
                             details={
                                 "requested_checkpoint_name": requested_resume_checkpoint_name,
                                 "resolved_checkpoint_name": resolved_resume_checkpoint_name,
@@ -910,7 +921,7 @@ def execute_orchestration_task(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
                         task_id=task_id,
-                        event_type="resume_workspace_drift",
+                        event_type=EventType.RESUME_WORKSPACE_DRIFT,
                         details={
                             "requested_checkpoint_name": requested_resume_checkpoint_name,
                             "resolved_checkpoint_name": resolved_resume_checkpoint_name,

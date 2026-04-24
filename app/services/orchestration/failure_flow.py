@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
 from app.models import LogEntry, TaskStatus
+from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
+    append_orchestration_event,
     record_live_log,
     save_orchestration_checkpoint,
     set_session_alert,
@@ -45,7 +47,9 @@ def handle_task_failure(
     logger = ctx.logger if ctx else logging.getLogger(__name__)
     error_handler = ctx.error_handler if ctx else None
 
-    should_retry = error_handler.should_retry(exc, "task_execution")
+    should_retry = (
+        error_handler.should_retry(exc, "task_execution") if error_handler else False
+    )
     retry_count = int(getattr(getattr(self_task, "request", None), "retries", 0) or 0)
     max_retries = int(getattr(self_task, "max_retries", 0) or 0)
     has_retry_capacity = should_retry and retry_count < max_retries
@@ -77,6 +81,18 @@ def handle_task_failure(
         task.error_message = str(exc)
         task.completed_at = datetime.now(UTC)
         task.workspace_status = "blocked" if task.task_subfolder else "not_created"
+
+    if orchestration_state and session_id and task_id:
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.TASK_FAILED,
+                details={"error": str(exc)},
+            )
+        except Exception:
+            pass
 
     if not session_task_link:
         session_task_link = get_latest_session_task_link_fn(db, session_id, task_id)

@@ -52,6 +52,8 @@ from app.services import (
     execute_task_payload as _execute_task_payload,
 )
 from app.services.name_formatter import humanize_display_name
+from app.services.auth_rate_limit import enforce_api_rate_limit
+from app.services.orchestration import is_known_event_type
 from app.dependencies import get_current_active_user, get_current_user
 
 router = APIRouter()
@@ -311,10 +313,12 @@ def refresh_session_tasks(
 def run_session_task(
     session_id: int,
     task_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Queue a specific task for manual execution inside a session."""
+    enforce_api_rate_limit(request, "task_run", current_user=current_user)
     session = (
         db.query(SessionModel)
         .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
@@ -519,10 +523,12 @@ def track_tool_execution(
 @router.post("/sessions/{session_id}/start")
 async def start_session_lifecycle_endpoint(
     session_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Start a session lifecycle and queue work when applicable."""
+    enforce_api_rate_limit(request, "session_start", current_user=current_user)
     return await _start_session_lifecycle(db, session_id)
 
 
@@ -563,6 +569,51 @@ async def resume_session(
     Restores saved state and continues execution
     """
     return await _resume_session_lifecycle(db, session_id)
+
+
+@router.get("/sessions/{session_id}/tasks/{task_id}/events")
+def get_session_task_events(
+    session_id: int,
+    task_id: int,
+    event_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return the append-only orchestration event journal for a session/task pair.
+
+    Useful for replaying what happened during a failed or completed run without
+    having to parse raw log text.  Pass ``event_type`` to filter to a single
+    event type (e.g. ``validation_result``, ``step_finished``).
+    """
+    if event_type and not is_known_event_type(event_type):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown event_type '{event_type}'",
+        )
+
+    from app.models import Project
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from app.services.orchestration import read_orchestration_events
+
+    events = read_orchestration_events(
+        project.workspace_path,
+        session_id,
+        task_id,
+        event_type_filter=event_type,
+    )
+    return {"session_id": session_id, "task_id": task_id, "events": events}
 
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")

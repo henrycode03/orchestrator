@@ -24,6 +24,7 @@ from app.services.orchestration.execution_flow import (
     determine_step_timeout,
 )
 from app.services.orchestration.parsing import extract_structured_text
+from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     record_validation_verdict,
@@ -528,7 +529,7 @@ def _attempt_completion_repair(
         project_dir=orchestration_state.project_dir,
         session_id=ctx.session_id,
         task_id=ctx.task_id,
-        event_type="repair_generated",
+        event_type=EventType.REPAIR_GENERATED,
         details={
             "phase": "completion_repair",
             "attempt": orchestration_state.completion_repair_attempts,
@@ -621,7 +622,7 @@ def _attempt_completion_repair(
             project_dir=orchestration_state.project_dir,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
-            event_type="repair_rejected",
+            event_type=EventType.REPAIR_REJECTED,
             details={
                 "phase": "completion_repair",
                 "reason": "inventory_guard",
@@ -674,7 +675,7 @@ def _attempt_completion_repair(
                 project_dir=orchestration_state.project_dir,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
-                event_type="repair_rejected",
+                event_type=EventType.REPAIR_REJECTED,
                 details={
                     "phase": "completion_repair",
                     "reason": "inventory_guard_retry_rejected",
@@ -798,7 +799,7 @@ def _attempt_completion_repair(
             project_dir=orchestration_state.project_dir,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
-            event_type="repair_applied",
+            event_type=EventType.REPAIR_APPLIED,
             details={
                 "phase": "completion_repair",
                 "step_index": next_step_number,
@@ -832,7 +833,7 @@ def _attempt_completion_repair(
         project_dir=orchestration_state.project_dir,
         session_id=ctx.session_id,
         task_id=ctx.task_id,
-        event_type="repair_rejected",
+        event_type=EventType.REPAIR_REJECTED,
         details={
             "phase": "completion_repair",
             "reason": assessment.error_message[:400],
@@ -914,7 +915,7 @@ def _run_evaluator(
             project_dir=orchestration_state.project_dir,
             session_id=getattr(orchestration_state, "session_id", None),
             task_id=getattr(orchestration_state, "task_id", None),
-            event_type="evaluator_result",
+            event_type=EventType.EVALUATOR_RESULT,
             details={"verdict": verdict, "output": eval_output[:800]},
         )
     except Exception as e:
@@ -1017,7 +1018,7 @@ def finalize_successful_task(
         project_dir=orchestration_state.project_dir,
         session_id=session_id,
         task_id=task_id,
-        event_type="phase_started",
+        event_type=EventType.PHASE_STARTED,
         details={"phase": "task_summary"},
     )
 
@@ -1125,7 +1126,7 @@ def finalize_successful_task(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
-                event_type="phase_finished",
+                event_type=EventType.PHASE_FINISHED,
                 details={
                     "phase": "task_summary",
                     "status": "repair_failed",
@@ -1270,7 +1271,7 @@ def finalize_successful_task(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
                         task_id=task_id,
-                        event_type="phase_finished",
+                        event_type=EventType.PHASE_FINISHED,
                         details={
                             "phase": "task_summary",
                             "status": "repair_failed",
@@ -1321,7 +1322,7 @@ def finalize_successful_task(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
-                event_type="phase_finished",
+                event_type=EventType.PHASE_FINISHED,
                 details={
                     "phase": "task_summary",
                     "status": "verification_failed",
@@ -1433,6 +1434,16 @@ def finalize_successful_task(
     if session_task_link:
         session_task_link.status = TaskStatus.DONE
         session_task_link.completed_at = task.completed_at
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type=EventType.TASK_COMPLETED,
+        details={
+            "steps_completed": len(orchestration_state.plan),
+            "execution_profile": execution_profile,
+        },
+    )
 
     _write_progress_notes(
         orchestration_state=orchestration_state,
@@ -1605,7 +1616,7 @@ def finalize_successful_task(
         project_dir=orchestration_state.project_dir,
         session_id=session_id,
         task_id=task_id,
-        event_type="phase_finished",
+        event_type=EventType.PHASE_FINISHED,
         details={
             "phase": "task_summary",
             "status": completion_validation.status,

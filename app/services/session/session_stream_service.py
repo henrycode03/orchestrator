@@ -6,7 +6,8 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
@@ -18,6 +19,68 @@ from app.services.log_stream_service import LogStreamService
 
 
 logger = logging.getLogger(__name__)
+
+
+def _poll_new_orchestration_events(
+    workspace_path: str,
+    session_id: int,
+    task_event_cursors: Dict[int, int],
+) -> Tuple[List[Dict[str, Any]], Dict[int, int]]:
+    """Read new events from per-task JSONL journals since the last cursor position.
+
+    ``task_event_cursors`` maps task_id → number of lines already sent.
+    Returns (new_events_list, updated_cursors).
+    """
+    events_dir = Path(workspace_path) / ".openclaw" / "events"
+    if not events_dir.exists():
+        return [], task_event_cursors
+
+    new_events: List[Dict[str, Any]] = []
+    updated_cursors = dict(task_event_cursors)
+
+    try:
+        for log_path in sorted(events_dir.glob(f"session_{session_id}_task_*.jsonl")):
+            try:
+                task_id = int(log_path.stem.split("_task_")[-1])
+            except (ValueError, IndexError):
+                continue
+            already_sent = updated_cursors.get(task_id, 0)
+            try:
+                with log_path.open("r", encoding="utf-8") as fh:
+                    all_lines = fh.readlines()
+            except OSError:
+                continue
+            for line in all_lines[already_sent:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    new_events.append(event)
+                except json.JSONDecodeError:
+                    pass
+            updated_cursors[task_id] = len(all_lines)
+    except Exception:
+        pass
+
+    return new_events, updated_cursors
+
+
+def _prepare_initial_orchestration_events(
+    workspace_path: Optional[str],
+    session_id: int,
+    *,
+    replay_limit: int = 100,
+) -> Tuple[List[Dict[str, Any]], Dict[int, int]]:
+    """Replay a bounded event backlog to reconnecting websocket clients."""
+
+    if not workspace_path:
+        return [], {}
+
+    events, cursors = _poll_new_orchestration_events(workspace_path, session_id, {})
+    if replay_limit > 0 and len(events) > replay_limit:
+        events = events[-replay_limit:]
+    return events, cursors
 
 
 active_websockets: dict = {}
@@ -118,6 +181,15 @@ async def stream_session_logs(
         }
     )
 
+    # Resolve workspace path for orchestration event journal polling.
+    _workspace_path: Optional[str] = None
+    if session.project_id:
+        from app.models import Project
+
+        _project = db.query(Project).filter(Project.id == session.project_id).first()
+        if _project and _project.workspace_path:
+            _workspace_path = str(_project.workspace_path)
+
     log_service = LogStreamService(db)
     recent_logs = log_service.get_recent_logs(
         session_id, instance_id=session.instance_id, limit=20
@@ -144,6 +216,12 @@ async def stream_session_logs(
     recent_logs, last_log_id = _prepare_initial_log_batch(recent_logs)
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
+
+    initial_orch_events, _task_event_cursors = _prepare_initial_orchestration_events(
+        _workspace_path, session_id
+    )
+    for orch_event in initial_orch_events:
+        await websocket.send_json({"type": "orchestration_event", **orch_event})
 
     logger.info("Sent %s initial logs, starting main loop...", len(recent_logs))
 
@@ -217,6 +295,18 @@ async def stream_session_logs(
                                 "session_instance_id": log.session_instance_id,
                             }
                         )
+
+                    # Emit new orchestration events from the JSONL journal.
+                    if _workspace_path:
+                        new_orch_events, _task_event_cursors = (
+                            _poll_new_orchestration_events(
+                                _workspace_path, session_id, _task_event_cursors
+                            )
+                        )
+                        for orch_event in new_orch_events:
+                            await websocket.send_json(
+                                {"type": "orchestration_event", **orch_event}
+                            )
 
                     # Detect terminal state after draining all pending logs
                     if (

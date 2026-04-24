@@ -12,6 +12,7 @@ from app.services.orchestration.context_assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
 )
+from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     record_validation_verdict,
@@ -51,7 +52,7 @@ def execute_planning_phase(
             project_dir=ctx.orchestration_state.project_dir,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
-            event_type="phase_started",
+            event_type=EventType.PHASE_STARTED,
             details={"phase": "planning"},
         )
     except Exception:
@@ -356,7 +357,7 @@ def execute_planning_phase(
                     project_dir=ctx.orchestration_state.project_dir,
                     session_id=ctx.session_id,
                     task_id=ctx.task_id,
-                    event_type="phase_finished",
+                    event_type=EventType.PHASE_FINISHED,
                     details={
                         "phase": "planning",
                         "status": plan_verdict.status,

@@ -43,8 +43,10 @@ from .policy import (
     clamp_planning_timeout,
     should_restore_workspace_on_failure,
 )
+from .event_types import EventType, is_known_event_type
 from .persistence import (
     append_orchestration_event,
+    read_orchestration_events,
     record_live_log,
     record_validation_verdict,
     restore_step_result,
@@ -85,9 +87,12 @@ from .workspace_guard import (
 )
 
 __all__ = [
+    "EventType",
+    "is_known_event_type",
     "ValidationVerdict",
     "PlannerService",
     "append_orchestration_event",
+    "read_orchestration_events",
     "assemble_completion_repair_inputs",
     "assemble_execution_prompt",
     "assemble_planning_prompt",

@@ -22,6 +22,7 @@ from app.services.orchestration.execution_flow import (
 )
 from app.services.orchestration.policy import DEBUG_TIMEOUT_SECONDS, MAX_STEP_ATTEMPTS
 from app.services.orchestration.executor import ExecutorService
+from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     record_validation_verdict,
@@ -97,7 +98,7 @@ def execute_step_loop(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
-            event_type="phase_started",
+            event_type=EventType.PHASE_STARTED,
             details={"phase": "executing", "steps": len(orchestration_state.plan)},
         )
     except Exception:
@@ -841,7 +842,7 @@ def execute_step_loop(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
-            event_type="phase_finished",
+            event_type=EventType.PHASE_FINISHED,
             details={"phase": "executing", "status": "completed"},
         )
     except Exception:

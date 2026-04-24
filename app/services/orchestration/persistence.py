@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.models import LogEntry, Session as SessionModel, TaskCheckpoint
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.prompt_templates import OrchestrationState, StepResult
 
+from .event_types import EventType
 from .types import ValidationVerdict
 
 
@@ -161,7 +162,7 @@ def record_validation_verdict(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
             task_id=task_id,
-            event_type="validation_result",
+            event_type=EventType.VALIDATION_RESULT,
             details={
                 "stage": verdict.stage,
                 "status": verdict.status,
@@ -176,6 +177,41 @@ def record_validation_verdict(
         orchestration_state.last_plan_validation = verdict_payload
     elif verdict.stage == "task_completion":
         orchestration_state.last_completion_validation = verdict_payload
+
+
+def read_orchestration_events(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    event_type_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Read the append-only event journal for a session/task pair.
+
+    Returns events in chronological order.  Pass ``event_type_filter`` to
+    restrict results to a single event type.
+    """
+    log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
+    if not log_path.exists():
+        return []
+
+    events: List[Dict[str, Any]] = []
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event_type_filter and event.get("event_type") != event_type_filter:
+                    continue
+                events.append(event)
+    except OSError:
+        pass
+    return events
 
 
 def record_live_log(

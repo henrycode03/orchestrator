@@ -6,6 +6,7 @@ from app.services.orchestration.completion_flow import (
     _augment_completion_verification_command,
     _classify_completion_verification_failure,
 )
+from app.services.orchestration.validator import ValidatorService
 
 
 def test_missing_jest_binary_is_treated_as_repairable_completion_verification():
@@ -80,3 +81,39 @@ def test_module_resolution_failure_is_treated_as_repairable_verification_issue()
     assert verdict is not None
     assert verdict.repairable is True
     assert "repairable test/module issue" in verdict.reasons[0]
+
+
+def test_verification_completion_does_not_require_execution_results(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "test").mkdir()
+    (project_dir / "test" / "replay.spec.ts").write_text(
+        "export const ok = true;\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Inspect replay coverage",
+                "commands": ["ls test"],
+                "verification": "test -f test/replay.spec.ts",
+                "expected_files": ["test/replay.spec.ts"],
+            }
+        ],
+        task_prompt="Review the project and verify replay stability.",
+        execution_profile="review_only",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 0,
+        },
+    )
+
+    assert verdict.accepted is True
+    assert (
+        "Completion contract requires at least one recorded execution result"
+        not in verdict.reasons
+    )
