@@ -140,7 +140,24 @@ export interface PlanningCommitPreview extends PlanningSession {
   tasks: Task[];
 }
 
-export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed';
+export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed' | 'waiting_for_human';
+
+export interface InterventionRequest {
+  id: number;
+  session_id: number;
+  task_id: number | null;
+  project_id: number;
+  intervention_type: 'guidance' | 'approval' | 'information';
+  prompt: string;
+  context_snapshot: string | null;
+  status: 'pending' | 'replied' | 'approved' | 'denied' | 'expired';
+  operator_reply: string | null;
+  operator_id: string | null;
+  created_at: string;
+  replied_at: string | null;
+  expires_at: string | null;
+  updated_at: string | null;
+}
 
 export interface LogEntry {
   id: number;

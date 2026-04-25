@@ -30,9 +30,18 @@ from .session_inspection_service import (
 )
 from .session_lifecycle_service import (
     pause_session_lifecycle,
+    request_human_intervention_lifecycle,
     resume_session_lifecycle,
     start_session_lifecycle,
     stop_session_lifecycle,
+)
+from .intervention_service import (
+    approve_intervention,
+    create_intervention_request,
+    deny_intervention,
+    get_intervention_history,
+    get_pending_interventions,
+    submit_intervention_reply,
 )
 from .session_runtime_service import (
     build_task_execution_prompt,
@@ -54,6 +63,13 @@ from .session_stream_service import stream_session_logs, stream_session_status
 __all__ = [
     "ResumeError",
     "ResumeSessionService",
+    "approve_intervention",
+    "create_intervention_request",
+    "deny_intervention",
+    "get_intervention_history",
+    "get_pending_interventions",
+    "request_human_intervention_lifecycle",
+    "submit_intervention_reply",
     "execute_task_payload",
     "get_session_statistics_payload",
     "get_tool_execution_history_payload",

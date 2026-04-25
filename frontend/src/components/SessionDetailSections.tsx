@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type {
   Checkpoint,
   CheckpointInspection,
+  InterventionRequest,
   Project,
   Session,
   SessionDivergenceCompareResponse,
@@ -16,6 +18,7 @@ import {
   CheckCircle2,
   Clock,
   ExternalLink,
+  MessageCircle,
   RefreshCw,
   Settings,
   Terminal as TerminalIcon,
@@ -365,7 +368,7 @@ export function SessionLogsPanel({
               Health history appears after orchestration events start landing.
             </p>
           ) : (
-            <div className="space-y-2">
+            <div className="max-h-56 space-y-2 overflow-y-auto">
               {healthEvents.slice(-5).reverse().map((event) => (
                 <div
                   key={`${event.timestamp}-${event.score}`}
@@ -498,7 +501,7 @@ export function SessionLogsPanel({
             Span grouping appears when parent-linked orchestration events are present.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className="max-h-56 space-y-2 overflow-y-auto">
             {timelineSpans.slice().reverse().map((span) => (
               <div key={span.id} className="rounded-md border border-slate-800 p-3">
                 <div className="flex items-center justify-between gap-3">
@@ -786,7 +789,7 @@ export function SessionSettingsPanel({
         {checkpoints.length === 0 ? (
           <p className="text-sm text-slate-500">No checkpoints recorded for this session yet.</p>
         ) : (
-          <div className="space-y-2">
+          <div className="max-h-56 space-y-2 overflow-y-auto">
             {checkpoints.map((checkpoint) => (
               <div
                 key={checkpoint.name}
@@ -908,6 +911,174 @@ export function SessionSettingsPanel({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+interface HumanInterventionPanelProps {
+  interventions: InterventionRequest[];
+  onApprove: (id: number) => Promise<void>;
+  onDeny: (id: number, reason?: string) => Promise<void>;
+  onReply: (id: number, reply: string) => Promise<void>;
+}
+
+export function HumanInterventionPanel({
+  interventions,
+  onApprove,
+  onDeny,
+  onReply,
+}: HumanInterventionPanelProps) {
+  const [replyText, setReplyText] = useState<Record<number, string>>({});
+  const [denyReason, setDenyReason] = useState<Record<number, string>>({});
+  const [submitting, setSubmitting] = useState<Record<number, boolean>>({});
+
+  const pending = interventions.filter((i) => i.status === 'pending');
+
+  if (pending.length === 0) {
+    return (
+      <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 p-4">
+        <p className="flex items-center gap-2 text-sm text-amber-300">
+          <MessageCircle className="h-4 w-4" />
+          Session paused waiting for operator. No pending interventions found yet — check back shortly.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {pending.map((intervention) => {
+        let snapshotData: Record<string, string> = {};
+        try { snapshotData = JSON.parse(intervention.context_snapshot || '{}'); } catch { /* ignore */ }
+        const isHumanInitiated = snapshotData.initiated_by === 'human';
+        const aiResponse: string | null = snapshotData.ai_response || null;
+
+        return (
+        <div
+          key={intervention.id}
+          className="rounded-lg border border-amber-700/50 bg-amber-900/20 p-4"
+        >
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <MessageCircle className="h-5 w-5 text-amber-400" />
+              <span className="font-semibold text-amber-200">
+                {isHumanInitiated ? 'Your Question to AI' : 'Operator Input Required'}
+              </span>
+              <span className="rounded bg-amber-800/50 px-2 py-0.5 text-xs uppercase text-amber-300">
+                {intervention.intervention_type}
+              </span>
+            </div>
+            {intervention.expires_at && (
+              <span className="text-xs text-slate-400">
+                Expires: {new Date(intervention.expires_at).toLocaleString()}
+              </span>
+            )}
+          </div>
+
+          <p className="mb-3 whitespace-pre-wrap text-sm text-slate-200">{intervention.prompt}</p>
+
+          {isHumanInitiated && (
+            <div className="mb-3 rounded-md border border-slate-700 bg-slate-900/60 p-3">
+              {aiResponse ? (
+                <>
+                  <p className="mb-1 text-xs font-medium text-emerald-400">AI Response</p>
+                  <p className="whitespace-pre-wrap text-sm text-slate-200">{aiResponse}</p>
+                </>
+              ) : (
+                <p className="flex items-center gap-2 text-sm text-slate-400">
+                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+                  AI is processing your question…
+                </p>
+              )}
+            </div>
+          )}
+
+          {!isHumanInitiated && intervention.context_snapshot && (
+            <details className="mb-3">
+              <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-300">
+                Context snapshot
+              </summary>
+              <pre className="mt-2 overflow-x-auto rounded bg-slate-950/80 p-3 text-xs text-slate-300">
+                {intervention.context_snapshot}
+              </pre>
+            </details>
+          )}
+
+          {!isHumanInitiated && intervention.intervention_type === 'approval' ? (
+            <div className="flex items-start gap-3">
+              <input
+                type="text"
+                placeholder="Deny reason (optional)"
+                value={denyReason[intervention.id] || ''}
+                onChange={(e) =>
+                  setDenyReason((prev) => ({ ...prev, [intervention.id]: e.target.value }))
+                }
+                className="flex-1 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+              />
+              <button
+                disabled={submitting[intervention.id]}
+                onClick={async () => {
+                  setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
+                  try {
+                    await onApprove(intervention.id);
+                  } finally {
+                    setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
+                  }
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+              >
+                Approve
+              </button>
+              <button
+                disabled={submitting[intervention.id]}
+                onClick={async () => {
+                  setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
+                  try {
+                    await onDeny(intervention.id, denyReason[intervention.id]);
+                  } finally {
+                    setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
+                  }
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+              >
+                Deny
+              </button>
+            </div>
+          ) : !isHumanInitiated ? (
+            <div className="space-y-2">
+              <textarea
+                rows={3}
+                placeholder={`Your ${intervention.intervention_type} reply...`}
+                value={replyText[intervention.id] || ''}
+                onChange={(e) =>
+                  setReplyText((prev) => ({ ...prev, [intervention.id]: e.target.value }))
+                }
+                className="w-full resize-none rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+              />
+              <button
+                disabled={
+                  submitting[intervention.id] || !(replyText[intervention.id] || '').trim()
+                }
+                onClick={async () => {
+                  const reply = (replyText[intervention.id] || '').trim();
+                  if (!reply) return;
+                  setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
+                  try {
+                    await onReply(intervention.id, reply);
+                    setReplyText((prev) => ({ ...prev, [intervention.id]: '' }));
+                  } finally {
+                    setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
+                  }
+                }}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-sm text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Submit Reply
+              </button>
+            </div>
+          ) : null}
+        </div>
+        );
+      })}
     </div>
   );
 }

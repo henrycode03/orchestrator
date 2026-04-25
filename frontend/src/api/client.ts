@@ -1,17 +1,17 @@
 import axios from 'axios';
-import type { 
-  Project, 
-  Task, 
-  Session, 
+import type {
+  Project,
+  Task,
+  Session,
   ExecutionProfile,
   Plan,
   PlannerTaskCandidate,
   PlanningCommitPreview,
   PlanningSession,
   PlanningSessionSummary,
-  LogEntry, 
-  SessionStatistics, 
-  AuthTokens, 
+  LogEntry,
+  SessionStatistics,
+  AuthTokens,
   User,
   SortedLogsResponse,
   TaskSortedLogsResponse,
@@ -24,6 +24,7 @@ import type {
   SessionStateDiffResponse,
   SessionDivergenceCompareResponse,
   AppSettings,
+  InterventionRequest,
 } from '../types/api';
 
 const API_BASE_URL =
@@ -580,6 +581,41 @@ export const sessionsAPI = {
       : `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream`;
     return new WebSocket(wsUrl);
   },
+
+  // Human-in-the-loop intervention endpoints
+  requestIntervention: (
+    sessionId: number,
+    data: {
+      intervention_type: string;
+      prompt: string;
+      task_id?: number;
+      context_snapshot?: Record<string, unknown>;
+      expires_in_minutes?: number;
+    }
+  ) => apiClient.post<InterventionRequest>(`/sessions/${sessionId}/request-intervention`, data),
+
+  listInterventions: (sessionId: number, pendingOnly?: boolean) =>
+    apiClient.get<{ session_id: number; interventions: InterventionRequest[]; total: number }>(
+      `/sessions/${sessionId}/interventions`,
+      { params: pendingOnly !== undefined ? { pending_only: pendingOnly } : undefined }
+    ),
+
+  replyToIntervention: (sessionId: number, interventionId: number, data: { reply: string }) =>
+    apiClient.post<InterventionRequest>(
+      `/sessions/${sessionId}/interventions/${interventionId}/reply`,
+      data
+    ),
+
+  approveIntervention: (sessionId: number, interventionId: number) =>
+    apiClient.post<InterventionRequest>(
+      `/sessions/${sessionId}/interventions/${interventionId}/approve`
+    ),
+
+  denyIntervention: (sessionId: number, interventionId: number, data?: { reason?: string }) =>
+    apiClient.post<InterventionRequest>(
+      `/sessions/${sessionId}/interventions/${interventionId}/deny`,
+      data || {}
+    ),
 
   // Get sorted logs (with sorting and deduplication options)
   getSortedLogs: (

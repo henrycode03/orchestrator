@@ -1472,3 +1472,88 @@ def generate_task_report(self, task_id: int, output_format: str = "json"):
         raise self.retry(exc=exc, max_retries=3)
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, max_retries=1, default_retry_delay=5)
+def answer_human_intervention_query(
+    self, intervention_id: int, session_id: int
+) -> None:
+    """Ask the AI to respond to an operator query submitted via 'Request Review'.
+
+    Stores the AI's response in the InterventionRequest.context_snapshot and
+    emits a live log so the frontend shows the answer in real-time.
+    """
+    from app.models import InterventionRequest
+    import json as _json
+
+    db = get_db_session()
+    try:
+        from app.services.session.intervention_service import _get_session_or_404
+
+        session = _get_session_or_404(db, session_id)
+        req = (
+            db.query(InterventionRequest)
+            .filter(InterventionRequest.id == intervention_id)
+            .first()
+        )
+        if not req or req.status != "pending":
+            return
+
+        project = db.query(Project).filter(Project.id == req.project_id).first()
+        project_name = project.name if project else f"project-{req.project_id}"
+
+        human_question = req.prompt or ""
+        ai_prompt = (
+            f"An operator has submitted a question mid-session. "
+            f"Project: {project_name}. "
+            f"Operator question: {human_question}\n\n"
+            f"Answer concisely and helpfully. If you need workspace context to answer, "
+            f"say so and describe what you would need. Do NOT execute any commands."
+        )
+
+        runtime = create_agent_runtime(
+            db=db,
+            session_id=session_id,
+            task_id=req.task_id,
+            session_instance_id=session.instance_id,
+        )
+        result = asyncio.run(runtime.execute_task(ai_prompt, timeout_seconds=90))
+        ai_answer = str((result or {}).get("output", "")).strip() or "(No response)"
+
+        # Store AI answer in context_snapshot as JSON
+        existing = {}
+        try:
+            if req.context_snapshot:
+                existing = _json.loads(req.context_snapshot)
+        except Exception:
+            pass
+        existing["ai_response"] = ai_answer
+        existing["initiated_by"] = "human"
+        req.context_snapshot = _json.dumps(existing)
+        db.commit()
+
+        # Emit as a live log so WebSocket picks it up
+        _record_live_log(
+            db,
+            session_id,
+            req.task_id,
+            "INFO",
+            f"[OPERATOR-QUERY] AI response to operator question: {ai_answer[:500]}",
+            session_instance_id=session.instance_id,
+            metadata={
+                "phase": "human_intervention",
+                "intervention_id": intervention_id,
+                "ai_response": ai_answer,
+                "human_question": human_question,
+            },
+        )
+        db.commit()
+        logger.info(
+            "AI answered operator intervention %s for session %s",
+            intervention_id,
+            session_id,
+        )
+    except Exception as exc:
+        logger.error("answer_human_intervention_query failed: %s", exc)
+    finally:
+        db.close()

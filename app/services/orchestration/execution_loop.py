@@ -122,7 +122,10 @@ def execute_step_loop(
     ):
         step = orchestration_state.plan[step_index]
         db.refresh(session)
-        if session.status in ["stopped", "paused"] or not session.is_active:
+        if (
+            session.status in ["stopped", "paused", "waiting_for_human"]
+            or not session.is_active
+        ):
             logger.info(
                 "[ORCHESTRATION] Session %s marked %s; stopping task execution before step %s",
                 session_id,
@@ -345,6 +348,7 @@ def execute_step_loop(
         step_output = assessment.step_output
         step_status = assessment.step_status
         missing_files = assessment.missing_files
+        stub_files = assessment.stub_files
         tool_failures = assessment.tool_failures
         correction_hints = assessment.correction_hints
         step_result["error"] = assessment.error_message
@@ -379,6 +383,20 @@ def execute_step_loop(
                     "phase": "executing",
                     "step_index": step_index + 1,
                     "missing_expected_files": missing_files[:20],
+                },
+            )
+
+        if stub_files:
+            emit_live(
+                "WARN",
+                (
+                    f"[ORCHESTRATION] Step {step_index + 1} created empty/stub files "
+                    f"(exist on disk but have no content): {', '.join(stub_files[:6])}"
+                ),
+                metadata={
+                    "phase": "executing",
+                    "step_index": step_index + 1,
+                    "stub_files": stub_files[:20],
                 },
             )
 
@@ -841,6 +859,13 @@ def execute_step_loop(
                     compact_debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
                 )
             )
+
+        # Remove debug artifacts the agent may have written to disk.
+        for _artifact in ("debug_report.json", "analysis.json", "debug_analysis.json"):
+            _artifact_path = orchestration_state.project_dir / _artifact
+            if _artifact_path.exists() and _artifact_path.is_file():
+                _artifact_path.unlink(missing_ok=True)
+                logger.info("[ORCHESTRATION] Removed debug artifact: %s", _artifact)
 
         try:
             success, debug_data, strategy_info = coerce_debug_step_result(

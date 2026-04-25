@@ -588,19 +588,58 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+async def request_human_intervention_lifecycle(
+    db: Session,
+    session_id: int,
+    *,
+    intervention_type: str,
+    prompt: str,
+    task_id: int | None = None,
+    context_snapshot: Dict[str, Any] | None = None,
+    expires_in_minutes: int = 120,
+    initiated_by: str = "human",
+) -> Dict[str, Any]:
+    """Pause execution and create a HITL intervention request."""
+    from app.services.session.intervention_service import create_intervention_request
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    req = create_intervention_request(
+        db,
+        session_id=session_id,
+        project_id=session.project_id,
+        intervention_type=intervention_type,
+        prompt=prompt,
+        task_id=task_id,
+        context_snapshot=context_snapshot,
+        expires_in_minutes=expires_in_minutes,
+        initiated_by=initiated_by,
+    )
+
+    return {
+        "status": "waiting_for_human",
+        "session_id": session_id,
+        "intervention_id": req.id,
+        "intervention_type": req.intervention_type,
+        "message": f"Session '{session.name}' is now waiting for human input",
+    }
+
+
 async def resume_session_lifecycle(
     db: Session,
     session_id: int,
     *,
     checkpoint_name: str | None = None,
 ) -> Dict[str, Any]:
-    """Resume a paused or stopped session from checkpoint."""
+    """Resume a paused, stopped, or waiting_for_human session from checkpoint."""
     from app.tasks.worker import execute_orchestration_task
 
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.status not in ["paused", "stopped"]:
+    if session.status not in ["paused", "stopped", "waiting_for_human"]:
         raise HTTPException(status_code=400, detail="Session is not resumable")
 
     try:

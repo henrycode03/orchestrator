@@ -22,6 +22,13 @@ from app.schemas import (
 )
 from app.services import (
     PromptTemplates,
+    approve_intervention as _approve_intervention,
+    create_intervention_request as _create_intervention_request,
+    deny_intervention as _deny_intervention,
+    get_intervention_history as _get_intervention_history,
+    get_pending_interventions as _get_pending_interventions,
+    request_human_intervention_lifecycle as _request_human_intervention_lifecycle,
+    submit_intervention_reply as _submit_intervention_reply,
     start_agent_session_payload as _start_agent_session_payload,
     check_session_overwrites_payload as _check_session_overwrites_payload,
     cleanup_orphaned_checkpoints_payload as _cleanup_orphaned_checkpoints_payload,
@@ -572,6 +579,161 @@ async def resume_session(
     Restores saved state and continues execution
     """
     return await _resume_session_lifecycle(db, session_id)
+
+
+class RequestInterventionBody(BaseModel):
+    intervention_type: str
+    prompt: str
+    task_id: Optional[int] = None
+    context_snapshot: Optional[Dict[str, Any]] = None
+    expires_in_minutes: int = 120
+
+
+class InterventionReplyBody(BaseModel):
+    reply: str
+
+
+class DenyInterventionBody(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/sessions/{session_id}/request-intervention")
+async def request_human_intervention(
+    session_id: int,
+    body: RequestInterventionBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Pause execution and register a human-in-the-loop intervention request.
+
+    Sets session.status = 'waiting_for_human'. The session can be resumed
+    once the operator submits a reply, approval, or denial.
+    """
+    return await _request_human_intervention_lifecycle(
+        db,
+        session_id,
+        intervention_type=body.intervention_type,
+        prompt=body.prompt,
+        task_id=body.task_id,
+        context_snapshot=body.context_snapshot,
+        expires_in_minutes=body.expires_in_minutes,
+    )
+
+
+@router.get("/sessions/{session_id}/interventions")
+def list_session_interventions(
+    session_id: int,
+    pending_only: bool = False,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """List intervention requests for a session (all or pending-only)."""
+    if pending_only:
+        items = _get_pending_interventions(db, session_id=session_id, limit=limit)
+    else:
+        items = _get_intervention_history(db, session_id=session_id, limit=limit)
+    return {
+        "session_id": session_id,
+        "interventions": [
+            {
+                "id": r.id,
+                "intervention_type": r.intervention_type,
+                "prompt": r.prompt,
+                "status": r.status,
+                "operator_reply": r.operator_reply,
+                "operator_id": r.operator_id,
+                "task_id": r.task_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "replied_at": r.replied_at.isoformat() if r.replied_at else None,
+                "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+            }
+            for r in items
+        ],
+    }
+
+
+@router.post("/sessions/{session_id}/interventions/{intervention_id}/reply")
+def reply_to_intervention(
+    session_id: int,
+    intervention_id: int,
+    body: InterventionReplyBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Submit operator guidance/reply for a pending intervention.
+
+    Records the reply, injects it into the latest checkpoint context, and
+    transitions the session from 'waiting_for_human' → 'paused' so it can be
+    resumed via the normal resume endpoint.
+    """
+    req = _submit_intervention_reply(
+        db,
+        intervention_id=intervention_id,
+        operator_reply=body.reply,
+        operator_id=getattr(current_user, "email", None)
+        or getattr(current_user, "id", None),
+    )
+    return {
+        "intervention_id": req.id,
+        "status": req.status,
+        "session_id": req.session_id,
+        "message": "Reply recorded. Session is now paused and ready to resume.",
+    }
+
+
+@router.post("/sessions/{session_id}/interventions/{intervention_id}/approve")
+def approve_session_intervention(
+    session_id: int,
+    intervention_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Approve an approval-type intervention request.
+
+    Injects approval context into the checkpoint and transitions session to
+    'paused' so it can continue after the operator-proposed action.
+    """
+    req = _approve_intervention(
+        db,
+        intervention_id=intervention_id,
+        operator_id=getattr(current_user, "email", None)
+        or getattr(current_user, "id", None),
+    )
+    return {
+        "intervention_id": req.id,
+        "status": req.status,
+        "session_id": req.session_id,
+        "message": "Intervention approved. Session is now paused and ready to resume.",
+    }
+
+
+@router.post("/sessions/{session_id}/interventions/{intervention_id}/deny")
+def deny_session_intervention(
+    session_id: int,
+    intervention_id: int,
+    body: DenyInterventionBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Deny an approval-type intervention request.
+
+    Injects denial context into the checkpoint. The operator can steer the
+    session toward an alternative approach via the resume endpoint.
+    """
+    req = _deny_intervention(
+        db,
+        intervention_id=intervention_id,
+        reason=body.reason,
+        operator_id=getattr(current_user, "email", None)
+        or getattr(current_user, "id", None),
+    )
+    return {
+        "intervention_id": req.id,
+        "status": req.status,
+        "session_id": req.session_id,
+        "message": "Intervention denied. Session is paused; use resume to continue with updated context.",
+    }
 
 
 @router.get("/sessions/{session_id}/tasks/{task_id}/events")

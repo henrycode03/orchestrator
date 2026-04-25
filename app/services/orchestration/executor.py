@@ -231,12 +231,15 @@ class ExecutorService:
         dry_run: bool = False,
     ) -> Dict[str, Any]:
         """
-        Remove zero-byte / stub files and empty directories created by a
-        failed step so they do not pollute subsequent planning or resume runs.
+        Remove empty directories created by a failed step so they do not
+        pollute subsequent planning or resume runs.
 
-        Returns a summary dict with lists of removed files and dirs.
+        Stub/empty FILES are intentionally preserved so the debug agent can
+        inspect them and understand that the file was created but needs content
+        written into it, rather than concluding the file was never created.
+
+        Returns a summary dict with lists of removed dirs and skipped paths.
         """
-        removed_files: List[str] = []
         removed_dirs: List[str] = []
         skipped: List[str] = []
 
@@ -258,40 +261,20 @@ class ExecutorService:
                     removed_dirs.append(path_text)
                 else:
                     skipped.append(path_text)
-                continue
-
-            size = full_path.stat().st_size
-            is_stub = False
-            if size < ExecutorService._MIN_MEANINGFUL_BYTES:
-                is_stub = True
-            elif size < 128:
-                try:
-                    content = full_path.read_text(errors="replace").strip()
-                    if not content or all(
-                        line.strip().startswith("#") or not line.strip()
-                        for line in content.splitlines()
-                    ):
-                        is_stub = True
-                except OSError:
-                    pass
-
-            if is_stub:
-                if not dry_run:
-                    full_path.unlink(missing_ok=True)
-                removed_files.append(path_text)
             else:
+                # Preserve stub/empty files so the debug agent can inspect them.
                 skipped.append(path_text)
 
         summary = {
-            "removed_files": removed_files,
+            "removed_files": [],
             "removed_dirs": removed_dirs,
             "skipped": skipped,
         }
 
-        if removed_files or removed_dirs:
+        if removed_dirs:
             msg = (
                 f"[ORCHESTRATION] Pre-debug cleanup removed "
-                f"{len(removed_files)} empty file(s) and "
+                f"0 empty file(s) and "
                 f"{len(removed_dirs)} empty dir(s) from the failed step workspace"
             )
             logger.info(msg)
@@ -300,7 +283,7 @@ class ExecutorService:
                 msg,
                 metadata={
                     "phase": "debug_cleanup",
-                    "removed_files": removed_files[:20],
+                    "removed_files": [],
                     "removed_dirs": removed_dirs[:10],
                 },
             )

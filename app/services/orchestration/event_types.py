@@ -33,6 +33,8 @@ class EventType:
 
     # ── Human-in-the-loop ─────────────────────────────────────────────────────
     WAITING_FOR_INPUT = "waiting_for_input"
+    HUMAN_INTERVENTION_REQUESTED = "human_intervention_requested"
+    HUMAN_INTERVENTION_REPLIED = "human_intervention_replied"
 
     # ── Validation ────────────────────────────────────────────────────────────
     VALIDATION_RESULT = "validation_result"

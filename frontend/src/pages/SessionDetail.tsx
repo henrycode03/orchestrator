@@ -4,6 +4,7 @@ import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
 import type {
   Checkpoint,
   CheckpointInspection,
+  InterventionRequest,
   OrchestrationEvent,
   Project,
   Session,
@@ -14,6 +15,7 @@ import type {
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { LoadingSpinner } from '@/components/ui';
 import {
+  HumanInterventionPanel,
   SessionConnectionNotice,
   SessionHeader,
   SessionLogsPanel,
@@ -23,7 +25,7 @@ import {
   SessionTasksPanel,
   type TimelineSpan,
 } from '@/components/SessionDetailSections';
-import { Pause, Play, Square, XCircle } from 'lucide-react';
+import { MessageCircle, Pause, Play, Square, XCircle } from 'lucide-react';
 
 type TimelineEventType =
   | 'planning'
@@ -105,6 +107,11 @@ export default function SessionDetail() {
   const [checkpointInspection, setCheckpointInspection] = useState<CheckpointInspection | null>(null);
   const [compareMatches, setCompareMatches] = useState<SessionDivergenceCompareResponse | null>(null);
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
+  const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
+  const [showInterventionForm, setShowInterventionForm] = useState(false);
+  const [interventionPrompt, setInterventionPrompt] = useState('');
+  const [interventionType, setInterventionType] = useState<'guidance' | 'approval'>('guidance');
+  const [interventionSubmitting, setInterventionSubmitting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
@@ -763,6 +770,54 @@ export default function SessionDetail() {
     }
   }, []);
 
+  const loadInterventions = useCallback(async (id: number) => {
+    try {
+      const res = await sessionsAPI.listInterventions(id, false);
+      setInterventions(res.data.interventions || []);
+    } catch {
+      setInterventions([]);
+    }
+  }, []);
+
+  const handleSubmitReply = useCallback(async (interventionId: number, reply: string) => {
+    if (!sessionId) return;
+    try {
+      await sessionsAPI.replyToIntervention(Number(sessionId), interventionId, { reply });
+      await loadInterventions(Number(sessionId));
+      const updated = await sessionsAPI.getById(Number(sessionId));
+      setSession(updated.data);
+    } catch (error) {
+      console.error('Failed to submit reply:', error);
+      alert('Failed to submit reply');
+    }
+  }, [loadInterventions, sessionId]);
+
+  const handleApproveIntervention = useCallback(async (interventionId: number) => {
+    if (!sessionId) return;
+    try {
+      await sessionsAPI.approveIntervention(Number(sessionId), interventionId);
+      await loadInterventions(Number(sessionId));
+      const updated = await sessionsAPI.getById(Number(sessionId));
+      setSession(updated.data);
+    } catch (error) {
+      console.error('Failed to approve intervention:', error);
+      alert('Failed to approve intervention');
+    }
+  }, [loadInterventions, sessionId]);
+
+  const handleDenyIntervention = useCallback(async (interventionId: number, reason?: string) => {
+    if (!sessionId) return;
+    try {
+      await sessionsAPI.denyIntervention(Number(sessionId), interventionId, reason ? { reason } : {});
+      await loadInterventions(Number(sessionId));
+      const updated = await sessionsAPI.getById(Number(sessionId));
+      setSession(updated.data);
+    } catch (error) {
+      console.error('Failed to deny intervention:', error);
+      alert('Failed to deny intervention');
+    }
+  }, [loadInterventions, sessionId]);
+
   const inspectCheckpoint = useCallback(async (checkpointName: string) => {
     if (!sessionId) return;
     try {
@@ -966,11 +1021,13 @@ export default function SessionDetail() {
 
         if (abortController.signal.aborted) return;
 
-        // Only connect WebSocket if session is running
-        if (sessionRes.data.status === 'running') {
+        if (sessionRes.data.status === 'running' || sessionRes.data.status === 'waiting_for_human') {
           scheduleWebSocketConnect(sessionRes.data.id);
         } else {
           console.log(`Session is ${sessionRes.data.status}, not connecting WebSocket yet`);
+        }
+        if (sessionRes.data.status === 'waiting_for_human') {
+          await loadInterventions(sessionRes.data.id);
         }
       } catch (err) {
         if (abortController.signal.aborted) return;
@@ -1020,10 +1077,16 @@ export default function SessionDetail() {
           }
         }
 
-        // If session changed to running, connect WebSocket
-        if (currentStatus === 'running' && !wsRef.current) {
+        if (
+          (currentStatus === 'running' || currentStatus === 'waiting_for_human') &&
+          !wsRef.current
+        ) {
           console.log(`Session is now ${currentStatus}, connecting WebSocket...`);
           scheduleWebSocketConnect(Number(sessionId), 1000);
+        }
+
+        if (currentStatus === 'waiting_for_human') {
+          await loadInterventions(Number(sessionId));
         }
 
         if (currentStatus === 'stopped' || currentStatus === 'paused') {
@@ -1047,7 +1110,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSession = async () => {
     if (!session || !sessionId) {
@@ -1271,27 +1334,117 @@ export default function SessionDetail() {
     }
   }, [pushTimelineEvent, session, sessionId]);
 
+  const handleRequestIntervention = async () => {
+    if (!sessionId || !interventionPrompt.trim()) return;
+    setInterventionSubmitting(true);
+    try {
+      await sessionsAPI.requestIntervention(Number(sessionId), {
+        prompt: interventionPrompt.trim(),
+        intervention_type: interventionType,
+      });
+      pushTimelineEvent('Human intervention requested', 'INFO');
+      const [updatedSession, interventionsRes] = await Promise.all([
+        sessionsAPI.getById(Number(sessionId)),
+        sessionsAPI.listInterventions(Number(sessionId), true),
+      ]);
+      setSession(updatedSession.data);
+      setInterventions(interventionsRes.data.interventions || []);
+      setInterventionPrompt('');
+      setShowInterventionForm(false);
+    } catch (error) {
+      console.error('Failed to request intervention:', error);
+    } finally {
+      setInterventionSubmitting(false);
+    }
+  };
+
   const getActionButtons = () => {
     if (!session) return null;
 
     switch (session.status) {
       case 'running':
         return (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowInterventionForm((v) => !v)}
+                className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm transition-colors"
+                title="Pause execution and request operator guidance"
+              >
+                <MessageCircle className="h-4 w-4" />
+                Request Review
+              </button>
+              <button
+                onClick={handlePauseSession}
+                className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm transition-colors"
+              >
+                <Pause className="h-4 w-4" />
+                Pause
+              </button>
+              <button
+                onClick={() => handleStopSession(false)}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors"
+              >
+                <Square className="h-4 w-4" />
+                Stop
+              </button>
+              <button
+                onClick={() => handleStopSession(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
+              >
+                <XCircle className="h-4 w-4" />
+                Force Stop
+              </button>
+            </div>
+            {showInterventionForm && (
+              <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={interventionType}
+                    onChange={(e) => setInterventionType(e.target.value as 'guidance' | 'approval')}
+                    className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none"
+                  >
+                    <option value="guidance">Guidance</option>
+                    <option value="approval">Approval</option>
+                  </select>
+                  <span className="text-xs text-amber-300">Request operator input</span>
+                </div>
+                <textarea
+                  autoFocus
+                  rows={3}
+                  value={interventionPrompt}
+                  onChange={(e) => setInterventionPrompt(e.target.value)}
+                  placeholder="Describe what you need the operator to review or decide…"
+                  className="w-full rounded border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none resize-none"
+                />
+                <div className="flex items-center gap-2 justify-end">
+                  <button
+                    onClick={() => { setShowInterventionForm(false); setInterventionPrompt(''); }}
+                    className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRequestIntervention}
+                    disabled={interventionSubmitting || !interventionPrompt.trim()}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded text-xs transition-colors"
+                  >
+                    <MessageCircle className="h-3 w-3" />
+                    {interventionSubmitting ? 'Sending…' : 'Submit'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+
+      case 'waiting_for_human':
+        return (
           <div className="flex items-center gap-2">
-            <button
-              onClick={handlePauseSession}
-              className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm transition-colors"
-            >
-              <Pause className="h-4 w-4" />
-              Pause
-            </button>
-            <button
-              onClick={() => handleStopSession(false)}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors"
-            >
-              <Square className="h-4 w-4" />
-              Stop
-            </button>
+            <span className="flex items-center gap-2 rounded-lg border border-amber-700/50 bg-amber-900/30 px-3 py-2 text-sm text-amber-300">
+              <MessageCircle className="h-4 w-4" />
+              Waiting for Operator
+            </span>
             <button
               onClick={() => handleStopSession(true)}
               className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
@@ -1400,6 +1553,15 @@ export default function SessionDetail() {
         session={session}
         wsConnected={wsConnected}
       />
+
+      {(session.status === 'waiting_for_human' || interventions.some((i) => i.status === 'pending')) && (
+        <HumanInterventionPanel
+          interventions={interventions}
+          onApprove={handleApproveIntervention}
+          onDeny={handleDenyIntervention}
+          onReply={handleSubmitReply}
+        />
+      )}
 
       <SessionStats
         formatDateTime={formatDateTime}

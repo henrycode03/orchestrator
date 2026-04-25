@@ -479,6 +479,81 @@ def _migration_006_planning_artifact_versioning(engine: Engine) -> None:
         )
 
 
+def _migration_007_intervention_requests(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    if "intervention_requests" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE intervention_requests (
+                        id INTEGER PRIMARY KEY,
+                        session_id INTEGER NOT NULL,
+                        task_id INTEGER,
+                        project_id INTEGER NOT NULL,
+                        intervention_type VARCHAR(20) NOT NULL,
+                        prompt TEXT NOT NULL,
+                        context_snapshot TEXT,
+                        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                        operator_reply TEXT,
+                        operator_id VARCHAR(255),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        replied_at DATETIME,
+                        expires_at DATETIME,
+                        updated_at DATETIME,
+                        FOREIGN KEY(session_id) REFERENCES sessions (id),
+                        FOREIGN KEY(task_id) REFERENCES tasks (id),
+                        FOREIGN KEY(project_id) REFERENCES projects (id)
+                    )
+                    """
+                )
+            )
+
+    with engine.begin() as connection:
+        if not _has_index(
+            engine, "intervention_requests", "ix_intervention_requests_session_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_intervention_requests_session_id ON intervention_requests (session_id)"
+                )
+            )
+        if not _has_index(
+            engine, "intervention_requests", "ix_intervention_requests_task_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_intervention_requests_task_id ON intervention_requests (task_id)"
+                )
+            )
+        if not _has_index(
+            engine, "intervention_requests", "ix_intervention_requests_project_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_intervention_requests_project_id ON intervention_requests (project_id)"
+                )
+            )
+        if not _has_index(
+            engine, "intervention_requests", "ix_intervention_requests_status"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_intervention_requests_status ON intervention_requests (status)"
+                )
+            )
+        if not _has_index(
+            engine,
+            "intervention_requests",
+            "ix_intervention_requests_intervention_type",
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_intervention_requests_intervention_type ON intervention_requests (intervention_type)"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -509,6 +584,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="006_planning_artifact_versioning",
         description="Preserve planning artifact history with latest-version markers",
         upgrade=_migration_006_planning_artifact_versioning,
+    ),
+    Migration(
+        version="007_intervention_requests",
+        description="Create intervention_requests table for human-in-the-loop orchestration",
+        upgrade=_migration_007_intervention_requests,
     ),
 )
 

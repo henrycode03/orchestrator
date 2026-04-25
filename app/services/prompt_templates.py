@@ -294,25 +294,26 @@ class PromptTemplates:
 
 **Planning Rules:**
 1. Prefer short, targeted shell commands over large generated scripts
-2. Avoid `cat <<EOF`, `cat > file <<EOF`, `python - <<'PY'`, or other large inline file-generation blocks in plans unless there is no simpler option
-3. Prefer incremental setup:
+2. For steps that create source/implementation files: the executor will use the Write tool to write actual content. In `commands`, describe what the file should implement (e.g., `"write src/comparator.js: exports compareSchemas function"`), NOT `touch src/comparator.js`. `touch`-only commands for implementation files are FORBIDDEN — the executor cannot know what content to write from a bare `touch`.
+3. `cat <<EOF` heredocs are acceptable ONLY for short config files (< 20 lines). For larger source files, rely on the executor's Write tool by describing the implementation in the step description and commands.
+4. Prefer incremental setup:
    - create directories first
    - create or edit one file at a time
    - install dependencies in a separate step from code changes
-4. Prefer package-manager or editor-friendly commands for config changes when possible
-5. Do NOT assume files already exist; inspect or create them deliberately
-6. Keep verification commands short, machine-runnable, and relative to `{project_dir}`
-7. If source files need imports or references, only use relative paths that are valid inside the task workspace layout
-8. Do NOT reference parent directories in shell commands
-9. Avoid bundling install + scaffold + config + tests into one step
-10. Prefer commands that are easy to retry after partial completion
-11. Do NOT use `cd ... && ...` because the working directory is already `{project_dir}`
-12. Do NOT use background-process commands such as `&`, `nohup`, `disown`, or shell job control
-13. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
-14. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
-15. If the context mentions completed or promoted prior task artifacts, assume those files have already been hydrated into `{project_dir}` and extend them instead of recreating parallel implementations
-16. Never join separate shell commands with commas; each command must stand alone as a valid shell command
-17. Plans that dump whole source files through heredocs are considered low quality; prefer smaller setup/edit commands
+5. Prefer package-manager or editor-friendly commands for config changes when possible
+6. Do NOT assume files already exist; inspect or create them deliberately
+7. Keep verification commands short, machine-runnable, and relative to `{project_dir}`
+8. If source files need imports or references, only use relative paths that are valid inside the task workspace layout
+9. Do NOT reference parent directories in shell commands
+10. Avoid bundling install + scaffold + config + tests into one step
+11. Prefer commands that are easy to retry after partial completion
+12. Do NOT use `cd ... && ...` because the working directory is already `{project_dir}`
+13. Do NOT use background-process commands such as `&`, `nohup`, `disown`, or shell job control
+14. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
+15. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
+16. If the context mentions completed or promoted prior task artifacts, assume those files have already been hydrated into `{project_dir}` and extend them instead of recreating parallel implementations
+17. Never join separate shell commands with commas; each command must stand alone as a valid shell command
+18. Use only relative paths in `expected_files` — never absolute paths like `/root/...` or `/home/...`
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -362,10 +363,10 @@ class PromptTemplates:
 7. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Execution Rules:**
-1. Follow the provided commands exactly unless a command is clearly invalid in the current workspace
-2. Before editing a file, inspect whether it already exists and preserve valid existing content when possible
-3. Prefer small, targeted edits over rewriting whole files
-4. Avoid large heredocs or multi-hundred-line inline file creation unless absolutely necessary
+1. Follow the provided commands as a guide, but your primary goal is to fully implement what the step describes — not just mechanically run the commands.
+2. **CRITICAL — Empty files are NOT acceptable.** If a command is `touch src/foo.js` or any bare file-creation command, you MUST use the Write tool to write actual implementation content into that file immediately after. A step that produces only empty or zero-byte files has FAILED. The `expected_files` must contain real, non-empty implementation code when the step is done.
+3. Before editing a file, inspect whether it already exists and preserve valid existing content when possible
+4. Prefer small, targeted edits over rewriting whole files
 5. If a config file such as `package.json`, `pyproject.toml`, or `.env` is missing, create the minimal valid version needed for this step
 6. When a command fails because a file is missing, recover by creating or initializing the smallest required file inside `{project_dir}`
 7. Keep shell command and verification paths relative to `{project_dir}`
@@ -384,6 +385,7 @@ class PromptTemplates:
 20. If a guessed file path does not exist, do not guess a second path immediately; enumerate the real tree first and then read only confirmed files
 21. Treat step descriptions as human instructions, not filenames. Do NOT invent files like `step-01-*.md` or `step-03-*.md` unless the task explicitly created them
 22. Do NOT try to read a markdown file derived from the step title or description unless that exact file was confirmed to exist in the workspace first
+23. Do NOT write any debug, analysis, or report files (e.g. `debug_report.json`) to the workspace. Only write files that are part of the task deliverables listed in `expected_files`.
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -430,7 +432,11 @@ class PromptTemplates:
 8. If the failure is `read failed: ENOENT` for a guessed source path, do not guess another path blindly; first enumerate the actual workspace files with `rg --files .` or `find . -maxdepth 4 -type f`, then read only confirmed files
 9. Never assume a step description corresponds to a markdown file on disk; strings like `step-03-test-config-and-scripts.md` are guessed paths unless the workspace listing proves they exist
 
-**Output (JSON):**
+**CRITICAL — Do NOT write any files to disk during this debugging phase.**
+Do NOT create `debug_report.json`, `analysis.json`, `notes.md`, or any other file.
+Return your analysis ONLY as JSON text in your response. The orchestrator reads your response text, not files.
+
+**Output (JSON in response text only):**
 {{
   "fix_type": "code_fix" | "command_fix" | "revise_plan",
   "analysis": "...",

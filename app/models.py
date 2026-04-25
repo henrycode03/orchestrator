@@ -439,3 +439,34 @@ class SystemSetting(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class InterventionRequest(Base):
+    """Human-in-the-loop intervention request.
+
+    Created when a running session needs operator input before it can continue.
+    Intervention types:
+      guidance   — operator provides free-form steering text
+      approval   — operator approves or denies a proposed action
+      information — operator supplies a fact the runtime cannot determine itself
+    """
+
+    __tablename__ = "intervention_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=False, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+
+    intervention_type = Column(String(20), nullable=False, index=True)
+    prompt = Column(Text, nullable=False)
+    context_snapshot = Column(Text, nullable=True)  # JSON
+
+    status = Column(String(20), default="pending", nullable=False, index=True)
+    operator_reply = Column(Text, nullable=True)
+    operator_id = Column(String(255), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    replied_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
