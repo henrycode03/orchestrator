@@ -88,7 +88,7 @@ def test_ordered_tasks_execute_in_project_root(monkeypatch, db_session, tmp_path
     assert service._resolve_execution_cwd() == str(project_root)
 
 
-def test_manual_tasks_still_use_isolated_subfolder(monkeypatch, db_session, tmp_path):
+def test_manual_tasks_execute_in_project_root(monkeypatch, db_session, tmp_path):
     _patch_workspace_root(monkeypatch, tmp_path)
     project, session, task = _seed_project_session_and_task(
         db_session,
@@ -101,13 +101,13 @@ def test_manual_tasks_still_use_isolated_subfolder(monkeypatch, db_session, tmp_
     workspace = ensure_task_workspace(db_session, session, task.id)
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
 
-    assert not should_execute_in_canonical_project_root(
+    assert should_execute_in_canonical_project_root(
         task,
         getattr(task, "execution_profile", None),
         task.title,
         task.description,
     )
-    assert workspace["workspace_path"] == str(project_root / task.task_subfolder)
+    assert workspace["workspace_path"] == str(project_root)
 
 
 def test_ordered_task_reports_live_in_project_root(monkeypatch, db_session, tmp_path):
