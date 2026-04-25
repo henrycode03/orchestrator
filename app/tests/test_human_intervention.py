@@ -283,7 +283,11 @@ class TestSubmitInterventionReply:
             .order_by(LogEntry.id.desc())
             .all()
         )
-        meta_list = [json.loads(l.log_metadata) for l in logs if l.log_metadata]
+        meta_list = [
+            json.loads(log_entry.log_metadata)
+            for log_entry in logs
+            if log_entry.log_metadata
+        ]
         event_types = [m.get("event_type") for m in meta_list]
         assert "human_intervention_replied" in event_types
 

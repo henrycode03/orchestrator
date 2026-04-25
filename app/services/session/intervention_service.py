@@ -85,9 +85,6 @@ def _emit_intervention_event(
         else None
     )
     if project and project.workspace_path and task_id:
-        from app.services.workspace.project_isolation_service import (
-            resolve_project_workspace_path,
-        )
         from pathlib import Path
 
         workspace_path = str(
