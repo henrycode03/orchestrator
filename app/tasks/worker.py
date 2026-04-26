@@ -1480,10 +1480,12 @@ def answer_human_intervention_query(
 ) -> None:
     """Ask the AI to respond to an operator query submitted via 'Request Review'.
 
-    Stores the AI's response in the InterventionRequest.context_snapshot and
-    emits a live log so the frontend shows the answer in real-time.
+    Stores the AI's response in InterventionRequest.context_snapshot and emits
+    live logs so the frontend shows progress: one "thinking" log immediately,
+    then the answer when the LLM call completes.
     """
     from app.models import InterventionRequest
+    from app.services.agents.agent_runtime import invoke_runtime_prompt
     import json as _json
 
     db = get_db_session()
@@ -1503,6 +1505,25 @@ def answer_human_intervention_query(
         project_name = project.name if project else f"project-{req.project_id}"
 
         human_question = req.prompt or ""
+
+        # Emit immediately so the frontend shows "AI is working" rather than a
+        # silent spinner for the full duration of the LLM call.
+        _record_live_log(
+            db,
+            session_id,
+            req.task_id,
+            "INFO",
+            f"[OPERATOR-QUERY] Processing operator question…",
+            session_instance_id=session.instance_id,
+            metadata={
+                "phase": "human_intervention",
+                "intervention_id": intervention_id,
+                "status": "processing",
+                "human_question": human_question,
+            },
+        )
+        db.commit()
+
         ai_prompt = (
             f"An operator has submitted a question mid-session. "
             f"Project: {project_name}. "
@@ -1511,13 +1532,14 @@ def answer_human_intervention_query(
             f"say so and describe what you would need. Do NOT execute any commands."
         )
 
-        runtime = create_agent_runtime(
-            db=db,
+        result = invoke_runtime_prompt(
+            db,
+            ai_prompt,
             session_id=session_id,
             task_id=req.task_id,
-            session_instance_id=session.instance_id,
+            timeout_seconds=90,
+            session_prefix="human_intervention",
         )
-        result = asyncio.run(runtime.execute_task(ai_prompt, timeout_seconds=90))
         ai_answer = str((result or {}).get("output", "")).strip() or "(No response)"
 
         # Store AI answer in context_snapshot as JSON
@@ -1528,11 +1550,10 @@ def answer_human_intervention_query(
         except Exception:
             pass
         existing["ai_response"] = ai_answer
-        existing["initiated_by"] = "human"
         req.context_snapshot = _json.dumps(existing)
         db.commit()
 
-        # Emit as a live log so WebSocket picks it up
+        # Emit the completed answer so WebSocket picks it up
         _record_live_log(
             db,
             session_id,
@@ -1543,6 +1564,7 @@ def answer_human_intervention_query(
             metadata={
                 "phase": "human_intervention",
                 "intervention_id": intervention_id,
+                "status": "answered",
                 "ai_response": ai_answer,
                 "human_question": human_question,
             },

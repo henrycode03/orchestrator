@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -48,6 +49,24 @@ from app.services.orchestration.workspace_guard import (
 )
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
+
+
+# Sentinel the agent emits to request human confirmation mid-step.
+# Format: <<<HITL_REQUEST:{"intervention_type": "approval", "prompt": "...", "context": {...}}>>>
+# The agent system prompt must instruct the agent to use this format when it
+# wants to pause and ask the operator before proceeding.
+_HITL_SENTINEL_RE = re.compile(r"<<<HITL_REQUEST:(\{.*?\})>>>", re.DOTALL)
+
+
+def _extract_hitl_sentinel(output: str) -> Dict[str, Any] | None:
+    """Return the parsed HITL request dict if the agent output contains the sentinel."""
+    m = _HITL_SENTINEL_RE.search(output or "")
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return None
 
 
 def execute_step_loop(
@@ -117,6 +136,11 @@ def execute_step_loop(
     except Exception:
         pass
 
+    # Stop check is at step boundaries only. A step already in progress (e.g. a
+    # long LLM call) runs to completion even after revoke_session_celery_tasks
+    # fires. SIGTERM from terminate=True may also be delayed if the worker is
+    # mid-HTTP-request. The pause is "guaranteed before the next step" not
+    # "instantaneous".
     for step_index in range(
         orchestration_state.current_step_index, len(orchestration_state.plan)
     ):
@@ -322,6 +346,66 @@ def execute_step_loop(
             expected_files=expected_files,
             extract_structured_text=extract_structured_text,
         )
+
+        # Agent-initiated HITL: detect sentinel before assessment so the step
+        # does not count as failed. The sentinel means "I need operator
+        # confirmation before I proceed." We pause the session here; on resume
+        # the operator's decision will be in context["human_guidance"] and the
+        # agent retries the same step with that guidance.
+        hitl_request = _extract_hitl_sentinel(step_result.get("output", ""))
+        if hitl_request:
+            intervention_type = hitl_request.get("intervention_type", "approval")
+            if intervention_type not in {"guidance", "approval", "information"}:
+                intervention_type = "approval"
+            hitl_prompt = hitl_request.get("prompt") or (
+                f"Agent requested {intervention_type} at step {step_index + 1}: "
+                f"{step_description}"
+            )
+            hitl_context = dict(hitl_request.get("context") or {})
+            hitl_context.update(
+                {"step_index": step_index + 1, "step_description": step_description}
+            )
+            try:
+                from app.services.session.intervention_service import (
+                    create_intervention_request,
+                )
+
+                create_intervention_request(
+                    db,
+                    session_id=session_id,
+                    project_id=project.id,
+                    intervention_type=intervention_type,
+                    prompt=hitl_prompt,
+                    task_id=task_id,
+                    context_snapshot=hitl_context,
+                    initiated_by="ai",
+                    revoke_running_tasks=False,  # we are the running task — stopping ourselves
+                )
+                emit_live(
+                    "INFO",
+                    f"[HITL] Agent requested {intervention_type} at step {step_index + 1}: "
+                    f"{hitl_prompt[:200]}",
+                    metadata={
+                        "phase": "human_intervention",
+                        "step_index": step_index + 1,
+                        "intervention_type": intervention_type,
+                    },
+                )
+            except Exception as _hitl_exc:
+                logger.error(
+                    "[HITL] Failed to create intervention request: %s", _hitl_exc
+                )
+            save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            db.commit()
+            return {
+                "status": "waiting_for_human",
+                "task_id": task_id,
+                "session_id": session_id,
+                "step_index": step_index,
+                "reason": "agent_requested_human_intervention",
+            }
 
         step_debug_attempts = [
             da

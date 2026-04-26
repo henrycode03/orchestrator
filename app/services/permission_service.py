@@ -114,6 +114,48 @@ class PermissionApprovalService:
             f"type={operation_type}, path={target_path}"
         )
 
+        # Bridge: surface in the intervention UI so the operator sees a single
+        # approval queue rather than two separate flows.
+        if session_id:
+            try:
+                from app.services.session.intervention_service import (
+                    create_intervention_request,
+                )
+                from app.models import Session as SessionModel
+
+                session = (
+                    self.db.query(SessionModel)
+                    .filter(SessionModel.id == session_id)
+                    .first()
+                )
+                if session and session.status in {
+                    "running",
+                    "paused",
+                    "waiting_for_human",
+                }:
+                    create_intervention_request(
+                        self.db,
+                        session_id=session_id,
+                        project_id=project_id,
+                        intervention_type="approval",
+                        prompt=request.description,
+                        task_id=task_id,
+                        context_snapshot={
+                            "permission_request_id": request.id,
+                            "operation_type": operation_type,
+                            "target_path": target_path,
+                            "command": command,
+                        },
+                        initiated_by="ai",
+                        revoke_running_tasks=False,
+                    )
+            except Exception as _e:
+                logger.warning(
+                    "Could not create linked intervention for permission %s: %s",
+                    request.id,
+                    _e,
+                )
+
         return request
 
     def _generate_description(

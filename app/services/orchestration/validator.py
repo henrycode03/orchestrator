@@ -432,8 +432,18 @@ class ValidatorService:
         return [step for step in bad_steps if step is not None]
 
     @staticmethod
-    def _plan_creates_nested_project_root(plan: List[Dict[str, Any]]) -> List[int]:
+    def _plan_creates_nested_project_root(
+        plan: List[Dict[str, Any]], project_dir: Optional[Path] = None
+    ) -> List[int]:
         """Detect plans that recreate a whole project under a new top-level folder."""
+
+        # Dirs that appear in project_dir path are legitimate prefixes in expected_files
+        allowed_from_project = set()
+        if project_dir:
+            try:
+                allowed_from_project = {p for p in project_dir.parts if p and p != "/"}
+            except Exception:
+                pass
 
         bad_steps: List[int] = []
         for step in plan:
@@ -450,7 +460,9 @@ class ValidatorService:
             suspicious = {
                 top
                 for top in top_levels
-                if top not in ROOT_LEVEL_EXPECTED_DIRS and not top.startswith(".")
+                if top not in ROOT_LEVEL_EXPECTED_DIRS
+                and top not in allowed_from_project
+                and not top.startswith(".")
             }
             if len(suspicious) == 1 and len(expected_files) >= 3:
                 bad_steps.append(step.get("step_number"))
@@ -552,7 +564,9 @@ class ValidatorService:
             )
             details["nested_workspace_steps"] = nested_workspace_steps
 
-        nested_project_root_steps = cls._plan_creates_nested_project_root(plan)
+        nested_project_root_steps = cls._plan_creates_nested_project_root(
+            plan, project_dir
+        )
         if nested_project_root_steps:
             repairable.append(
                 "Plan appears to generate the deliverable inside a new nested project folder "

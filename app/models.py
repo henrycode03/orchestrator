@@ -459,6 +459,7 @@ class InterventionRequest(Base):
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
 
     intervention_type = Column(String(20), nullable=False, index=True)
+    initiated_by = Column(String(20), default="ai", nullable=False)
     prompt = Column(Text, nullable=False)
     context_snapshot = Column(Text, nullable=True)  # JSON
 

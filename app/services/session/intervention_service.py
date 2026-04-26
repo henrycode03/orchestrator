@@ -27,6 +27,7 @@ from app.models import (
     LogEntry,
     Session as SessionModel,
     SessionTask,
+    Task,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,11 +130,16 @@ def create_intervention_request(
     context_snapshot: Optional[Dict[str, Any]] = None,
     expires_in_minutes: int = _DEFAULT_EXPIRY_MINUTES,
     initiated_by: str = "ai",
+    revoke_running_tasks: bool = True,
 ) -> InterventionRequest:
     """Pause session execution and persist a HITL intervention request.
 
     Sets session.status = 'waiting_for_human', revokes any running Celery
     tasks, saves the current checkpoint, and emits an event.
+
+    Pass revoke_running_tasks=False when calling from inside the Celery task
+    itself (e.g. sentinel detection in the execution loop) — the task is
+    voluntarily stopping, so there is nothing to revoke.
     """
     if intervention_type not in INTERVENTION_TYPES:
         raise HTTPException(
@@ -149,12 +155,14 @@ def create_intervention_request(
             detail=f"Cannot request intervention for session in state '{session.status}'",
         )
 
-    from app.services.session.session_runtime_service import (
-        revoke_session_celery_tasks,
-    )
     from app.services.workspace.checkpoint_service import CheckpointService
 
-    revoke_session_celery_tasks(db, session_id, terminate=True)
+    if revoke_running_tasks:
+        from app.services.session.session_runtime_service import (
+            revoke_session_celery_tasks,
+        )
+
+        revoke_session_celery_tasks(db, session_id, terminate=True)
 
     checkpoint_name: Optional[str] = None
     try:
@@ -181,6 +189,7 @@ def create_intervention_request(
         task_id=task_id,
         project_id=project_id,
         intervention_type=intervention_type,
+        initiated_by=initiated_by,
         prompt=prompt,
         context_snapshot=json.dumps(context_snapshot) if context_snapshot else None,
         status="pending",
@@ -265,6 +274,85 @@ def _inject_reply_into_checkpoint(
         return None
 
 
+def _sync_linked_permission(
+    db: DBSession,
+    req: InterventionRequest,
+    *,
+    approved: bool,
+    operator_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """If req was bridged from permission_service, sync the PermissionRequest status."""
+    try:
+        ctx = json.loads(req.context_snapshot) if req.context_snapshot else {}
+    except Exception:
+        return
+    permission_request_id = ctx.get("permission_request_id")
+    if not permission_request_id:
+        return
+    try:
+        from app.services.permission_service import PermissionApprovalService
+
+        svc = PermissionApprovalService(db)
+        if approved:
+            svc.approve_permission(
+                permission_request_id, approved_by=operator_id or "operator"
+            )
+        else:
+            svc.deny_permission(permission_request_id, reason=reason)
+    except Exception as exc:
+        logger.warning(
+            "Could not sync permission_request %s after intervention %s: %s",
+            permission_request_id,
+            req.id,
+            exc,
+        )
+
+
+def _dispatch_resume(
+    db: DBSession,
+    session: SessionModel,
+    task_id: Optional[int],
+    checkpoint_name: str,
+) -> None:
+    """Dispatch a Celery task to resume session execution from checkpoint.
+
+    Called after operator reply/approve/deny so the session auto-continues
+    without requiring a manual /resume call.
+    """
+    try:
+        from app.tasks.worker import execute_orchestration_task
+
+        task = db.query(Task).filter(Task.id == task_id).first() if task_id else None
+        if not task:
+            logger.warning(
+                "Auto-resume skipped: no task found for session %s task_id=%s",
+                session.id,
+                task_id,
+            )
+            return
+        prompt = task.description or task.title or ""
+        execute_orchestration_task.delay(
+            session_id=session.id,
+            task_id=task.id,
+            prompt=prompt,
+            timeout_seconds=1800,
+            resume_checkpoint_name=checkpoint_name,
+        )
+        session.status = "running"
+        session.is_active = True
+        db.commit()
+        logger.info(
+            "Auto-resumed session %s from checkpoint %s after operator reply",
+            session.id,
+            checkpoint_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auto-resume dispatch failed for session %s: %s", session.id, exc
+        )
+
+
 def submit_intervention_reply(
     db: DBSession,
     *,
@@ -312,8 +400,11 @@ def submit_intervention_reply(
         session_instance_id=session.instance_id if session else None,
     )
 
+    if reply_checkpoint and session:
+        _dispatch_resume(db, session, req.task_id, reply_checkpoint)
+
     logger.info(
-        "Intervention %s replied by %s; session %s → paused",
+        "Intervention %s replied by %s; session %s → auto-resuming",
         req.id,
         operator_id or "unknown",
         req.session_id,
@@ -349,6 +440,9 @@ def approve_intervention(
     req.operator_reply = "approved"
     db.commit()
 
+    # Sync linked PermissionRequest if this intervention was bridged from permission_service
+    _sync_linked_permission(db, req, approved=True, operator_id=operator_id)
+
     reply_checkpoint = _inject_reply_into_checkpoint(
         db, req.session_id, "Operator approved the proposed action.", "approval", req.id
     )
@@ -372,6 +466,9 @@ def approve_intervention(
         },
         session_instance_id=session.instance_id if session else None,
     )
+
+    if reply_checkpoint and session:
+        _dispatch_resume(db, session, req.task_id, reply_checkpoint)
 
     db.refresh(req)
     return req
@@ -405,6 +502,9 @@ def deny_intervention(
     req.operator_reply = reason or "denied"
     db.commit()
 
+    # Sync linked PermissionRequest if this intervention was bridged from permission_service
+    _sync_linked_permission(db, req, approved=False, reason=reason)
+
     denial_text = (
         f"Operator denied the proposed action. Reason: {reason or 'none provided'}"
     )
@@ -432,6 +532,11 @@ def deny_intervention(
         },
         session_instance_id=session.instance_id if session else None,
     )
+
+    # Auto-resume even on denial: the agent picks up with denial context and
+    # adjusts its approach (e.g. proposes an alternative).
+    if reply_checkpoint and session:
+        _dispatch_resume(db, session, req.task_id, reply_checkpoint)
 
     db.refresh(req)
     return req

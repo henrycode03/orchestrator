@@ -492,6 +492,7 @@ def _migration_007_intervention_requests(engine: Engine) -> None:
                         task_id INTEGER,
                         project_id INTEGER NOT NULL,
                         intervention_type VARCHAR(20) NOT NULL,
+                        initiated_by VARCHAR(20) NOT NULL DEFAULT 'ai',
                         prompt TEXT NOT NULL,
                         context_snapshot TEXT,
                         status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -554,6 +555,18 @@ def _migration_007_intervention_requests(engine: Engine) -> None:
             )
 
 
+def _migration_008_intervention_initiated_by(engine: Engine) -> None:
+    if "intervention_requests" not in _table_names(engine):
+        return
+    if not _has_column(engine, "intervention_requests", "initiated_by"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE intervention_requests ADD COLUMN initiated_by VARCHAR(20) NOT NULL DEFAULT 'ai'"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -589,6 +602,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="007_intervention_requests",
         description="Create intervention_requests table for human-in-the-loop orchestration",
         upgrade=_migration_007_intervention_requests,
+    ),
+    Migration(
+        version="008_intervention_initiated_by",
+        description="Add initiated_by column to intervention_requests",
+        upgrade=_migration_008_intervention_initiated_by,
     ),
 )
 
