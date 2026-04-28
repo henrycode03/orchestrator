@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.services.error_handler import error_handler
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 
 def step_needs_command_repair(step: Dict[str, Any]) -> bool:
@@ -30,6 +31,7 @@ def build_step_repair_prompt(
     prior_results_summary: str,
     project_context: str,
 ) -> str:
+    prompt_project_dir = render_workspace_path_for_prompt(project_dir)
     return f"""Repair this execution step so it becomes machine-runnable JSON. Return JSON object only.
 
 Task:
@@ -48,7 +50,7 @@ Prior completed results:
 {prior_results_summary[:2000]}
 
 Rules:
-1. Working directory is {project_dir}
+1. Working directory is {prompt_project_dir}
 2. Use relative paths only
 3. Do not use .., ~, or absolute paths
 4. commands must be a non-empty JSON array of shell commands
@@ -107,7 +109,7 @@ def repair_step_commands_with_self_correction(
             "Return JSON only.",
         ],
         context={
-            "Project Directory": str(project_dir),
+            "Project Directory": render_workspace_path_for_prompt(project_dir),
             "Step Index": step_index + 1,
         },
         expected_output="JSON object containing the repaired step fields.",

@@ -201,6 +201,36 @@ def test_verification_plan_flags_invented_workspace_files(tmp_path):
     ]
 
 
+def test_validator_flags_duplicated_root_paths_in_plan_commands_and_expected_files():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create frontend structure",
+                "commands": [
+                    "mkdir -p frontend/src/frontend/src/components",
+                    "touch backend/src/backend/src/index.ts",
+                ],
+                "verification": "test -d frontend/src/frontend/src/components",
+                "rollback": "rm -rf frontend/src/frontend/src backend/src/backend/src",
+                "expected_files": [
+                    "frontend/src/frontend/src/main.tsx",
+                    "backend/src/backend/src/index.ts",
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement frontend and backend foundations",
+        execution_profile="full_lifecycle",
+    )
+
+    assert verdict.repairable is True
+    assert "repeats workspace root segments" in " ".join(verdict.reasons)
+    assert verdict.details["duplicated_root_paths"] == {
+        1: ["frontend/src/frontend/src", "backend/src/backend/src"]
+    }
+
+
 def test_policy_profile_lookup_falls_back_to_balanced():
     profile = get_policy_profile("does-not-exist")
 

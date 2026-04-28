@@ -58,6 +58,18 @@ def test_qwen_local_prompt_profile_enforces_array_only_output():
     assert "Do not wrap it in an object" in prompt
 
 
+def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build frontend and backend scaffolding",
+        malformed_output='[{"step_number":1,"commands":["mkdir -p frontend/src/frontend/src"]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+    )
+
+    assert "frontend/src/frontend/src" in prompt
+    assert "backend/src/backend/src" in prompt
+    assert "rooted exactly once" in prompt
+
+
 def test_local_qwen_single_step_plan_is_routed_to_repair():
     assert (
         _should_repair_truncated_single_step_plan(

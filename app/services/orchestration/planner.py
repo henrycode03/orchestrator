@@ -12,6 +12,7 @@ from app.services.orchestration.policy import (
     PLANNING_REPAIR_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
+from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 
 class PlannerService:
@@ -134,13 +135,14 @@ class PlannerService:
         prompt_profile: str = "default",
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
+        display_project_dir = render_workspace_path_for_prompt(project_dir)
         prompt = f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
 
 Task:
 {concise_task}
 
 Rules:
-1. Assume working directory is {project_dir}
+1. Assume working directory is {display_project_dir}
 2. Use relative paths only
 3. Do not use absolute paths, .., or ~
 4. Return 3 to 6 small sequential steps
@@ -160,12 +162,13 @@ Rules:
         prompt_profile: str = "default",
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:700]
+        display_project_dir = render_workspace_path_for_prompt(project_dir)
         prompt = f"""Return JSON array only. No prose.
 
 Task:
 {concise_task}
 
-Working directory: {project_dir}
+Working directory: {display_project_dir}
 
 Requirements:
 1. 2 to 5 steps only
@@ -192,6 +195,7 @@ Requirements:
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:2000]
         broken_output = (malformed_output or "")[:8000]
+        display_project_dir = render_workspace_path_for_prompt(project_dir)
         structured_feedback = ""
         if rejection_reasons:
             reason_lines = "\n".join(
@@ -208,7 +212,7 @@ Task:
 {concise_task}
 
 Working directory:
-{project_dir}
+{display_project_dir}
 
 Malformed planning output:
 {broken_output}
@@ -225,6 +229,8 @@ Rules:
 8. Prefer short setup/edit commands over dumping full source files in planning output
 9. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
 10. expected_files must be a JSON array
+11. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
+12. Paths must be rooted exactly once from the canonical project workspace
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 

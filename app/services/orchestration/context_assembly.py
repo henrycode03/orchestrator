@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.prompt_templates import PromptTemplates, StepResult
+from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 
@@ -316,6 +317,9 @@ def render_adapted_runtime_prompt(
 
 
 def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
+    prompt_project_dir = render_workspace_path_for_prompt(
+        ctx.orchestration_state.project_dir, db=ctx.db
+    )
     workspace_summary = build_workspace_inventory_summary(
         Path(ctx.orchestration_state.project_dir),
         workspace_review=workspace_review,
@@ -335,7 +339,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
     raw_prompt = PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,
         project_context=project_context,
-        project_dir=str(ctx.orchestration_state.project_dir),
+        project_dir=prompt_project_dir,
         execution_profile=ctx.execution_profile,
     )
     return render_adapted_runtime_prompt(
@@ -348,7 +352,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
             "Return a sequential JSON plan only.",
         ],
         context={
-            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Project Directory": prompt_project_dir,
             "Execution Profile": ctx.execution_profile,
         },
         expected_output="JSON array of orchestration step objects.",
@@ -358,6 +362,9 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
 def assemble_execution_prompt(
     ctx: Any, step: Dict[str, Any], *, compact: bool = False
 ) -> str:
+    prompt_project_dir = render_workspace_path_for_prompt(
+        ctx.orchestration_state.project_dir, db=ctx.db
+    )
     expected_files = step.get("expected_files", []) or []
     workspace_max_files = 18 if compact else 40
     project_context_max_chars = 700 if compact else 1500
@@ -404,7 +411,7 @@ def assemble_execution_prompt(
     raw_prompt = PromptTemplates.build_execution_prompt(
         step_description=step.get("description", ""),
         step_commands=step.get("commands", []) or [],
-        project_dir=str(ctx.orchestration_state.project_dir),
+        project_dir=prompt_project_dir,
         verification_command=step.get("verification"),
         rollback_command=step.get("rollback"),
         expected_files=expected_files,
@@ -424,7 +431,7 @@ def assemble_execution_prompt(
         prompt_body=raw_prompt,
         instructions=instructions,
         context={
-            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Project Directory": prompt_project_dir,
             "Verification Command": step.get("verification"),
             "Rollback Command": step.get("rollback"),
             "Expected Files": expected_files,
@@ -449,6 +456,9 @@ def assemble_debugging_prompt(
     max_attempts: int,
     compact: bool = False,
 ) -> str:
+    prompt_project_dir = render_workspace_path_for_prompt(
+        ctx.orchestration_state.project_dir, db=ctx.db
+    )
     raw_prompt = PromptTemplates.build_debugging_prompt(
         step_description=step_description,
         error_message=error_message,
@@ -459,7 +469,7 @@ def assemble_debugging_prompt(
         prior_debug_attempts=ctx.orchestration_state.debug_attempts,
         project_name=ctx.orchestration_state.project_name,
         workspace_root=str(ctx.orchestration_state.workspace_root),
-        project_dir=str(ctx.orchestration_state.project_dir),
+        project_dir=prompt_project_dir,
         compact=compact,
     )
     return render_adapted_runtime_prompt(
@@ -472,7 +482,7 @@ def assemble_debugging_prompt(
             "Return machine-parseable structured debugging guidance.",
         ],
         context={
-            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Project Directory": prompt_project_dir,
             "Attempt Number": attempt_number,
             "Max Attempts": max_attempts,
             "Compact Retry": compact,
@@ -489,13 +499,16 @@ def assemble_plan_revision_prompt(
     failed_steps: List[StepResult],
     debug_analysis: str,
 ) -> str:
+    prompt_project_dir = render_workspace_path_for_prompt(
+        ctx.orchestration_state.project_dir, db=ctx.db
+    )
     raw_prompt = PromptTemplates.build_plan_revision_prompt(
         original_plan=ctx.orchestration_state.plan,
         failed_steps=failed_steps,
         debug_analysis=debug_analysis,
         completed_steps=ctx.orchestration_state.completed_steps,
         workspace_root=str(ctx.orchestration_state.workspace_root),
-        project_dir=str(ctx.orchestration_state.project_dir),
+        project_dir=prompt_project_dir,
     )
     return render_adapted_runtime_prompt(
         ctx.db,
@@ -507,7 +520,7 @@ def assemble_plan_revision_prompt(
             "Return only a revised machine-runnable plan payload.",
         ],
         context={
-            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Project Directory": prompt_project_dir,
             "Completed Step Count": len(ctx.orchestration_state.completed_steps),
             "Original Plan Length": len(ctx.orchestration_state.plan),
         },

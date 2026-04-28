@@ -288,6 +288,99 @@ def test_stop_running_session_sets_status_stopped(db_session, monkeypatch):
     assert stop_metadata["source"] == "api:POST /sessions/1/stop"
 
 
+def test_stop_session_saves_rich_checkpoint_when_latest_checkpoint_is_hollow(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    task.task_subfolder = "apps/frontend"
+    task.steps = json.dumps(
+        [
+            {
+                "step_number": 1,
+                "description": "Create app shell",
+                "commands": ["mkdir -p apps/frontend/src"],
+                "verification": "test -d apps/frontend/src",
+                "rollback": "rm -rf apps/frontend/src",
+                "expected_files": ["apps/frontend/src/main.tsx"],
+            }
+        ]
+    )
+    task.current_step = 1
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_checkpoint(self, session_id):
+            return {
+                "context": {"task_id": task.id, "task_description": task.description},
+                "orchestration_state": {},
+                "step_results": [],
+            }
+
+        def save_checkpoint(
+            self,
+            session_id,
+            checkpoint_name="manual",
+            context_data=None,
+            orchestration_state=None,
+            current_step_index=None,
+            step_results=None,
+        ):
+            captured["saved"] = {
+                "session_id": session_id,
+                "checkpoint_name": checkpoint_name,
+                "context_data": context_data or {},
+                "orchestration_state": orchestration_state or {},
+                "current_step_index": current_step_index,
+                "step_results": step_results or [],
+            }
+            return {"success": True}
+
+    class _FakeRuntime:
+        async def stop_session(self):
+            return None
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.revoke_session_celery_tasks",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *a, **kw: _FakeRuntime(),
+    )
+
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "stopped"
+    saved = captured["saved"]
+    assert saved["context_data"]["task_id"] == task.id
+    assert saved["context_data"]["task_subfolder"] == "apps/frontend"
+    assert saved["context_data"]["workspace_path_override"].endswith("lc_test")
+    assert saved["context_data"]["project_dir_override"].endswith(
+        "lc_test/apps/frontend"
+    )
+    assert saved["orchestration_state"]["plan"][0]["description"] == "Create app shell"
+    assert saved["current_step_index"] == 1
+
+
 # ── pause boundary conditions ─────────────────────────────────────────────────
 
 
@@ -306,6 +399,87 @@ def test_pause_nonexistent_session_returns_404(db_session):
         asyncio.run(pause_session_lifecycle(db_session, 99999))
 
     assert exc_info.value.status_code == 404
+
+
+def test_pause_session_saves_rich_checkpoint_when_only_hollow_checkpoint_exists(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    task.task_subfolder = "backend"
+    task.steps = json.dumps(
+        [
+            {
+                "step_number": 1,
+                "description": "Bootstrap backend",
+                "commands": ["mkdir -p backend/src"],
+                "verification": "test -d backend/src",
+                "rollback": "rm -rf backend/src",
+                "expected_files": ["backend/src/index.ts"],
+            }
+        ]
+    )
+    task.current_step = 0
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "context": {"task_id": task.id, "task_description": task.description},
+                "orchestration_state": {},
+                "step_results": [],
+            }
+
+        def save_checkpoint(
+            self,
+            session_id,
+            checkpoint_name="manual",
+            context_data=None,
+            orchestration_state=None,
+            current_step_index=None,
+            step_results=None,
+        ):
+            captured["saved"] = {
+                "session_id": session_id,
+                "checkpoint_name": checkpoint_name,
+                "context_data": context_data or {},
+                "orchestration_state": orchestration_state or {},
+                "current_step_index": current_step_index,
+                "step_results": step_results or [],
+            }
+            return {"success": True}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.revoke_session_celery_tasks",
+        lambda *a, **kw: [],
+    )
+
+    result = asyncio.run(pause_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "paused"
+    saved = captured["saved"]
+    assert saved["context_data"]["task_id"] == task.id
+    assert saved["context_data"]["task_subfolder"] == "backend"
+    assert saved["orchestration_state"]["plan"][0]["description"] == "Bootstrap backend"
+    assert saved["current_step_index"] == 0
 
 
 # ── manual mode start ─────────────────────────────────────────────────────────

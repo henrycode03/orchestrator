@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import HTTPException
@@ -14,6 +15,9 @@ from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
 from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.workspace.checkpoint_service import CheckpointError, CheckpointService
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.session.session_runtime_service import (
     DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
     queue_task_for_session,
@@ -245,9 +249,100 @@ def _select_checkpoint_payload_for_pause(
             )
         except Exception:
             continue
-        if _checkpoint_has_resume_state(payload):
+        if _checkpoint_has_execution_progress(payload):
             return payload
     return None
+
+
+def _decode_task_steps(task: Task) -> list[dict[str, Any]]:
+    raw_steps = task.steps
+    if not raw_steps:
+        return []
+    if isinstance(raw_steps, list):
+        return raw_steps
+    if not isinstance(raw_steps, str):
+        return []
+    try:
+        decoded = json.loads(raw_steps)
+    except Exception:
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _build_checkpoint_payload_from_session_state(
+    db: Session,
+    *,
+    session: SessionModel,
+) -> Dict[str, Any] | None:
+    latest_session_task = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id)
+        .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+        .first()
+    )
+    if not latest_session_task:
+        return None
+
+    task = db.query(Task).filter(Task.id == latest_session_task.task_id).first()
+    if not task:
+        return None
+
+    project = session.project or task.project
+    workspace_path_override: str | None = None
+    project_dir_override: str | None = None
+    if project and project.workspace_path:
+        try:
+            workspace_root = resolve_project_workspace_path(
+                project.workspace_path, project.name, db=db
+            )
+            workspace_path_override = str(workspace_root)
+            project_dir_override = str(
+                workspace_root / task.task_subfolder
+                if task.task_subfolder
+                else workspace_root
+            )
+        except Exception:
+            workspace_path_override = project.workspace_path
+            if task.task_subfolder and project.workspace_path:
+                project_dir_override = str(
+                    Path(project.workspace_path) / task.task_subfolder
+                )
+
+    plan = _decode_task_steps(task)
+    current_step_index = int(task.current_step or 0)
+    orchestration_status = (
+        task.status.value if hasattr(task.status, "value") else str(task.status)
+    )
+    payload = {
+        "context": {
+            "task_id": task.id,
+            "task_description": task.description or task.title,
+            "project_name": project.name if project else None,
+            "project_context": project.description if project else None,
+            "task_subfolder": task.task_subfolder,
+            "workspace_path_override": workspace_path_override,
+            "project_dir_override": project_dir_override,
+        },
+        "orchestration_state": {
+            "status": orchestration_status,
+            "plan": plan,
+            "current_step_index": current_step_index,
+            "execution_results": [],
+            "debug_attempts": [],
+            "changed_files": [],
+            "validation_history": [],
+            "phase_history": [],
+            "last_plan_validation": None,
+            "last_completion_validation": None,
+            "relaxed_mode": False,
+            "completion_repair_attempts": 0,
+        },
+        "current_step_index": current_step_index,
+        "step_results": [],
+    }
+    if not _checkpoint_has_resume_state(payload):
+        return None
+    return payload
 
 
 def _load_replayable_resume_checkpoint(
@@ -576,7 +671,19 @@ async def stop_session_lifecycle(
         checkpoint_name = None
         try:
             checkpoint_service = CheckpointService(db)
-            latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
+            try:
+                latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
+            except Exception:
+                latest_checkpoint = None
+            if not _checkpoint_has_execution_progress(latest_checkpoint):
+                latest_checkpoint = (
+                    _build_checkpoint_payload_from_session_state(db, session=session)
+                    or latest_checkpoint
+                )
+            if not latest_checkpoint:
+                raise CheckpointError(
+                    f"No replayable checkpoint state found for session {session_id}"
+                )
             checkpoint_name = f"stopped_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
             checkpoint_service.save_checkpoint(
                 session_id=session_id,
@@ -670,8 +777,12 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 checkpoint_service, session_id
             )
             if not latest_checkpoint:
+                latest_checkpoint = _build_checkpoint_payload_from_session_state(
+                    db, session=session
+                )
+            if not latest_checkpoint:
                 raise CheckpointError(
-                    f"No structured checkpoint found for session {session_id}"
+                    f"No replayable checkpoint state found for session {session_id}"
                 )
             checkpoint_name = f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_service.save_checkpoint(

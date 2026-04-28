@@ -41,6 +41,7 @@ from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
+from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 
 RELATIVE_PATH_TOKEN_RE = re.compile(
@@ -383,13 +384,14 @@ def _build_completion_repair_prompt(
     next_step_number: int,
     workspace_inventory: str,
 ) -> str:
+    prompt_project_dir = render_workspace_path_for_prompt(project_dir)
     return f"""Return one minimal JSON repair step to fix completion validation issues. Output JSON object only.
 
 Task:
 {task_prompt[:2000]}
 
 Working directory:
-{project_dir}
+{prompt_project_dir}
 
 Completion validation issues:
 {json.dumps(completion_validation.reasons[:10], indent=2)}

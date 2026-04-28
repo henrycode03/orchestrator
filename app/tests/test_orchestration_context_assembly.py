@@ -10,6 +10,7 @@ from app.services.orchestration.context_assembly import (
     sanitize_progress_notes_for_workspace,
 )
 from app.services.prompt_templates import OrchestrationState, StepResult
+from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 
 def _make_ctx(tmp_path):
@@ -185,3 +186,39 @@ def test_progress_notes_filter_stale_file_references_against_live_workspace(tmp_
     assert "Ignore prior-note file references" in sanitized
     assert "src/utils/format.test.ts" in sanitized
     assert "package.json restored to vitest run" in sanitized
+
+
+def test_render_workspace_path_for_prompt_uses_configured_workspace_root(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.workspace.path_display.get_effective_workspace_root",
+        lambda db=None: __import__("pathlib").Path(
+            "/root/.openclaw/workspace/vault/projects"
+        ),
+    )
+
+    rendered = render_workspace_path_for_prompt(
+        "/root/.openclaw/workspace/vault/projects/skillsync"
+    )
+
+    assert rendered == "/root/.openclaw/workspace/vault/projects/skillsync"
+
+
+def test_assembled_prompts_do_not_leak_host_workspace_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.services.workspace.path_display.get_effective_workspace_root",
+        lambda db=None: __import__("pathlib").Path(
+            "/root/.openclaw/workspace/vault/projects"
+        ),
+    )
+
+    ctx = _make_ctx(tmp_path)
+    ctx.orchestration_state._project_dir_override = (
+        "/home/ericgx10/ai/openclaw-test/persist/workspace/vault/projects/skillsync"
+    )
+
+    planning_prompt = assemble_planning_prompt(
+        ctx,
+        {"file_count": 2, "source_file_count": 2, "placeholder_issue_count": 0},
+    )
+
+    assert "/home/ericgx10" not in planning_prompt

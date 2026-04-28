@@ -489,6 +489,39 @@ class ValidatorService:
             missing.append(path_text)
         return missing
 
+    @staticmethod
+    def _plan_contains_duplicated_path_roots(
+        plan: List[Dict[str, Any]]
+    ) -> Dict[int, List[str]]:
+        """Detect repeated root segments like frontend/src/frontend/src in plan text."""
+
+        duplicate_pattern = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\1(?:/|$)")
+        findings: Dict[int, List[str]] = {}
+
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
+            step_text_parts = [
+                str(step.get("verification") or ""),
+                str(step.get("rollback") or ""),
+            ]
+            step_text_parts.extend(
+                str(command or "") for command in step.get("commands", []) or []
+            )
+            step_text_parts.extend(
+                str(path or "") for path in step.get("expected_files", []) or []
+            )
+
+            fragments: List[str] = []
+            for text in step_text_parts:
+                for match in duplicate_pattern.finditer(text):
+                    fragment = match.group(0).rstrip("/")
+                    if fragment not in fragments:
+                        fragments.append(fragment)
+            if fragments:
+                findings[int(step_number)] = fragments[:6]
+
+        return findings
+
     @classmethod
     def validate_plan(
         cls,
@@ -573,6 +606,15 @@ class ValidatorService:
                 f"instead of the task workspace root (steps: {nested_project_root_steps[:5]})"
             )
             details["nested_project_root_steps"] = nested_project_root_steps
+
+        duplicated_root_paths = cls._plan_contains_duplicated_path_roots(plan)
+        if duplicated_root_paths:
+            bad_steps = sorted(duplicated_root_paths.keys())
+            repairable.append(
+                "Plan repeats workspace root segments inside commands or expected files "
+                f"(steps: {bad_steps[:5]})"
+            )
+            details["duplicated_root_paths"] = duplicated_root_paths
 
         if profile == "implementation":
             weak_verification_steps = [

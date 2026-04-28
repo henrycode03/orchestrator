@@ -65,6 +65,23 @@ logger = logging.getLogger(__name__)
 
 _NOISY_OPENCLAW_STDERR_PATTERNS = (
     re.compile(r"^[\[\]{}],?$"),
+    re.compile(r'^"payloads":\s*\[$'),
+    re.compile(r'^"text":\s*".*",?$'),
+    re.compile(r'^"mediaUrl":\s*(null|".*"),?$'),
+    re.compile(r'^"meta":\s*{$'),
+    re.compile(r'^"durationMs":\s*\d+,?$'),
+    re.compile(r'^"agentMeta":\s*{$'),
+    re.compile(r'^"sessionId":\s*"[^"]+",?$'),
+    re.compile(r'^"sessionKey":\s*"[^"]+",?$'),
+    re.compile(r'^"provider":\s*"[^"]+",?$'),
+    re.compile(r'^"model":\s*"[^"]+",?$'),
+    re.compile(r'^"lastCallUsage":\s*{$'),
+    re.compile(r'^"input":\s*\d+,?$'),
+    re.compile(r'^"output":\s*\d+,?$'),
+    re.compile(r'^"cacheRead":\s*\d+,?$'),
+    re.compile(r'^"cacheWrite":\s*\d+,?$'),
+    re.compile(r'^"listChars":\s*\d+,?$'),
+    re.compile(r'^"tools":\s*{$'),
     re.compile(r'^"propertiesCount":\s*\d+,?$'),
     re.compile(r'^"schemaChars":\s*\d+,?$'),
     re.compile(r'^"summaryChars":\s*\d+,?$'),
@@ -312,6 +329,15 @@ class OpenClawSessionService:
             or '"bootstrapTruncation"' in trimmed
             or '"systemPromptReport"' in trimmed
             or '"injectedWorkspaceFiles"' in trimmed
+            or '"payloads"' in trimmed
+            or '"mediaUrl"' in trimmed
+            or '"agentMeta"' in trimmed
+            or '"durationMs"' in trimmed
+            or '"lastCallUsage"' in trimmed
+            or '"cacheRead"' in trimmed
+            or '"cacheWrite"' in trimmed
+            or '"listChars"' in trimmed
+            or '"tools"' in trimmed
             or '"replayInvalid"' in trimmed
             or '"livenessState"' in trimmed
             or '"stopReason"' in trimmed
