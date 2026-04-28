@@ -42,6 +42,7 @@ from app.services.workspace.project_isolation_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.services.orchestration.parsing import extract_structured_text
 from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.permission_service import PermissionApprovalService
@@ -60,6 +61,27 @@ from app.services.workspace.system_settings import (
 from app.services.agents.interfaces import AgentRuntimeError
 
 logger = logging.getLogger(__name__)
+
+
+_NOISY_OPENCLAW_STDERR_PATTERNS = (
+    re.compile(r"^[\[\]{}],?$"),
+    re.compile(r'^"propertiesCount":\s*\d+,?$'),
+    re.compile(r'^"schemaChars":\s*\d+,?$'),
+    re.compile(r'^"summaryChars":\s*\d+,?$'),
+    re.compile(r'^"promptChars":\s*\d+,?$'),
+    re.compile(r'^"blockChars":\s*\d+,?$'),
+    re.compile(r'^"rawChars":\s*\d+,?$'),
+    re.compile(r'^"injectedChars":\s*\d+,?$'),
+    re.compile(r'^"truncated":\s*(true|false),?$'),
+    re.compile(r'^"missing":\s*(true|false),?$'),
+    re.compile(r'^"replayInvalid":\s*(true|false),?$'),
+    re.compile(r'^"livenessState":\s*"[^"]+",?$'),
+    re.compile(r'^"stopReason":\s*"[^"]+",?$'),
+    re.compile(r'^"path":\s*".*",?$'),
+    re.compile(r'^"name":\s*"[^"]+",?$'),
+    re.compile(r'^"entries":\s*\[$'),
+    re.compile(r'^"skills":\s*{$'),
+)
 
 
 class OpenClawSessionError(AgentRuntimeError):
@@ -269,6 +291,36 @@ class OpenClawSessionService:
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _should_emit_stderr_line(line_text: str) -> bool:
+        """Hide raw OpenClaw JSON telemetry from live logs while keeping it in buffers."""
+
+        trimmed = (line_text or "").strip()
+        if not trimmed:
+            return False
+
+        if (
+            '"propertiesCount"' in trimmed
+            or '"schemaChars"' in trimmed
+            or '"summaryChars"' in trimmed
+            or '"promptChars"' in trimmed
+            or '"blockChars"' in trimmed
+            or '"rawChars"' in trimmed
+            or '"injectedChars"' in trimmed
+            or '"bootstrapTotalMaxChars"' in trimmed
+            or '"bootstrapTruncation"' in trimmed
+            or '"systemPromptReport"' in trimmed
+            or '"injectedWorkspaceFiles"' in trimmed
+            or '"replayInvalid"' in trimmed
+            or '"livenessState"' in trimmed
+            or '"stopReason"' in trimmed
+        ):
+            return False
+
+        return not any(
+            pattern.match(trimmed) for pattern in _NOISY_OPENCLAW_STDERR_PATTERNS
+        )
 
     async def create_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
@@ -1272,9 +1324,13 @@ class OpenClawSessionService:
                 if isinstance(payloads, list) and len(payloads) > 0:
                     output_text = payloads[0].get("text", "")
                 else:
-                    output_text = json.dumps(output_data)
+                    output_text = extract_structured_text(output_data) or json.dumps(
+                        output_data
+                    )
             else:
-                output_text = json.dumps(output_data)
+                output_text = extract_structured_text(output_data) or json.dumps(
+                    output_data
+                )
 
             return {
                 "status": "completed" if return_code == 0 else "failed",
@@ -1514,6 +1570,10 @@ class OpenClawSessionService:
 
                     if line_text:
                         if emit_live_logs:
+                            if level == "WARN" and not self._should_emit_stderr_line(
+                                line_text
+                            ):
+                                continue
                             # Commit each streamed line so the session websocket,
                             # which polls the database, can surface it immediately.
                             self._log_entry(level, line_text, commit=True)

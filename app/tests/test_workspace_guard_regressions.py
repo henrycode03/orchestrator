@@ -42,3 +42,33 @@ def test_normalize_step_allows_verification_commands_that_sink_to_dev_null(tmp_p
 
     assert normalized["verification"] is not None
     assert "/dev/null" in normalized["verification"]
+
+
+def test_normalize_write_pseudo_command_allows_frontend_root_asset_literal(tmp_path):
+    project_dir = tmp_path / "skillsync"
+    project_dir.mkdir(parents=True)
+
+    command = (
+        "write frontend/index.html: HTML shell with root div and Vite module script "
+        "entry pointing to /src/main.tsx"
+    )
+
+    normalized = normalize_command(command, project_dir)
+
+    assert normalized.startswith("write frontend/index.html:")
+    assert "/src/main.tsx" in normalized
+
+
+def test_normalize_write_pseudo_command_allows_http_route_literals(tmp_path):
+    project_dir = tmp_path / "skillsync"
+    project_dir.mkdir(parents=True)
+
+    command = (
+        "write apps/backend/src/index.ts: minimal Express server that listens on PORT "
+        "env var (default 3000) with a health-check GET /health returning {status: 'ok'}"
+    )
+
+    normalized = normalize_command(command, project_dir)
+
+    assert normalized.startswith("write apps/backend/src/index.ts:")
+    assert "GET /health" in normalized

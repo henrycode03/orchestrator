@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.orchestration.step_support import coerce_debug_step_result
 from app.services.orchestration.parsing import extract_structured_text
+from app.services.agents.openclaw_service import OpenClawSessionService
 
 
 def test_debug_parser_recovers_prose_response_and_trims_bad_expected_files():
@@ -84,3 +85,30 @@ def test_plan_revision_prompt_serializes_original_plan():
 
     assert "Add test coverage for formatter" in prompt
     assert "Expected src/utils/format.test.ts to exist" in prompt
+
+
+def test_extract_structured_text_prefers_final_assistant_visible_text():
+    payload = {
+        "meta": {"durationMs": 1234},
+        "finalAssistantVisibleText": '```json\n[{"step_number":1,"description":"x","commands":[],"verification":null,"rollback":null,"expected_files":[]}]\n```',
+    }
+
+    text = extract_structured_text(payload)
+
+    assert "step_number" in text
+
+
+def test_openclaw_response_parser_recovers_final_assistant_visible_text():
+    service = OpenClawSessionService.__new__(OpenClawSessionService)
+    stdout = '{"stopReason":"stop","finalAssistantVisibleText":"```json\\n[{\\"step_number\\":1,\\"description\\":\\"x\\",\\"commands\\":[],\\"verification\\":null,\\"rollback\\":null,\\"expected_files\\":[]}]\\n```"}'
+    completed = __import__("subprocess").CompletedProcess(
+        args=["openclaw", "agent"],
+        returncode=0,
+        stdout=stdout,
+        stderr="",
+    )
+
+    result = OpenClawSessionService._parse_openclaw_response(service, completed)
+
+    assert result["status"] == "completed"
+    assert "step_number" in result["output"]

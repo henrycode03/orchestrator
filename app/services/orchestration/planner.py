@@ -18,6 +18,31 @@ class PlannerService:
     """Planning-stage fallback and repair helpers."""
 
     @staticmethod
+    def select_prompt_profile(
+        backend_name: Optional[str],
+        model_family: Optional[str],
+    ) -> str:
+        backend = (backend_name or "").strip().lower()
+        model = (model_family or "").strip().lower()
+        if backend == "local_openclaw" and ("qwen" in model or model == "local"):
+            return "local_qwen_json_array"
+        return "default"
+
+    @staticmethod
+    def apply_prompt_profile(prompt: str, prompt_profile: str = "default") -> str:
+        if prompt_profile != "local_qwen_json_array":
+            return prompt
+
+        return (
+            f"{prompt.rstrip()}\n\n"
+            "Output discipline for this model:\n"
+            "11. Return only a JSON array of steps. Do not wrap it in an object.\n"
+            "12. Do not include `payloads`, `text`, `finalAssistantVisibleText`, markdown prose, or commentary.\n"
+            "13. The first non-whitespace character must be `[` and the last must be `]`.\n"
+            "14. Do not describe the file contents outside the JSON fields for each step.\n"
+        )
+
+    @staticmethod
     def looks_salvageable_planning_output(output_text: str) -> bool:
         """Heuristic for whether a failed planning response still contains useful plan content."""
 
@@ -103,9 +128,13 @@ class PlannerService:
         )
 
     @staticmethod
-    def build_minimal_planning_prompt(task_description: str, project_dir: Path) -> str:
+    def build_minimal_planning_prompt(
+        task_description: str,
+        project_dir: Path,
+        prompt_profile: str = "default",
+    ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
-        return f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
+        prompt = f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
 
 Task:
 {concise_task}
@@ -122,13 +151,16 @@ Rules:
 9. Prefer mkdir/touch/package-manager/editor-friendly commands and one-file-at-a-time edits
 10. Output JSON array only
 """
+        return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
     @staticmethod
     def build_ultra_minimal_planning_prompt(
-        task_description: str, project_dir: Path
+        task_description: str,
+        project_dir: Path,
+        prompt_profile: str = "default",
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:700]
-        return f"""Return JSON array only. No prose.
+        prompt = f"""Return JSON array only. No prose.
 
 Task:
 {concise_task}
@@ -143,6 +175,7 @@ Requirements:
    step_number, description, commands, verification, rollback, expected_files
 5. Keep each command short and machine-runnable
 """
+        return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
     @staticmethod
     def _looks_like_timeout_error(exc: Exception) -> bool:
@@ -155,6 +188,7 @@ Requirements:
         malformed_output: str,
         project_dir: Path,
         rejection_reasons: Optional[List[str]] = None,
+        prompt_profile: str = "default",
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:2000]
         broken_output = (malformed_output or "")[:8000]
@@ -168,7 +202,7 @@ Requirements:
                 f"{reason_lines}\n"
                 "You must address every rejection reason in the repaired plan.\n"
             )
-        return f"""Repair this malformed planning output into valid machine-runnable JSON. Return JSON array only.
+        prompt = f"""Repair this malformed planning output into valid machine-runnable JSON. Return JSON array only.
 
 Task:
 {concise_task}
@@ -192,6 +226,7 @@ Rules:
 9. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
 10. expected_files must be a JSON array
 """
+        return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
     @classmethod
     def retry_with_minimal_prompt(
@@ -204,6 +239,7 @@ Rules:
         emit_live: Any,
         reason: str,
         rejection_reasons: Optional[List[str]] = None,
+        prompt_profile: str = "default",
     ) -> Dict[str, Any]:
         logger.warning(
             "[ORCHESTRATION] Planning output was not machine-parseable; "
@@ -223,10 +259,27 @@ Rules:
                 "timeout_seconds": minimal_timeout,
             },
         )
+        emit_live(
+            "INFO",
+            (
+                "[ORCHESTRATION] Planning attempt 2 is now running with the minimal "
+                f"prompt (timeout: {minimal_timeout}s)"
+            ),
+            metadata={
+                "phase": "planning",
+                "attempt": 2,
+                "strategy": "minimal_prompt",
+                "timeout_seconds": minimal_timeout,
+            },
+        )
         try:
             return asyncio.run(
                 runtime_service.execute_task(
-                    cls.build_minimal_planning_prompt(task_description, project_dir),
+                    cls.build_minimal_planning_prompt(
+                        task_description,
+                        project_dir,
+                        prompt_profile=prompt_profile,
+                    ),
                     timeout_seconds=minimal_timeout,
                 )
             )
@@ -252,10 +305,25 @@ Rules:
                     "timeout_seconds": ultra_minimal_timeout,
                 },
             )
+            emit_live(
+                "INFO",
+                (
+                    "[ORCHESTRATION] Planning attempt 3 is now running with the "
+                    f"ultra-minimal prompt (timeout: {ultra_minimal_timeout}s)"
+                ),
+                metadata={
+                    "phase": "planning",
+                    "attempt": 3,
+                    "strategy": "ultra_minimal_prompt",
+                    "timeout_seconds": ultra_minimal_timeout,
+                },
+            )
             return asyncio.run(
                 runtime_service.execute_task(
                     cls.build_ultra_minimal_planning_prompt(
-                        task_description, project_dir
+                        task_description,
+                        project_dir,
+                        prompt_profile=prompt_profile,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                 )
@@ -273,6 +341,7 @@ Rules:
         emit_live: Any,
         reason: str,
         rejection_reasons: Optional[List[str]] = None,
+        prompt_profile: str = "default",
     ) -> Dict[str, Any]:
         logger.warning(
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
@@ -292,6 +361,19 @@ Rules:
                 "timeout_seconds": repair_timeout,
             },
         )
+        emit_live(
+            "INFO",
+            (
+                "[ORCHESTRATION] Planning repair attempt is now running "
+                f"(timeout: {repair_timeout}s)"
+            ),
+            metadata={
+                "phase": "planning",
+                "attempt": "repair",
+                "strategy": "repair_prompt",
+                "timeout_seconds": repair_timeout,
+            },
+        )
         try:
             return asyncio.run(
                 runtime_service.execute_task(
@@ -300,6 +382,7 @@ Rules:
                         malformed_output,
                         project_dir,
                         rejection_reasons=rejection_reasons,
+                        prompt_profile=prompt_profile,
                     ),
                     timeout_seconds=repair_timeout,
                 )
@@ -326,10 +409,25 @@ Rules:
                     "timeout_seconds": ultra_minimal_timeout,
                 },
             )
+            emit_live(
+                "INFO",
+                (
+                    "[ORCHESTRATION] Planning attempt after repair is now running "
+                    f"with the ultra-minimal prompt (timeout: {ultra_minimal_timeout}s)"
+                ),
+                metadata={
+                    "phase": "planning",
+                    "attempt": "repair_fallback",
+                    "strategy": "ultra_minimal_prompt",
+                    "timeout_seconds": ultra_minimal_timeout,
+                },
+            )
             return asyncio.run(
                 runtime_service.execute_task(
                     cls.build_ultra_minimal_planning_prompt(
-                        task_description, project_dir
+                        task_description,
+                        project_dir,
+                        prompt_profile=prompt_profile,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                 )

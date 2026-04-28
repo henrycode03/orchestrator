@@ -26,6 +26,7 @@ import {
   type TimelineSpan,
 } from '@/components/SessionDetailSections';
 import { MessageCircle, Pause, Play, Square, XCircle } from 'lucide-react';
+import { isNoisySessionLogMessage } from './sessionLogNoise';
 
 type TimelineEventType =
   | 'planning'
@@ -70,25 +71,6 @@ interface InterventionToastState {
   title: string;
   message: string;
 }
-
-const NOISY_LOG_PATTERNS = [
-  /^"[\w]+":\s?.*$/,
-  /^[[\]{}],?$/,
-  /^"propertiesCount":\s*\d+,?$/,
-  /^"schemaChars":\s*\d+,?$/,
-  /^"summaryChars":\s*\d+,?$/,
-  /^"promptChars":\s*\d+,?$/,
-  /^"blockChars":\s*\d+,?$/,
-  /^"rawChars":\s*\d+,?$/,
-  /^"injectedChars":\s*\d+,?$/,
-  /^"truncated":\s*(true|false),?$/,
-  /^"missing":\s*(true|false),?$/,
-  /^"path":\s*".*",?$/,
-  /^"name":\s*"[^"]+",?$/,
-  /^"name":\s*"(healthcheck|memory_get|memory_search|session_status|update_plan|web_search|web_fetch|image|pdf|browser|BOOTSTRAP\.md|MEMORY\.md)".*$/,
-  /^"entries":\s*\[$/,
-  /^"skills":\s*{$/,
-];
 
 const MAX_TIMELINE_EVENTS = 150;
 
@@ -227,27 +209,8 @@ export default function SessionDetail() {
     timestamp: formatLogTimestamp(log.timestamp || log.created_at),
   }), [formatLogTimestamp]);
 
-  const isNoisyLogMessage = (message?: string | null) => {
-    const trimmed = (message || '').trim();
-    if (!trimmed) return true;
-
-    if (
-      trimmed.includes('"propertiesCount"') ||
-      trimmed.includes('"schemaChars"') ||
-      trimmed.includes('"summaryChars"') ||
-      trimmed.includes('"promptChars"') ||
-      trimmed.includes('"blockChars"') ||
-      trimmed.includes('"rawChars"') ||
-      trimmed.includes('"injectedChars"')
-    ) {
-      return true;
-    }
-
-    return NOISY_LOG_PATTERNS.some((pattern) => pattern.test(trimmed));
-  };
-
   const shouldDisplayLog = useCallback(
-    (log: SessionLogItem) => logVerbosity === 'verbose' || !isNoisyLogMessage(log.message),
+    (log: SessionLogItem) => logVerbosity === 'verbose' || !isNoisySessionLogMessage(log.message),
     [logVerbosity]
   );
 
@@ -980,7 +943,8 @@ export default function SessionDetail() {
           const data = JSON.parse(event.data);
 
           if (data.type === 'log') {
-            if (logVerbosity === 'clean' && isNoisyLogMessage(data.message)) {
+            const noisyMessage = isNoisySessionLogMessage(data.message);
+            if (logVerbosity === 'clean' && noisyMessage) {
               return;
             }
             console.log('✅ Received log message:', data.message);

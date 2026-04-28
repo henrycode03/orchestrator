@@ -26,6 +26,8 @@ from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
+_ORPHANED_PLANNING_RECOVERY_SECONDS = 120
+
 
 def _reset_running_session_tasks(
     db: Session,
@@ -62,6 +64,100 @@ def _reset_running_session_tasks(
             task.error_message = None
 
     return updated
+
+
+def _recover_orphaned_running_session_if_needed(
+    db: Session,
+    *,
+    session: SessionModel,
+) -> bool:
+    """Recover a session stranded in RUNNING after planning/repair crashed.
+
+    We keep this heuristic narrow on purpose: only recover when the latest task
+    is still at step 0, the latest log shows the run reached planning-response
+    handling, and then no additional logs arrived for a short grace period.
+    """
+
+    if session.status != "running" or not session.is_active:
+        return False
+
+    latest_link = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session.id,
+            SessionTask.status == TaskStatus.RUNNING,
+        )
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    if not latest_link:
+        return False
+
+    task = db.query(Task).filter(Task.id == latest_link.task_id).first()
+    if not task or task.status != TaskStatus.RUNNING:
+        return False
+    if int(task.current_step or 0) != 0:
+        return False
+
+    latest_log = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session.id,
+            LogEntry.task_id == task.id,
+        )
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    if not latest_log or not latest_log.created_at:
+        return False
+
+    terminal_planning_messages = {
+        "[ORCHESTRATION] Planning response received; parsing and validating plan",
+        "[OPENCLAW] Request returned output; awaiting orchestration validation",
+        "[OPENCLAW] stdout was empty; recovered structured response from stderr",
+    }
+    if str(latest_log.message or "") not in terminal_planning_messages:
+        return False
+
+    age_seconds = (
+        datetime.now(UTC).replace(tzinfo=None) - latest_log.created_at
+    ).total_seconds()
+    if age_seconds < _ORPHANED_PLANNING_RECOVERY_SECONDS:
+        return False
+
+    latest_link.status = TaskStatus.PENDING
+    latest_link.started_at = None
+    latest_link.completed_at = None
+    task.status = TaskStatus.PENDING
+    task.started_at = None
+    task.completed_at = None
+    task.error_message = (
+        "Recovered an orphaned planning run after no progress logs arrived "
+        "following planning-response validation."
+    )
+    task.current_step = 0
+    session.status = "stopped"
+    session.is_active = False
+    set_session_alert(
+        db,
+        session,
+        "warn",
+        "Recovered an orphaned planning run so the session can be started again.",
+    )
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            session_instance_id=session.instance_id,
+            level="WARN",
+            message=(
+                "Recovered orphaned running task after planning-response handling "
+                "stalled without further progress"
+            ),
+        )
+    )
+    db.commit()
+    return True
 
 
 def _ensure_session_task_ready_for_resume(
@@ -154,11 +250,48 @@ def _select_checkpoint_payload_for_pause(
     return None
 
 
+def _load_replayable_resume_checkpoint(
+    checkpoint_service: CheckpointService,
+    session_id: int,
+    *,
+    checkpoint_name: str | None = None,
+) -> Dict[str, Any] | None:
+    """Return a checkpoint only when it has real execution progress to replay.
+
+    Explicit caller choices are still honored and may return a low-fidelity
+    checkpoint so the worker can decide how to recover. Automatic resumes are
+    stricter: they only reuse checkpoints that contain a saved plan, step
+    results, or a non-zero execution cursor.
+    """
+
+    if checkpoint_name:
+        return checkpoint_service.load_resume_checkpoint(
+            session_id, checkpoint_name=checkpoint_name
+        )
+
+    for candidate_name in ("autosave_latest", "autosave_error", None):
+        try:
+            payload = checkpoint_service.load_resume_checkpoint(
+                session_id, checkpoint_name=candidate_name
+            )
+        except CheckpointError:
+            continue
+        if _checkpoint_has_execution_progress(payload):
+            return payload
+    return None
+
+
 async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
     """Start a session and queue work if needed."""
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    recovered_orphaned_run = _recover_orphaned_running_session_if_needed(
+        db, session=session
+    )
+    if recovered_orphaned_run:
+        db.refresh(session)
 
     if session.status in ["running", "paused", "active"]:
         raise HTTPException(
@@ -676,35 +809,74 @@ async def resume_session_lifecycle(
 
     try:
         checkpoint_service = CheckpointService(db)
-        try:
-            checkpoint_data = checkpoint_service.load_resume_checkpoint(
-                session_id, checkpoint_name=checkpoint_name
+        latest_session_task = (
+            db.query(SessionTask)
+            .filter(SessionTask.session_id == session_id)
+            .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+            .first()
+        )
+        checkpoint_data = _load_replayable_resume_checkpoint(
+            checkpoint_service,
+            session_id,
+            checkpoint_name=checkpoint_name,
+        )
+        requested_checkpoint_name = None
+        resolved_checkpoint_name = None
+        restore_fidelity: Dict[str, Any] = {
+            "score": 0,
+            "status": "none",
+            "summary": "No replayable checkpoint was selected; session will restart from the current workspace",
+            "present_signals": [],
+            "warnings": ["missing execution progress"],
+        }
+        context_data: Dict[str, Any] = {}
+        task_id = latest_session_task.task_id if latest_session_task else None
+
+        if checkpoint_data is not None:
+            requested_checkpoint_name = checkpoint_data.get(
+                "_requested_checkpoint_name"
             )
-        except CheckpointError as checkpoint_error:
+            resolved_checkpoint_name = checkpoint_data.get(
+                "_resolved_checkpoint_name"
+            ) or checkpoint_data.get("checkpoint_name")
+            restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(
+                checkpoint_data
+            )
+            context_data = checkpoint_data.get("context", {})
+            task_id = context_data.get("task_id") or task_id
+        elif checkpoint_name:
             raise HTTPException(
                 status_code=404,
-                detail=f"No usable checkpoint found for session {session_id}: {checkpoint_error}",
-            ) from checkpoint_error
-
-        requested_checkpoint_name = checkpoint_data.get("_requested_checkpoint_name")
-        checkpoint_name = checkpoint_data.get(
-            "_resolved_checkpoint_name"
-        ) or checkpoint_data.get("checkpoint_name")
-        restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(
-            checkpoint_data
-        )
-        context_data = checkpoint_data.get("context", {})
-        task_id = context_data.get("task_id")
-        if not task_id:
-            latest_session_task = (
-                db.query(SessionTask)
-                .filter(SessionTask.session_id == session_id)
-                .order_by(
-                    SessionTask.started_at.desc().nullslast(), SessionTask.id.desc()
-                )
-                .first()
+                detail=(
+                    f"No replayable checkpoint found for session {session_id}: "
+                    f"'{checkpoint_name}'"
+                ),
             )
-            task_id = latest_session_task.task_id if latest_session_task else None
+
+        if not task_id:
+            try:
+                fallback_checkpoint = checkpoint_service.load_resume_checkpoint(
+                    session_id, checkpoint_name=checkpoint_name
+                )
+            except CheckpointError as checkpoint_error:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"No usable checkpoint found for session {session_id}: "
+                        f"{checkpoint_error}"
+                    ),
+                ) from checkpoint_error
+            requested_checkpoint_name = fallback_checkpoint.get(
+                "_requested_checkpoint_name"
+            )
+            resolved_checkpoint_name = fallback_checkpoint.get(
+                "_resolved_checkpoint_name"
+            ) or fallback_checkpoint.get("checkpoint_name")
+            restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(
+                fallback_checkpoint
+            )
+            context_data = fallback_checkpoint.get("context", {})
+            task_id = context_data.get("task_id")
 
         task = db.query(Task).filter(Task.id == task_id).first() if task_id else None
         if not task:
@@ -713,6 +885,8 @@ async def resume_session_lifecycle(
             )
 
         resumed_at = datetime.now(timezone.utc)
+        session.instance_id = str(uuid.uuid4())
+        db.flush()
         _ensure_session_task_ready_for_resume(
             db,
             session=session,
@@ -728,7 +902,7 @@ async def resume_session_lifecycle(
                 task_id=task.id,
                 prompt=prompt,
                 timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
-                resume_checkpoint_name=checkpoint_name,
+                resume_checkpoint_name=resolved_checkpoint_name,
                 expected_session_instance_id=session.instance_id,
             )
             dispatch_mode = "checkpoint_resume"
@@ -758,10 +932,14 @@ async def resume_session_lifecycle(
                 message=(
                     f"Session resumed: {session.name}"
                     + (
-                        f" (requested checkpoint: {requested_checkpoint_name}, resolved checkpoint: {checkpoint_name})"
+                        f" (requested checkpoint: {requested_checkpoint_name}, resolved checkpoint: {resolved_checkpoint_name})"
                         if requested_checkpoint_name
-                        and requested_checkpoint_name != checkpoint_name
-                        else f" (checkpoint: {checkpoint_name})"
+                        and requested_checkpoint_name != resolved_checkpoint_name
+                        else (
+                            f" (checkpoint: {resolved_checkpoint_name})"
+                            if resume_has_progress and resolved_checkpoint_name
+                            else " (fresh run from current workspace)"
+                        )
                     )
                 ),
                 log_metadata=json.dumps(
@@ -769,8 +947,8 @@ async def resume_session_lifecycle(
                         "event_type": "session_resumed",
                         "session_id": session_id,
                         "requested_checkpoint_name": requested_checkpoint_name,
-                        "checkpoint_name": checkpoint_name,
-                        "resolved_checkpoint_name": checkpoint_name,
+                        "checkpoint_name": resolved_checkpoint_name,
+                        "resolved_checkpoint_name": resolved_checkpoint_name,
                         "celery_task_id": result.id,
                         "task_id": task.id,
                         "restore_fidelity": restore_fidelity,
@@ -785,22 +963,26 @@ async def resume_session_lifecycle(
             "status": "resumed",
             "session_id": session_id,
             "requested_checkpoint_name": requested_checkpoint_name,
-            "resolved_checkpoint_name": checkpoint_name,
+            "resolved_checkpoint_name": resolved_checkpoint_name,
             "restore_fidelity": restore_fidelity,
             "message": (
                 (
                     f"Session '{session.name}' resumed successfully"
                     + (
-                        f" using resolved checkpoint '{checkpoint_name}' instead of '{requested_checkpoint_name}'"
+                        f" using resolved checkpoint '{resolved_checkpoint_name}' instead of '{requested_checkpoint_name}'"
                         if requested_checkpoint_name
-                        and requested_checkpoint_name != checkpoint_name
-                        else f" using checkpoint '{checkpoint_name}'"
+                        and requested_checkpoint_name != resolved_checkpoint_name
+                        else (
+                            f" using checkpoint '{resolved_checkpoint_name}'"
+                            if resolved_checkpoint_name
+                            else " from the current workspace"
+                        )
                     )
                 )
                 if resume_has_progress
                 else (
-                    f"Session '{session.name}' resumed by queueing a fresh run because "
-                    f"checkpoint '{checkpoint_name}' had no execution progress to replay"
+                    f"Session '{session.name}' resumed by queueing a fresh run from the current workspace because "
+                    f"no replayable checkpoint state was available"
                 )
             ),
         }

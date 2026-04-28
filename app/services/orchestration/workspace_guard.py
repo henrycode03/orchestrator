@@ -149,10 +149,34 @@ def _looks_like_path_traversal_token(token: str) -> bool:
     return bool(re.fullmatch(r"\.\.(?:/[A-Za-z0-9._@:+-]+)+/?", stripped))
 
 
+def _normalize_write_pseudo_command(command: str, project_dir: Path) -> Optional[str]:
+    """Normalize `write path: description` pseudo-commands without parsing prose as shell."""
+
+    match = re.match(
+        r"^\s*write\s+([^:]+?)\s*:\s*(.+)$", command or "", flags=re.DOTALL
+    )
+    if not match:
+        return None
+
+    target_path = normalize_path_reference(match.group(1), project_dir)
+    description = match.group(2).strip()
+    if not description:
+        raise TaskWorkspaceViolationError(
+            f"Write pseudo-command is missing a file description: {command}"
+        )
+
+    normalized_target = "." if target_path == "." else target_path
+    return f"write {normalized_target}: {description}"
+
+
 def normalize_command(command: str, project_dir: Path) -> str:
     normalized = (command or "").strip()
     if not normalized:
         raise TaskWorkspaceViolationError("Empty command is not allowed")
+
+    write_pseudo_command = _normalize_write_pseudo_command(normalized, project_dir)
+    if write_pseudo_command is not None:
+        return write_pseudo_command
 
     if looks_like_plain_english_instruction(normalized):
         return normalized

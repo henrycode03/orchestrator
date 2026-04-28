@@ -73,6 +73,30 @@ def test_openclaw_error_is_runtime_neutral():
     assert issubclass(OpenClawSessionError, AgentRuntimeError)
 
 
+def test_openclaw_stderr_noise_filter_hides_json_telemetry_lines():
+    assert (
+        OpenClawSessionService._should_emit_stderr_line('"schemaChars": 2799,') is False
+    )
+    assert (
+        OpenClawSessionService._should_emit_stderr_line(
+            '"path": "/root/.openclaw/workspace/AGENTS.md",'
+        )
+        is False
+    )
+    assert (
+        OpenClawSessionService._should_emit_stderr_line(
+            "[OPENCLAW] embedded run failover decision: runId=abc"
+        )
+        is True
+    )
+    assert (
+        OpenClawSessionService._should_emit_stderr_line(
+            '"finalAssistantVisibleText": "```json..."'
+        )
+        is True
+    )
+
+
 def test_provider_registry_exposes_runtime_factory():
     assert get_runtime_factory("local_openclaw") is not None
     assert get_runtime_factory("remote_openclaw_gateway") is not None

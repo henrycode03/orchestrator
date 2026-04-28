@@ -1070,34 +1070,84 @@ def execute_orchestration_task(
                         "resolved_checkpoint_name": resolved_resume_checkpoint_name,
                     },
                 )
+            explicit_resume_request = bool(requested_resume_checkpoint_name)
             resume_workspace_compatibility = _apply_checkpoint_payload(checkpoint_data)
             if orchestration_state.plan and not resume_workspace_compatibility.get(
                 "compatible", True
             ):
-                fallback_checkpoint_names = [
-                    name
-                    for name in ("autosave_latest", "autosave_error")
-                    if name != resolved_resume_checkpoint_name
-                ]
-                fallback_applied = False
-                for fallback_name in fallback_checkpoint_names:
-                    try:
-                        fallback_data = checkpoint_service.load_checkpoint(
-                            session_id, fallback_name
+                if not explicit_resume_request:
+                    fallback_checkpoint_names = [
+                        name
+                        for name in ("autosave_latest", "autosave_error")
+                        if name != resolved_resume_checkpoint_name
+                    ]
+                    fallback_applied = False
+                    for fallback_name in fallback_checkpoint_names:
+                        try:
+                            fallback_data = checkpoint_service.load_checkpoint(
+                                session_id, fallback_name
+                            )
+                        except Exception:
+                            continue
+                        fallback_compatibility = _apply_checkpoint_payload(
+                            fallback_data
                         )
-                    except Exception:
-                        continue
-                    fallback_compatibility = _apply_checkpoint_payload(fallback_data)
-                    if fallback_compatibility.get("compatible", True):
+                        if fallback_compatibility.get("compatible", True):
+                            emit_live(
+                                "WARN",
+                                f"[ORCHESTRATION] Resume checkpoint drift detected; switching to compatible fallback checkpoint '{fallback_name}'",
+                                metadata={
+                                    "phase": "resume",
+                                    "reason": "resume_workspace_drift_fallback",
+                                    "requested_checkpoint_name": requested_resume_checkpoint_name,
+                                    "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                                    "fallback_checkpoint_name": fallback_name,
+                                    "compatibility": resume_workspace_compatibility,
+                                },
+                            )
+                            _append_orchestration_event(
+                                project_dir=orchestration_state.project_dir,
+                                session_id=session_id,
+                                task_id=task_id,
+                                event_type=EventType.RESUME_WORKSPACE_DRIFT,
+                                details={
+                                    "requested_checkpoint_name": requested_resume_checkpoint_name,
+                                    "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                                    "fallback_checkpoint_name": fallback_name,
+                                },
+                            )
+                            logger.warning(
+                                "[ORCHESTRATION] Resume checkpoint drift detected for task %s; switched from %s to compatible fallback %s",
+                                task_id,
+                                resolved_resume_checkpoint_name,
+                                fallback_name,
+                            )
+                            resolved_resume_checkpoint_name = fallback_name
+                            resume_workspace_compatibility = fallback_compatibility
+                            fallback_applied = True
+                            break
+                    if fallback_applied:
+                        pass
+                    else:
+                        compatibility_error = (
+                            "Checkpoint plan does not match the current workspace; "
+                            "discarding saved execution state and replanning from existing files"
+                        )
+                        logger.warning(
+                            "[ORCHESTRATION] %s task=%s checkpoint=%s details=%s",
+                            compatibility_error,
+                            task_id,
+                            resolved_resume_checkpoint_name,
+                            resume_workspace_compatibility,
+                        )
                         emit_live(
                             "WARN",
-                            f"[ORCHESTRATION] Resume checkpoint drift detected; switching to compatible fallback checkpoint '{fallback_name}'",
+                            "[ORCHESTRATION] Resume checkpoint plan no longer matches the current workspace; falling back to a fresh replan from existing files",
                             metadata={
                                 "phase": "resume",
-                                "reason": "resume_workspace_drift_fallback",
+                                "reason": "resume_workspace_drift",
                                 "requested_checkpoint_name": requested_resume_checkpoint_name,
                                 "resolved_checkpoint_name": resolved_resume_checkpoint_name,
-                                "fallback_checkpoint_name": fallback_name,
                                 "compatibility": resume_workspace_compatibility,
                             },
                         )
@@ -1109,23 +1159,16 @@ def execute_orchestration_task(
                             details={
                                 "requested_checkpoint_name": requested_resume_checkpoint_name,
                                 "resolved_checkpoint_name": resolved_resume_checkpoint_name,
-                                "fallback_checkpoint_name": fallback_name,
+                                "compatibility": resume_workspace_compatibility,
+                                "action": "replan",
                             },
                         )
-                        logger.warning(
-                            "[ORCHESTRATION] Resume checkpoint drift detected for task %s; switched from %s to compatible fallback %s",
-                            task_id,
-                            resolved_resume_checkpoint_name,
-                            fallback_name,
-                        )
-                        resolved_resume_checkpoint_name = fallback_name
-                        resume_workspace_compatibility = fallback_compatibility
-                        fallback_applied = True
-                        break
-                if not fallback_applied:
+                        _clear_resume_execution_state(compatibility_error)
+                else:
                     compatibility_error = (
                         "Checkpoint plan does not match the current workspace; "
-                        "discarding saved execution state and replanning from existing files"
+                        "honouring the requested checkpoint by discarding its saved execution state "
+                        "and replanning from the current workspace"
                     )
                     logger.warning(
                         "[ORCHESTRATION] %s task=%s checkpoint=%s details=%s",
@@ -1136,7 +1179,8 @@ def execute_orchestration_task(
                     )
                     emit_live(
                         "WARN",
-                        "[ORCHESTRATION] Resume checkpoint plan no longer matches the current workspace; falling back to a fresh replan from existing files",
+                        "[ORCHESTRATION] Requested resume checkpoint no longer matches the current workspace; "
+                        "keeping the requested checkpoint context but starting a fresh replan",
                         metadata={
                             "phase": "resume",
                             "reason": "resume_workspace_drift",
@@ -1154,7 +1198,7 @@ def execute_orchestration_task(
                             "requested_checkpoint_name": requested_resume_checkpoint_name,
                             "resolved_checkpoint_name": resolved_resume_checkpoint_name,
                             "compatibility": resume_workspace_compatibility,
-                            "action": "replan",
+                            "action": "replan_requested_checkpoint",
                         },
                     )
                     _clear_resume_execution_state(compatibility_error)

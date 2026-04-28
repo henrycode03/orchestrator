@@ -151,7 +151,13 @@ def extract_structured_text(value: Any) -> str:
     if not isinstance(value, dict):
         return str(value)
 
-    for key in ("text", "output_text", "content_text"):
+    for key in (
+        "text",
+        "output_text",
+        "content_text",
+        "finalAssistantVisibleText",
+        "final_assistant_visible_text",
+    ):
         candidate = value.get(key)
         if isinstance(candidate, str) and candidate.strip():
             return candidate

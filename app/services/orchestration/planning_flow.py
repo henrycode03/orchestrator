@@ -29,6 +29,22 @@ from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 
+def _should_repair_truncated_single_step_plan(
+    *,
+    prompt_profile: str,
+    extracted_plan: list[dict[str, Any]] | None,
+    execution_profile: str,
+) -> bool:
+    """Route compressed local-Qwen plans into repair instead of execution."""
+
+    return (
+        prompt_profile == "local_qwen_json_array"
+        and execution_profile == "full_lifecycle"
+        and isinstance(extracted_plan, list)
+        and len(extracted_plan) == 1
+    )
+
+
 def execute_planning_phase(
     *,
     ctx: OrchestrationRunContext,
@@ -74,6 +90,20 @@ def execute_planning_phase(
     planning_prompt = (
         assemble_planning_prompt(ctx, workspace_review) if ctx.runtime_service else None
     )
+    runtime_metadata = (
+        ctx.runtime_service.get_backend_metadata()
+        if ctx.runtime_service and hasattr(ctx.runtime_service, "get_backend_metadata")
+        else {}
+    )
+    prompt_profile = PlannerService.select_prompt_profile(
+        runtime_metadata.get("backend"),
+        runtime_metadata.get("model_family"),
+    )
+    if planning_prompt:
+        planning_prompt = PlannerService.apply_prompt_profile(
+            planning_prompt,
+            prompt_profile=prompt_profile,
+        )
     planning_prompt_tokens = estimate_token_count(planning_prompt or "")
 
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
@@ -129,6 +159,7 @@ def execute_planning_phase(
             logger=ctx.logger,
             emit_live=ctx.emit_live,
             reason="dense_planning_context",
+            prompt_profile=prompt_profile,
         )
     else:
         planning_result = asyncio.run(
@@ -136,6 +167,15 @@ def execute_planning_phase(
                 planning_prompt, timeout_seconds=planning_timeout_seconds
             )
         )
+
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="INFO",
+        phase="planning",
+        message="[ORCHESTRATION] Planning response received; parsing and validating plan",
+        details={"phase_state": "planning_response_received"},
+    )
 
     initial_output_text = __coerce_output_text(
         ctx=ctx,
@@ -168,6 +208,7 @@ def execute_planning_phase(
             logger=ctx.logger,
             emit_live=ctx.emit_live,
             reason=(planning_result.get("error") or initial_output_text),
+            prompt_profile=prompt_profile,
         )
         used_minimal_planning_prompt = True
 
@@ -202,6 +243,7 @@ def execute_planning_phase(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
                     reason=f"json_parse_failed: {output_text[:240]}",
+                    prompt_profile=prompt_profile,
                 )
                 used_minimal_planning_prompt = True
                 continue
@@ -225,6 +267,7 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason=f"json_parse_failed_after_minimal: {strategy_info}",
+                    prompt_profile=prompt_profile,
                 )
                 used_planning_repair_prompt = True
                 continue
@@ -260,6 +303,7 @@ def execute_planning_phase(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
                     reason=f"unexpected_plan_shape: {str(plan_data)[:240]}",
+                    prompt_profile=prompt_profile,
                 )
                 used_minimal_planning_prompt = True
                 continue
@@ -270,6 +314,7 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason="unexpected_plan_shape_after_minimal",
+                    prompt_profile=prompt_profile,
                 )
                 used_planning_repair_prompt = True
                 continue
@@ -278,13 +323,44 @@ def execute_planning_phase(
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
                 and not used_minimal_planning_prompt
             ):
-                planning_result = __retry_with_minimal_prompt(
-                    ctx=ctx,
-                    planning_timeout_seconds=planning_timeout_seconds,
-                    reason="truncated_multistep_plan_detected",
-                )
-                used_minimal_planning_prompt = True
-                continue
+                if _should_repair_truncated_single_step_plan(
+                    prompt_profile=prompt_profile,
+                    extracted_plan=extracted_plan,
+                    execution_profile=ctx.execution_profile,
+                ):
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="WARN",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Planning output collapsed into a "
+                            "single step on the local model path; starting a "
+                            "repair pass instead of executing it as-is"
+                        ),
+                        details={
+                            "reason": "truncated_multistep_plan_repair_requested",
+                            "model_profile": prompt_profile,
+                        },
+                    )
+                    planning_result = __repair_planning_output(
+                        ctx=ctx,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        malformed_output=output_text,
+                        reason="truncated_multistep_plan_detected",
+                        prompt_profile=prompt_profile,
+                    )
+                    used_planning_repair_prompt = True
+                    continue
+                else:
+                    planning_result = __retry_with_minimal_prompt(
+                        ctx=ctx,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        reason="truncated_multistep_plan_detected",
+                        prompt_profile=prompt_profile,
+                    )
+                    used_minimal_planning_prompt = True
+                    continue
 
             if (
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
@@ -295,6 +371,7 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason="truncated_multistep_plan_after_minimal",
+                    prompt_profile=prompt_profile,
                 )
                 used_planning_repair_prompt = True
                 continue
@@ -408,6 +485,7 @@ def execute_planning_phase(
                     reason="plan_validation_failed: "
                     + "; ".join(plan_verdict.reasons[:3]),
                     rejection_reasons=plan_verdict.reasons,
+                    prompt_profile=prompt_profile,
                 )
                 used_planning_repair_prompt = True
                 continue
@@ -620,6 +698,7 @@ def __retry_with_minimal_prompt(
     ctx: OrchestrationRunContext,
     planning_timeout_seconds: int,
     reason: str,
+    prompt_profile: str = "default",
 ) -> Dict[str, Any]:
     return PlannerService.retry_with_minimal_prompt(
         runtime_service=ctx.runtime_service,
@@ -629,6 +708,7 @@ def __retry_with_minimal_prompt(
         logger=ctx.logger,
         emit_live=ctx.emit_live,
         reason=reason,
+        prompt_profile=prompt_profile,
     )
 
 
@@ -639,6 +719,7 @@ def __repair_planning_output(
     malformed_output: str,
     reason: str,
     rejection_reasons: list[str] | None = None,
+    prompt_profile: str = "default",
 ) -> Dict[str, Any]:
     return PlannerService.repair_output(
         runtime_service=ctx.runtime_service,
@@ -650,6 +731,7 @@ def __repair_planning_output(
         emit_live=ctx.emit_live,
         reason=reason,
         rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
     )
 
 
