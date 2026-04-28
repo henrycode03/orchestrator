@@ -11,6 +11,7 @@ from fastapi import (
     BackgroundTasks,
     Header,
     Request,
+    Response,
 )
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -43,6 +44,12 @@ from app.auth import (
 )
 from app.dependencies import get_current_user, get_current_active_user
 from app.services.auth_rate_limit import enforce_auth_rate_limit
+from app.services.session_auth import (
+    generate_session_token,
+    verify_session_token,
+    store_session,
+    invalidate_session,
+)
 
 router = APIRouter()
 
@@ -446,6 +453,68 @@ def verify_signature(request: VerifySignatureRequest, db: Session = Depends(get_
             valid=False,
             message=f"Verification error: {str(e)}",
         )
+
+
+@router.post("/session/login", response_model=UserResponse)
+def session_login(
+    credentials: UserLogin,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Login and set an httpOnly session cookie. Preferred over /tokens for browser clients."""
+    enforce_auth_rate_limit(request, "session_login")
+
+    user = db.query(User).filter(User.email == credentials.email).first()
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
+        )
+
+    token = generate_session_token(user.id, user.email)
+    payload = verify_session_token(token, require_active=False)
+    if payload:
+        store_session(payload["sid"], user.id, user.email)
+
+    response.set_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=settings.SESSION_COOKIE_MAX_AGE,
+        secure=False,
+    )
+    return user
+
+
+@router.post("/session/logout")
+def session_logout(request: Request, response: Response):
+    """Invalidate the current session cookie and clear it from the browser."""
+    session_cookie = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if session_cookie:
+        payload = verify_session_token(session_cookie, require_active=False)
+        if payload and payload.get("sid"):
+            invalidate_session(payload["sid"])
+    response.delete_cookie(key=settings.SESSION_COOKIE_NAME)
+    return {"message": "Logged out"}
+
+
+@router.post("/ws-ticket")
+def get_ws_ticket(current_user: User = Depends(get_current_active_user)):
+    """Issue a short-lived WebSocket ticket for the authenticated user."""
+    from app.services.session_auth_service import create_websocket_ticket
+
+    ticket = create_websocket_ticket(
+        current_user.id,
+        expiry_seconds=settings.WEBSOCKET_TICKET_EXPIRY_SECONDS,
+    )
+    return {"ticket": ticket.ticket, "expires_at": ticket.expires_at.isoformat()}
 
 
 @router.get("/generate-keypair")

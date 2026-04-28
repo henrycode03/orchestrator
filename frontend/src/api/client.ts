@@ -11,7 +11,6 @@ import type {
   PlanningSessionSummary,
   LogEntry,
   SessionStatistics,
-  AuthTokens,
   User,
   SortedLogsResponse,
   TaskSortedLogsResponse,
@@ -90,59 +89,16 @@ const apiClient = axios.create({
     'Content-Type': 'application/json',
   },
   timeout: 60000, // 60 second timeout for initial requests (page load, auth)
+  withCredentials: true, // send httpOnly session cookie on every request
 });
 
-// Request interceptor for auth tokens
-apiClient.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('access_token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
-
-// Response interceptor for token refresh
+// Response interceptor: redirect to login on 401
 apiClient.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    const originalRequest = error.config;
-
-    // Only attempt refresh on 401 errors
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true;
-
-      try {
-        const refreshToken = localStorage.getItem('refresh_token');
-        if (!refreshToken) {
-          localStorage.removeItem('access_token');
-          localStorage.removeItem('refresh_token');
-          window.location.href = '/login';
-          return Promise.reject(error);
-        }
-
-        const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
-          refresh_token: refreshToken,
-        });
-
-        const { access_token, refresh_token } = response.data;
-        localStorage.setItem('access_token', access_token);
-        if (refresh_token) {
-          localStorage.setItem('refresh_token', refresh_token);
-        }
-
-        originalRequest.headers.Authorization = `Bearer ${access_token}`;
-        return apiClient(originalRequest);
-      } catch (refreshError) {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
-        window.location.href = '/login';
-        return Promise.reject(refreshError);
-      }
+  (error) => {
+    if (error.response?.status === 401) {
+      window.location.href = '/login';
     }
-
     return Promise.reject(error);
   }
 );
@@ -150,7 +106,10 @@ apiClient.interceptors.response.use(
 // Auth API
 export const authAPI = {
   login: (email: string, password: string) =>
-    apiClient.post<AuthTokens>('/auth/tokens', { email, password }),
+    apiClient.post<User>('/auth/session/login', { email, password }),
+
+  logout: () =>
+    apiClient.post('/auth/session/logout'),
 
   register: (email: string, password: string) =>
     apiClient.post('/auth/register', { email, password }),
@@ -165,8 +124,8 @@ export const authAPI = {
   revokeApiKey: (id: number) =>
     apiClient.delete(`/auth/api-keys/${id}`),
 
-  refreshToken: (data: { refresh_token: string }) =>
-    axios.post<AuthTokens>(`${API_BASE_URL}/auth/refresh`, data),
+  getWsTicket: () =>
+    apiClient.post<{ ticket: string; expires_at: string }>('/auth/ws-ticket'),
 };
 
 export const settingsAPI = {
@@ -251,15 +210,14 @@ export const projectsAPI = {
     return apiClient.get<ProjectLogsResponse>(`/projects/${projectId}/logs?${params.toString()}`);
   },
 
-  // WebSocket logs stream for project (filters by project_id)
-  getLogsStream: (projectId: number) => {
-    const token = localStorage.getItem('access_token');
+  // WebSocket logs stream for project — fetches a short-lived ticket first
+  getLogsStream: async (projectId: number) => {
+    const { data } = await authAPI.getWsTicket();
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const apiHost = getWebSocketHost();
-    const wsUrl = token 
-      ? `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream?token=${token}`
-      : `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream`;
-    return new WebSocket(wsUrl);
+    return new WebSocket(
+      `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream?ticket=${data.ticket}`
+    );
   },
 };
 
@@ -560,26 +518,24 @@ export const sessionsAPI = {
   getPromptTemplate: (id: number, templateName: string) =>
     apiClient.get<{ template: string; variables: string[] }>(`/sessions/${id}/prompts/${templateName}`),
 
-  // WebSocket status stream
-  getStatusStream: (id: number) => {
-    const token = localStorage.getItem('access_token');
+  // WebSocket status stream — fetches a short-lived ticket first
+  getStatusStream: async (id: number) => {
+    const { data } = await authAPI.getWsTicket();
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const apiHost = getWebSocketHost();
-    const wsUrl = token 
-      ? `${protocol}//${apiHost}/api/v1/sessions/${id}/status?token=${token}`
-      : `${protocol}//${apiHost}/api/v1/sessions/${id}/status`;
-    return new WebSocket(wsUrl);
+    return new WebSocket(
+      `${protocol}//${apiHost}/api/v1/sessions/${id}/status?ticket=${data.ticket}`
+    );
   },
 
-  // WebSocket logs stream
-  getLogsStream: (id: number) => {
-    const token = localStorage.getItem('access_token');
+  // WebSocket logs stream — fetches a short-lived ticket first
+  getLogsStream: async (id: number) => {
+    const { data } = await authAPI.getWsTicket();
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const apiHost = getWebSocketHost();
-    const wsUrl = token 
-      ? `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream?token=${token}`
-      : `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream`;
-    return new WebSocket(wsUrl);
+    return new WebSocket(
+      `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream?ticket=${data.ticket}`
+    );
   },
 
   // Human-in-the-loop intervention endpoints

@@ -830,28 +830,35 @@ export default function SessionDetail() {
     }
   }, [pushTimelineEvent, sessionId]);
 
-  const setupWebSocket = useCallback((session_id: number) => {
-    const token = localStorage.getItem('access_token');
-
-    if (!token) {
-      console.warn('No access token found, cannot connect WebSocket');
-      return;
-    }
-
+  const setupWebSocket = useCallback(async (session_id: number) => {
     if (wsRef.current) {
       return;
     }
 
+    let ws!: WebSocket;
     try {
-      wsRef.current = sessionsAPI.getLogsStream(session_id);
-      console.log('Attempting WebSocket connection:', wsRef.current.url);
+      ws = await sessionsAPI.getLogsStream(session_id);
+    } catch (error) {
+      console.error('Failed to obtain WebSocket ticket:', error);
+      setWsConnected(false);
+      return;
+    }
 
-      wsRef.current.onopen = () => {
-        console.log('✅ WebSocket connected');
-        setWsConnected(true);
-      };
+    // Guard against concurrent calls resolving after this one
+    if (wsRef.current) {
+      ws.close();
+      return;
+    }
 
-      wsRef.current.onmessage = (event) => {
+    wsRef.current = ws;
+    console.log('Attempting WebSocket connection:', ws.url);
+
+    wsRef.current.onopen = () => {
+      console.log('✅ WebSocket connected');
+      setWsConnected(true);
+    };
+
+    wsRef.current.onmessage = (event) => {
         if (!event.data || event.data.length === 0) {
           return;
         }
@@ -941,10 +948,6 @@ export default function SessionDetail() {
           setupWebSocket(session_id);
         }, 3000);
       };
-    } catch (error) {
-      console.error('Failed to create WebSocket:', error);
-      setWsConnected(false);
-    }
   }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadStateDiff, logVerbosity, logViewMode, sessionId]);
 
   const scheduleWebSocketConnect = useCallback(
@@ -1067,7 +1070,11 @@ export default function SessionDetail() {
         const currentSession = await sessionsAPI.getById(Number(sessionId));
         if (abortController.signal.aborted) return;
         const currentStatus = currentSession.data.status;
-        setSession(currentSession.data);
+        setSession(prev => {
+          // Don't let a stale poll response downgrade an active session to "pending"
+          if (prev && prev.status === 'running' && currentStatus === 'pending') return prev;
+          return currentSession.data;
+        });
 
         if (currentSession.data.project_id) {
           const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id);

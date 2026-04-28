@@ -46,7 +46,11 @@ class Settings(BaseSettings):
 
     # Auth
     SECRET_KEY: str = "your-secret-key-change-in-production"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # 15-minute access token (short-lived)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7-day refresh token
+    SESSION_COOKIE_NAME: str = "orchestrator_session"
+    SESSION_COOKIE_MAX_AGE: int = 604800  # 7 days in seconds
+    WEBSOCKET_TICKET_EXPIRY_SECONDS: int = 30  # 30-second WebSocket ticket
     AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 60
     AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 5
     API_RATE_LIMIT_WINDOW_SECONDS: int = 60

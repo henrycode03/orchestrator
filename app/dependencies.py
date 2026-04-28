@@ -1,6 +1,6 @@
 """Authentication dependencies and middleware"""
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
@@ -8,21 +8,39 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.auth import verify_token
+from app.services.session_auth import verify_session_token
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login", auto_error=False)
 optional_oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl="api/v1/auth/login", auto_error=False
 )
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+    request: Request,
+    token: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
 ) -> User:
-    """
-    Get the current authenticated user from JWT token.
+    """Get authenticated user from httpOnly session cookie or Bearer token fallback."""
+    # 1. Try session cookie first (preferred for browser clients)
+    session_cookie = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if session_cookie:
+        payload = verify_session_token(session_cookie)
+        if payload:
+            email = payload.get("sub")
+            if email:
+                user = db.query(User).filter(User.email == email).first()
+                if user and user.is_active:
+                    return user
 
-    Raises HTTPException if token is invalid or user not found.
-    """
+    # 2. Fallback: Bearer token (API keys, mobile, legacy clients)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -95,13 +113,22 @@ async def get_current_admin_user(
 
 
 async def get_current_optional_user(
-    token: str | None = Depends(optional_oauth2_scheme), db: Session = Depends(get_db)
+    request: Request,
+    token: str | None = Depends(optional_oauth2_scheme),
+    db: Session = Depends(get_db),
 ) -> User | None:
-    """
-    Get current user if token is provided, otherwise None.
+    """Get current user if authenticated (cookie or bearer), otherwise None."""
+    # Try session cookie first
+    session_cookie = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if session_cookie:
+        payload = verify_session_token(session_cookie)
+        if payload:
+            email = payload.get("sub")
+            if email:
+                user = db.query(User).filter(User.email == email).first()
+                if user and user.is_active:
+                    return user
 
-    Useful for endpoints that work with or without authentication.
-    """
     if not token:
         return None
 

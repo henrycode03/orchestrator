@@ -141,6 +141,9 @@ async def execute_task_payload(
 
             selected_task.status = TaskStatus.RUNNING
             selected_task.started_at = datetime.utcnow()
+            if session.status not in ("running", "paused"):
+                session.status = "running"
+                session.is_active = True
             db.add(
                 LogEntry(
                     session_id=session_id,

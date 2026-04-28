@@ -120,6 +120,31 @@ def _get_websocket_token(websocket: WebSocket) -> Optional[str]:
 
 
 def _authenticate_websocket(websocket: WebSocket, db: Session) -> Optional[User]:
+    from app.config import settings as _settings
+    from app.services.session_auth import verify_session_token
+    from app.services.session_auth_service import verify_websocket_ticket
+
+    # 1. Session cookie (auto-sent by browsers for same-origin WS)
+    session_cookie = websocket.cookies.get(_settings.SESSION_COOKIE_NAME)
+    if session_cookie:
+        payload = verify_session_token(session_cookie)
+        if payload:
+            email = payload.get("sub")
+            if email:
+                user = db.query(User).filter(User.email == email).first()
+                if user and user.is_active:
+                    return user
+
+    # 2. Short-lived WS ticket (?ticket=<value>)
+    ticket_value = websocket.query_params.get("ticket")
+    if ticket_value:
+        ticket = verify_websocket_ticket(ticket_value)
+        if ticket:
+            user = db.query(User).filter(User.id == ticket.user_id).first()
+            if user and user.is_active:
+                return user
+
+    # 3. Legacy: Bearer token in Authorization header or ?token= param
     token = _get_websocket_token(websocket)
     if not token:
         return None
@@ -128,7 +153,10 @@ def _authenticate_websocket(websocket: WebSocket, db: Session) -> Optional[User]
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
     )
-    payload = verify_token(token, credentials_exception)
+    try:
+        payload = verify_token(token, credentials_exception)
+    except HTTPException:
+        return None
     email = payload.get("sub")
     if not email:
         return None

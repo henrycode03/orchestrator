@@ -209,6 +209,11 @@ def execute_orchestration_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
+        if session.status not in ("running", "paused"):
+            session.status = "running"
+            session.is_active = True
+            db.commit()
+
         def emit_live(
             level: str, message: str, metadata: Optional[Dict[str, Any]] = None
         ) -> None:

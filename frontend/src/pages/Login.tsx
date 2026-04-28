@@ -16,12 +16,7 @@ function Login() {
     setLoading(true);
 
     try {
-      const response = await authAPI.login(email, password);
-      const { access_token, refresh_token } = response.data;
-      
-      localStorage.setItem('access_token', access_token);
-      localStorage.setItem('refresh_token', refresh_token);
-      
+      await authAPI.login(email, password);
       navigate('/');
     } catch (err: unknown) {
       const axiosLike = err as {

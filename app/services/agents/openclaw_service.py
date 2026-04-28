@@ -287,9 +287,11 @@ class OpenClawSessionService:
             OpenClawSessionError: If session creation fails
         """
         try:
-            # Log session creation
+            # Log session creation (commit immediately so WS stream shows it)
             self._log_entry(
-                "INFO", f"Creating OpenClaw session for task: {task_description[:100]}"
+                "INFO",
+                f"Creating OpenClaw session for task: {task_description[:100]}",
+                commit=True,
             )
 
             # Use the main OpenClaw session that already exists
@@ -303,7 +305,9 @@ class OpenClawSessionService:
             )
 
             self._log_entry(
-                "INFO", f"✅ OpenClaw session set to: {self.openclaw_session_key}"
+                "INFO",
+                f"✅ OpenClaw session set to: {self.openclaw_session_key}",
+                commit=True,
             )
 
             return self.openclaw_session_key

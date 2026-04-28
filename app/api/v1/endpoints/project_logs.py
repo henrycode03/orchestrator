@@ -21,6 +21,7 @@ import json
 from app.database import get_db
 from app.models import Project
 from app.services.log_stream_service import LogStreamService
+from app.services.session.session_stream_service import _authenticate_websocket
 from app.services.streaming_health import (
     record_stream_error,
     register_stream_connection,
@@ -176,6 +177,11 @@ async def websocket_project_logs(
         websocket: WebSocket connection
         project_id: Project ID
     """
+    current_user = _authenticate_websocket(websocket, db)
+    if not current_user:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+
     # Verify project exists
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:

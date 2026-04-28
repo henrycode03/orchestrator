@@ -90,39 +90,17 @@ function ProjectsList() {
     setProjects((current) => current.filter((project) => project.id !== projectId));
 
     try {
-      const token = localStorage.getItem('access_token');
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080/api/v1';
-      console.log('🗑️ Deleting project', projectId);
-      console.log('🔍 VITE_API_URL:', apiUrl);
-      
-      // Delete the project (backend should handle cascading deletes)
-      const deleteResponse = await fetch(`${apiUrl}/projects/${projectId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-      
-      console.log('Delete response status:', deleteResponse.status);
-      const responseText = await deleteResponse.text();
-      console.log('Delete response text:', responseText);
-
-      if (!deleteResponse.ok) {
-        let errorMessage = 'Failed to delete project';
-        try {
-          const errorData = JSON.parse(responseText);
-          errorMessage = errorData.detail || errorMessage;
-        } catch {
-          if (responseText) errorMessage = responseText;
-        }
-        throw new Error(errorMessage);
-      }
+      await projectsAPI.delete(projectId);
       alert('Project deleted successfully!');
     } catch (error: unknown) {
       setProjects(previousProjects);
-      const err = error as { message?: string };
-      console.error('❌ Failed to delete project:', err.message || error);
-      alert(`Failed to delete project: ${err.message || 'Unknown error'}`);
+      const err = error as { response?: { data?: { detail?: unknown } }; message?: string };
+      const message =
+        typeof err.response?.data?.detail === 'string'
+          ? err.response.data.detail
+          : err.message || 'Unknown error';
+      console.error('❌ Failed to delete project:', message);
+      alert(`Failed to delete project: ${message}`);
     }
   };
 
