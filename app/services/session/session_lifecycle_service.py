@@ -83,17 +83,17 @@ def _ensure_session_task_ready_for_resume(
         session_task_link = SessionTask(
             session_id=session.id,
             task_id=task.id,
-            status=TaskStatus.RUNNING,
-            started_at=resumed_at,
+            status=TaskStatus.PENDING,
+            started_at=None,
         )
         db.add(session_task_link)
     else:
-        session_task_link.status = TaskStatus.RUNNING
-        session_task_link.started_at = resumed_at
+        session_task_link.status = TaskStatus.PENDING
+        session_task_link.started_at = None
         session_task_link.completed_at = None
 
-    task.status = TaskStatus.RUNNING
-    task.started_at = resumed_at
+    task.status = TaskStatus.PENDING
+    task.started_at = None
     task.completed_at = None
     task.error_message = None
     return session_task_link
@@ -113,6 +113,29 @@ def _checkpoint_has_resume_state(payload: Dict[str, Any] | None) -> bool:
         or orchestration_state.get("plan")
         or orchestration_state.get("status")
         or step_results
+    )
+
+
+def _checkpoint_has_execution_progress(payload: Dict[str, Any] | None) -> bool:
+    """Return True only when the checkpoint can replay meaningful execution state."""
+
+    if not payload:
+        return False
+
+    orchestration_state = payload.get("orchestration_state", {}) or {}
+    step_results = payload.get("step_results", []) or []
+    execution_results = orchestration_state.get("execution_results", []) or []
+    current_step_index = (
+        orchestration_state.get("current_step_index")
+        or payload.get("current_step_index")
+        or 0
+    )
+
+    return bool(
+        orchestration_state.get("plan")
+        or step_results
+        or execution_results
+        or int(current_step_index or 0) > 0
     )
 
 
@@ -402,7 +425,12 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
 
 
 async def stop_session_lifecycle(
-    db: Session, session_id: int, *, force: bool = False
+    db: Session,
+    session_id: int,
+    *,
+    force: bool = False,
+    initiated_by: str | None = None,
+    source: str | None = None,
 ) -> Dict[str, Any]:
     """Stop a running or paused session."""
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -453,6 +481,8 @@ async def stop_session_lifecycle(
                         "event_type": "session_stopped",
                         "session_id": session_id,
                         "force": force,
+                        "initiated_by": initiated_by or "unknown",
+                        "source": source or "unspecified",
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,
                         "reset_running_tasks": reset_count,
@@ -465,6 +495,8 @@ async def stop_session_lifecycle(
         return {
             "status": "stopped",
             "session_id": session_id,
+            "initiated_by": initiated_by or "unknown",
+            "source": source or "unspecified",
             "message": f"Session '{session.name}' stopped successfully",
         }
     except HTTPException:
@@ -680,15 +712,6 @@ async def resume_session_lifecycle(
                 status_code=404, detail="No task found to resume from checkpoint"
             )
 
-        prompt = context_data.get("task_description") or task.description or task.title
-        result = execute_orchestration_task.delay(
-            session_id=session_id,
-            task_id=task.id,
-            prompt=prompt,
-            timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
-            resume_checkpoint_name=checkpoint_name,
-        )
-
         resumed_at = datetime.now(timezone.utc)
         _ensure_session_task_ready_for_resume(
             db,
@@ -696,6 +719,33 @@ async def resume_session_lifecycle(
             task=task,
             resumed_at=resumed_at,
         )
+        prompt = context_data.get("task_description") or task.description or task.title
+        resume_has_progress = _checkpoint_has_execution_progress(checkpoint_data)
+
+        if resume_has_progress:
+            result = execute_orchestration_task.delay(
+                session_id=session_id,
+                task_id=task.id,
+                prompt=prompt,
+                timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+                resume_checkpoint_name=checkpoint_name,
+                expected_session_instance_id=session.instance_id,
+            )
+            dispatch_mode = "checkpoint_resume"
+        else:
+            queued = queue_task_for_session(
+                db=db,
+                session=session,
+                task_id=task.id,
+                timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+            )
+
+            class _QueuedResult:
+                id = queued["celery_id"]
+
+            result = _QueuedResult()
+            dispatch_mode = "fresh_requeue"
+
         session.status = "running"
         session.is_active = True
         session.resumed_at = resumed_at
@@ -724,6 +774,7 @@ async def resume_session_lifecycle(
                         "celery_task_id": result.id,
                         "task_id": task.id,
                         "restore_fidelity": restore_fidelity,
+                        "dispatch_mode": dispatch_mode,
                     }
                 ),
             )
@@ -737,12 +788,19 @@ async def resume_session_lifecycle(
             "resolved_checkpoint_name": checkpoint_name,
             "restore_fidelity": restore_fidelity,
             "message": (
-                f"Session '{session.name}' resumed successfully"
-                + (
-                    f" using resolved checkpoint '{checkpoint_name}' instead of '{requested_checkpoint_name}'"
-                    if requested_checkpoint_name
-                    and requested_checkpoint_name != checkpoint_name
-                    else f" using checkpoint '{checkpoint_name}'"
+                (
+                    f"Session '{session.name}' resumed successfully"
+                    + (
+                        f" using resolved checkpoint '{checkpoint_name}' instead of '{requested_checkpoint_name}'"
+                        if requested_checkpoint_name
+                        and requested_checkpoint_name != checkpoint_name
+                        else f" using checkpoint '{checkpoint_name}'"
+                    )
+                )
+                if resume_has_progress
+                else (
+                    f"Session '{session.name}' resumed by queueing a fresh run because "
+                    f"checkpoint '{checkpoint_name}' had no execution progress to replay"
                 )
             ),
         }

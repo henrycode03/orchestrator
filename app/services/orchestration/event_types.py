@@ -25,6 +25,9 @@ class EventType:
 
     # ── Task lifecycle ────────────────────────────────────────────────────────
     TASK_STARTED = "task_started"
+    TASK_QUEUED = "task_queued"
+    TASK_CLAIMED = "task_claimed"
+    TASK_DISPATCH_REJECTED = "task_dispatch_rejected"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
 
@@ -60,6 +63,10 @@ class EventType:
     WORKSPACE_RESTORE_SKIPPED = "workspace_restore_skipped"
     WORKSPACE_PRESERVED = "workspace_preserved"
     RESUME_WORKSPACE_DRIFT = "resume_workspace_drift"
+    WORKSPACE_CONTRACT_FAILED = "workspace_contract_failed"
+
+    # ── Reliability / evidence ───────────────────────────────────────────────
+    COMPLETION_EVIDENCE_FAILED = "completion_evidence_failed"
 
 
 _ALL_EVENT_TYPES: frozenset[str] = frozenset(

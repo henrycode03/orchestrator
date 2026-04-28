@@ -16,9 +16,15 @@ from app.services.orchestration.persistence import (
 
 def test_event_type_constants_cover_full_task_lifecycle():
     assert hasattr(EventType, "TASK_STARTED")
+    assert hasattr(EventType, "TASK_QUEUED")
+    assert hasattr(EventType, "TASK_CLAIMED")
+    assert hasattr(EventType, "TASK_DISPATCH_REJECTED")
     assert hasattr(EventType, "TASK_COMPLETED")
     assert hasattr(EventType, "TASK_FAILED")
     assert is_known_event_type(EventType.TASK_STARTED)
+    assert is_known_event_type(EventType.TASK_QUEUED)
+    assert is_known_event_type(EventType.TASK_CLAIMED)
+    assert is_known_event_type(EventType.TASK_DISPATCH_REJECTED)
     assert is_known_event_type(EventType.TASK_COMPLETED)
     assert is_known_event_type(EventType.TASK_FAILED)
 

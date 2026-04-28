@@ -7,6 +7,8 @@ import json
 import logging
 from typing import Any, Callable, Dict
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.models import TaskStatus
 from app.services.orchestration.context_assembly import (
     assemble_planning_prompt,
@@ -523,6 +525,54 @@ def execute_planning_phase(
                 "planning timeout or context overflow"
             )
         return {"status": "failed", "reason": "planning_timeout_or_context_overflow"}
+    except SoftTimeLimitExceeded as exc:
+        ctx.logger.error(
+            "[ORCHESTRATION] Planning was interrupted by the Celery soft time limit: %s",
+            exc,
+        )
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = "Planning exceeded the worker soft time limit before a valid plan was produced"
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Planning exceeded the worker soft time limit "
+                "before a valid plan was produced"
+            ),
+            details={"reason": "planning_soft_time_limit_exceeded"},
+        )
+        try:
+            phase_finished_event = append_orchestration_event(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                event_type=EventType.PHASE_FINISHED,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
+                details={
+                    "phase": "planning",
+                    "status": "soft_time_limit_exceeded",
+                },
+            )
+            write_orchestration_state_snapshot(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                orchestration_state=ctx.orchestration_state,
+                trigger="phase_finished",
+                related_event_id=phase_finished_event.get("event_id"),
+            )
+        except Exception:
+            pass
+        ctx.task.status = TaskStatus.FAILED
+        ctx.task.error_message = "Planning exceeded the worker soft time limit before a valid plan was produced"
+        ctx.db.commit()
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed(
+                "planning soft time limit exceeded"
+            )
+        return {"status": "failed", "reason": "planning_soft_time_limit_exceeded"}
     except Exception as exc:
         ctx.logger.error("[ORCHESTRATION] Failed to parse planning result: %s", exc)
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED

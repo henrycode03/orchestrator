@@ -53,11 +53,26 @@ def should_force_review_execution_profile(
     if execution_profile in {"review_only", "test_only", "debug_only"}:
         return False
     combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
+    implementation_markers = (
+        "set up",
+        "setup",
+        "build",
+        "create",
+        "implement",
+        "frontend",
+        "backend",
+        "fastapi",
+        "node.js",
+        "react",
+        "vite",
+        "clean architecture",
+    )
+    if any(marker in combined for marker in implementation_markers):
+        return False
     review_markers = (
         "inspect",
         "analysis",
         "analyze",
-        "architecture",
         "inventory",
         "current project structure",
         "current project architecture",

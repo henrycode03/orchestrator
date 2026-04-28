@@ -12,14 +12,21 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.services.orchestration.event_types import EventType
+from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.config import settings
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.prompt_templates import OrchestrationState
 from app.services.task_service import TaskService
+from app.services.workspace.system_settings import (
+    get_effective_agent_backend,
+    get_effective_agent_model_family,
+)
 
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
@@ -67,13 +74,24 @@ def prepare_task_for_fresh_execution(
     task: Task, clear_saved_plan: bool = False
 ) -> None:
     """Reset task execution state before a fresh manual/automatic rerun."""
-    task.status = TaskStatus.RUNNING
-    task.started_at = datetime.utcnow()
+    task.status = TaskStatus.PENDING
+    task.started_at = None
     task.completed_at = None
     task.error_message = None
     task.current_step = 0
     if clear_saved_plan:
         task.steps = None
+
+
+def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
+    return {
+        "backend": get_effective_agent_backend(
+            settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+        ),
+        "model_family": get_effective_agent_model_family(
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+        ),
+    }
 
 
 def ensure_task_workspace(
@@ -271,13 +289,13 @@ def queue_task_for_session(
         session_task_link = SessionTask(
             session_id=session.id,
             task_id=task.id,
-            status=TaskStatus.RUNNING,
-            started_at=datetime.utcnow(),
+            status=TaskStatus.PENDING,
+            started_at=None,
         )
         db.add(session_task_link)
     else:
-        session_task_link.status = TaskStatus.RUNNING
-        session_task_link.started_at = datetime.utcnow()
+        session_task_link.status = TaskStatus.PENDING
+        session_task_link.started_at = None
         session_task_link.completed_at = None
 
     prior_status = task.status
@@ -300,6 +318,7 @@ def queue_task_for_session(
         task_id=task.id,
         prompt=task_prompt,
         timeout_seconds=timeout_seconds,
+        expected_session_instance_id=session.instance_id,
     )
 
     db.add(
@@ -321,6 +340,19 @@ def queue_task_for_session(
         )
     )
     db.commit()
+
+    append_orchestration_event(
+        project_dir=task_workspace["workspace_path"],
+        session_id=session.id,
+        task_id=task.id,
+        event_type=EventType.TASK_QUEUED,
+        details={
+            "session_instance_id": session.instance_id,
+            "celery_task_id": result.id,
+            "project_dir": task_workspace["workspace_path"],
+            **_runtime_selection_details(db),
+        },
+    )
 
     return {
         "task_id": task.id,
@@ -413,8 +445,8 @@ def maybe_queue_next_automatic_task(
         .join(SessionTask, SessionTask.task_id == Task.id)
         .filter(
             SessionTask.session_id == session.id,
-            SessionTask.status == TaskStatus.RUNNING,
-            Task.status == TaskStatus.RUNNING,
+            SessionTask.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+            Task.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
         )
         .first()
     )

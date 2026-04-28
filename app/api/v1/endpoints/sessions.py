@@ -587,12 +587,24 @@ async def start_session_lifecycle_endpoint(
 @router.post("/sessions/{session_id}/stop")
 async def stop_session(
     session_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
     force: bool = False,
 ):
     """Stop a running session gracefully."""
-    return await _stop_session_lifecycle(db, session_id, force=force)
+    initiated_by = (
+        getattr(current_user, "email", None)
+        or str(getattr(current_user, "id", None) or "")
+        or "authenticated_user"
+    )
+    return await _stop_session_lifecycle(
+        db,
+        session_id,
+        force=force,
+        initiated_by=initiated_by,
+        source=f"api:{request.method} {request.url.path}",
+    )
 
 
 @router.post("/sessions/{session_id}/pause")

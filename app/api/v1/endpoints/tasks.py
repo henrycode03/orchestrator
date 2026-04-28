@@ -18,8 +18,16 @@ from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
+from app.services.orchestration.event_types import EventType
+from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_service import TaskService
+from app.services.workspace.system_settings import (
+    get_effective_agent_backend,
+    get_effective_agent_model_family,
+)
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +71,9 @@ def _prepare_task_for_fresh_execution(
     task: Task, clear_saved_plan: bool = False
 ) -> None:
     """Reset task execution state before a fresh run."""
-    task.status = TaskStatus.RUNNING
+    task.status = TaskStatus.PENDING
     task.error_message = None
-    task.started_at = datetime.now(UTC)
+    task.started_at = None
     task.completed_at = None
     task.current_step = 0
     if clear_saved_plan:
@@ -127,7 +135,6 @@ def _queue_task_retry(
             status_code=400, detail="Task is missing a description or title to execute"
         )
 
-    started_at = datetime.now(UTC)
     new_session = SessionModel(
         name=_ensure_unique_session_name(
             db,
@@ -147,8 +154,8 @@ def _queue_task_retry(
     session_task = SessionTask(
         session_id=new_session.id,
         task_id=task.id,
-        status=TaskStatus.RUNNING,
-        started_at=started_at,
+        status=TaskStatus.PENDING,
+        started_at=None,
     )
     db.add(session_task)
 
@@ -158,7 +165,7 @@ def _queue_task_retry(
         TaskStatus.CANCELLED,
     )
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
-    task.started_at = started_at
+    task_workspace = ensure_task_workspace(db, new_session, task.id)
 
     try:
         result = execute_orchestration_task.delay(
@@ -166,6 +173,7 @@ def _queue_task_retry(
             task_id=task.id,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
+            expected_session_instance_id=new_session.instance_id,
         )
     except Exception:
         db.rollback()
@@ -173,7 +181,7 @@ def _queue_task_retry(
 
     new_session.status = "running"
     new_session.is_active = True
-    new_session.started_at = started_at
+    new_session.started_at = datetime.now(UTC)
 
     db.add(
         LogEntry(
@@ -201,6 +209,23 @@ def _queue_task_retry(
         )
     )
     db.commit()
+    append_orchestration_event(
+        project_dir=task_workspace["workspace_path"],
+        session_id=new_session.id,
+        task_id=task.id,
+        event_type=EventType.TASK_QUEUED,
+        details={
+            "session_instance_id": new_session.instance_id,
+            "celery_task_id": result.id,
+            "project_dir": task_workspace["workspace_path"],
+            "backend": get_effective_agent_backend(
+                settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+            ),
+            "model_family": get_effective_agent_model_family(
+                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+            ),
+        },
+    )
 
     return {
         "status": "started",

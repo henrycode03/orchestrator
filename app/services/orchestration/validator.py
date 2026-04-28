@@ -803,6 +803,7 @@ class ValidatorService:
         missing_expected_files: List[str],
         tool_failures: List[str],
         validation_profile: str,
+        reported_changed_files: Optional[List[str]] = None,
         relaxed_mode: bool = False,
         validation_severity: str = "standard",
     ) -> ValidationVerdict:
@@ -836,6 +837,21 @@ class ValidatorService:
             project_dir,
             step.get("expected_files", []) or [],
         )
+        materialized_files = [
+            str(path.relative_to(project_dir)) for path in candidate_files
+        ]
+        reported_changed_files = [
+            str(path).strip()
+            for path in (reported_changed_files or [])
+            if str(path).strip()
+        ]
+        if reported_changed_files and materialized_files:
+            if not set(reported_changed_files) & set(materialized_files):
+                repairable.append(
+                    "Step reported file changes but none materialized in the expected workspace"
+                )
+                details["reported_changed_files"] = reported_changed_files[:20]
+                details["materialized_files"] = materialized_files[:20]
         placeholder_reasons: List[str] = []
         for candidate in candidate_files:
             placeholder_reasons.extend(cls._detect_placeholder_content(candidate))
@@ -902,6 +918,11 @@ class ValidatorService:
             ],
         }
         completion_evidence = completion_evidence or {}
+        reported_changed_files = [
+            str(path).strip()
+            for path in (completion_evidence.get("reported_changed_files") or [])
+            if str(path).strip()
+        ]
         contract = {
             "execution_profile": execution_profile,
             "validation_profile": profile,
@@ -927,6 +948,17 @@ class ValidatorService:
                 f"Core implementation files are missing: {', '.join(missing_core[:6])}"
             )
             details["missing_core_files"] = missing_core[:20]
+
+        if reported_changed_files and candidate_files:
+            materialized_files = [
+                str(path.relative_to(project_dir)) for path in candidate_files
+            ]
+            if not set(reported_changed_files) & set(materialized_files):
+                repairable.append(
+                    "Completion evidence reported changed files, but none materialized in the canonical workspace"
+                )
+                details["reported_changed_files"] = reported_changed_files[:20]
+                details["materialized_files"] = materialized_files[:20]
 
         if nested_matches:
             details["nested_expected_file_matches"] = {

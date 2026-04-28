@@ -1028,6 +1028,14 @@ def finalize_successful_task(
             summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
         )
     )
+    reported_changed_files = list(
+        dict.fromkeys(
+            path
+            for result in (orchestration_state.execution_results or [])
+            for path in (getattr(result, "files_changed", []) or [])
+            if str(path).strip()
+        )
+    )
 
     completion_validation = ValidatorService.validate_task_completion(
         project_dir=orchestration_state.project_dir,
@@ -1043,6 +1051,7 @@ def finalize_successful_task(
         completion_evidence={
             "summary_generated": bool(summary_result),
             "execution_results_count": len(orchestration_state.execution_results),
+            "reported_changed_files": reported_changed_files,
         },
         validation_severity=ctx.validation_severity,
     )
@@ -1078,6 +1087,7 @@ def finalize_successful_task(
                     "execution_results_count": len(
                         orchestration_state.execution_results
                     ),
+                    "reported_changed_files": reported_changed_files,
                 },
                 validation_severity=ctx.validation_severity,
             )
@@ -1149,6 +1159,20 @@ def finalize_successful_task(
         )
 
     if not completion_validation.accepted:
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.COMPLETION_EVIDENCE_FAILED,
+            details={
+                "session_instance_id": ctx.session_instance_id,
+                **runtime_service.get_backend_metadata(),
+                "project_dir": str(orchestration_state.project_dir),
+                "validation_status": completion_validation.status,
+                "reasons": completion_validation.reasons[:10],
+                "reported_changed_files": reported_changed_files[:20],
+            },
+        )
         completion_error = "Completion validation failed: " + "; ".join(
             completion_validation.reasons[:5]
         )

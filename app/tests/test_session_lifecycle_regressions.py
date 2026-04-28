@@ -7,10 +7,11 @@ silent failures or confusing error responses.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
-from app.models import Project, Session as SessionModel, Task, TaskStatus
+from app.models import LogEntry, Project, Session as SessionModel, Task, TaskStatus
 from app.services.session.session_lifecycle_service import (
     pause_session_lifecycle,
     resume_session_lifecycle,
@@ -176,12 +177,35 @@ def test_stop_running_session_sets_status_stopped(db_session, monkeypatch):
         ),
     )
 
-    result = asyncio.run(stop_session_lifecycle(db_session, session.id))
+    result = asyncio.run(
+        stop_session_lifecycle(
+            db_session,
+            session.id,
+            initiated_by="tester@example.com",
+            source="api:POST /sessions/1/stop",
+        )
+    )
 
     assert result["status"] == "stopped"
+    assert result["initiated_by"] == "tester@example.com"
+    assert result["source"] == "api:POST /sessions/1/stop"
     db_session.refresh(session)
     assert session.status == "stopped"
     assert not session.is_active
+
+    stop_log = (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session.id,
+            LogEntry.message == f"Session stopped: {session.name}",
+        )
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    assert stop_log is not None
+    stop_metadata = json.loads(stop_log.log_metadata or "{}")
+    assert stop_metadata["initiated_by"] == "tester@example.com"
+    assert stop_metadata["source"] == "api:POST /sessions/1/stop"
 
 
 # ── pause boundary conditions ─────────────────────────────────────────────────
@@ -234,7 +258,7 @@ def test_start_manual_session_with_no_tasks_starts_without_queuing(
     assert session.status == "running"
 
 
-def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
+def test_resume_session_requeues_fresh_when_checkpoint_has_no_execution_progress(
     db_session, monkeypatch
 ):
     project = _make_project(db_session)
@@ -270,22 +294,21 @@ def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
                 "warnings": ["missing workspace path", "missing execution plan"],
             }
 
-    class _FakeDelayResult:
-        id = "celery-resume-1"
-
-    class _FakeWorkerTask:
-        @staticmethod
-        def delay(**kwargs):
-            captured["delay_kwargs"] = kwargs
-            return _FakeDelayResult()
+    def _fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["queued_task"] = {
+            "session_id": session.id,
+            "task_id": task_id,
+            "timeout_seconds": timeout_seconds,
+        }
+        return {"celery_id": "celery-queued-fresh-1"}
 
     monkeypatch.setattr(
         "app.services.session.session_lifecycle_service.CheckpointService",
         _FakeCheckpointService,
     )
     monkeypatch.setattr(
-        "app.tasks.worker.execute_orchestration_task",
-        _FakeWorkerTask,
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        _fake_queue_task_for_session,
     )
 
     result = asyncio.run(
@@ -302,12 +325,11 @@ def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
     assert result["status"] == "resumed"
     assert result["restore_fidelity"]["status"] == "low"
     assert captured["requested_checkpoint_name"] == "paused_20260424_034703"
-    assert (
-        captured["delay_kwargs"]["resume_checkpoint_name"] == "paused_20260424_034703"
-    )
+    assert captured["queued_task"]["task_id"] == task.id
     assert session.status == "running"
     assert session.is_active is True
-    assert task.status == TaskStatus.RUNNING
+    assert task.status == TaskStatus.PENDING
+    assert "no execution progress to replay" in result["message"]
 
     session_task = (
         db_session.query(SessionModel)
@@ -316,4 +338,4 @@ def test_resume_session_rehydrates_session_task_and_queues_requested_checkpoint(
         .tasks[0]
     )
     assert session_task.task_id == task.id
-    assert session_task.status == TaskStatus.RUNNING
+    assert session_task.status == TaskStatus.PENDING

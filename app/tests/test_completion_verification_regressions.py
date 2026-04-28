@@ -117,3 +117,38 @@ def test_verification_completion_does_not_require_execution_results(tmp_path):
         "Completion contract requires at least one recorded execution result"
         not in verdict.reasons
     )
+
+
+def test_completion_validation_rejects_reported_files_that_never_materialized(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "src").mkdir(parents=True)
+    (project_dir / "src" / "index.ts").write_text(
+        "export const ready = true;\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create source implementation",
+                "commands": ["echo ready"],
+                "verification": "test -f src/index.ts",
+                "expected_files": ["src/index.ts"],
+            }
+        ],
+        task_prompt="Implement the source file.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["README.md"],
+        },
+    )
+
+    assert verdict.accepted is False
+    assert verdict.repairable is True
+    assert "none materialized in the canonical workspace" in verdict.reasons[0]
+    assert verdict.details["reported_changed_files"] == ["README.md"]

@@ -9,6 +9,8 @@ import os
 import logging
 import json
 import asyncio
+import time
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -79,7 +81,17 @@ from app.services.session.session_runtime_service import (
     queue_task_for_session as _queue_task_for_session,
 )
 from app.services.orchestration.policy import get_policy_profile
+from app.services.orchestration.policy import (
+    ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+    ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+)
 from app.services.workspace.system_settings import get_effective_policy_profile
+from app.services.workspace.system_settings import (
+    get_effective_agent_backend,
+    get_effective_agent_model_family,
+)
+from app.config import settings
+from app.services.orchestration.workspace_guard import verify_workspace_contract
 
 logger = logging.getLogger(__name__)
 
@@ -161,12 +173,99 @@ def _get_latest_session_task_link(
     )
 
 
+def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
+    return {
+        "backend": get_effective_agent_backend(
+            settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+        ),
+        "model_family": get_effective_agent_model_family(
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+        ),
+    }
+
+
+def _claim_queued_task_for_worker(
+    *,
+    db: Session,
+    session: SessionModel,
+    task: Task,
+    session_task_link: Optional[SessionTask],
+    expected_session_instance_id: Optional[str],
+) -> tuple[bool, str, Optional[datetime], Optional[SessionTask]]:
+    """Claim a queued task exactly once for the current worker dispatch."""
+
+    if (
+        expected_session_instance_id
+        and session.instance_id != expected_session_instance_id
+    ):
+        db.rollback()
+        return False, "session_instance_changed", None, session_task_link
+
+    if session.status not in {"pending", "running", "paused", "waiting_for_human"}:
+        db.rollback()
+        return False, f"session_not_runnable:{session.status}", None, session_task_link
+
+    claim_started_at = datetime.utcnow()
+    updated_task_rows = (
+        db.query(Task)
+        .filter(Task.id == task.id, Task.status == TaskStatus.PENDING)
+        .update(
+            {
+                Task.status: TaskStatus.RUNNING,
+                Task.started_at: claim_started_at,
+                Task.completed_at: None,
+                Task.error_message: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated_task_rows != 1:
+        db.rollback()
+        return False, f"task_not_claimable:{task.status.value}", None, session_task_link
+
+    latest_link = session_task_link or _get_latest_session_task_link(
+        db, session.id, task.id
+    )
+    if latest_link is None:
+        db.rollback()
+        return False, "missing_session_task_link", None, None
+
+    updated_link_rows = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.id == latest_link.id, SessionTask.status == TaskStatus.PENDING
+        )
+        .update(
+            {
+                SessionTask.status: TaskStatus.RUNNING,
+                SessionTask.started_at: claim_started_at,
+                SessionTask.completed_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated_link_rows != 1:
+        db.rollback()
+        return (
+            False,
+            f"session_task_not_claimable:{latest_link.status.value}",
+            None,
+            latest_link,
+        )
+
+    db.commit()
+    db.refresh(session)
+    db.refresh(task)
+    latest_link = _get_latest_session_task_link(db, session.id, task.id)
+    return True, "claimed", claim_started_at, latest_link
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
     default_retry_delay=60,
-    time_limit=1800,
-    soft_time_limit=1500,
+    time_limit=ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+    soft_time_limit=ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
     queue="celery",
 )
 def execute_orchestration_task(
@@ -177,6 +276,7 @@ def execute_orchestration_task(
     timeout_seconds: int = 300,
     context: Optional[Dict[str, Any]] = None,
     resume_checkpoint_name: Optional[str] = None,
+    expected_session_instance_id: Optional[str] = None,
 ):
     """
     Execute an orchestration task with multi-step runtime coordination
@@ -208,11 +308,6 @@ def execute_orchestration_task(
 
         if not session or not task:
             raise ValueError("Session or task not found")
-
-        if session.status not in ("running", "paused"):
-            session.status = "running"
-            session.is_active = True
-            db.commit()
 
         def emit_live(
             level: str, message: str, metadata: Optional[Dict[str, Any]] = None
@@ -263,6 +358,87 @@ def execute_orchestration_task(
                 task.title if task else None,
                 task.description if task else None,
             )
+        )
+        dispatch_project_dir = None
+        if project and project.workspace_path:
+            dispatch_project_dir = Path(
+                resolve_project_workspace_path(project.workspace_path, project.name)
+            )
+            if task.task_subfolder and not runs_in_canonical_baseline:
+                dispatch_project_dir = (
+                    dispatch_project_dir / str(task.task_subfolder)
+                ).resolve()
+
+        session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        claim_ok = False
+        claim_reason = "unclaimed"
+        claim_started_at = None
+        for claim_attempt in range(5):
+            session = (
+                db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            )
+            task = db.query(Task).filter(Task.id == task_id).first()
+            session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+            if not session or not task:
+                claim_reason = "session_or_task_not_found"
+                break
+            claim_ok, claim_reason, claim_started_at, session_task_link = (
+                _claim_queued_task_for_worker(
+                    db=db,
+                    session=session,
+                    task=task,
+                    session_task_link=session_task_link,
+                    expected_session_instance_id=expected_session_instance_id,
+                )
+            )
+            if claim_ok or claim_reason == "session_instance_changed":
+                break
+            time.sleep(0.2)
+        if not claim_ok:
+            reject_details = {
+                "reason": claim_reason,
+                "session_instance_id": session.instance_id,
+                "expected_session_instance_id": expected_session_instance_id,
+                "project_dir": (
+                    str(dispatch_project_dir) if dispatch_project_dir else None
+                ),
+                "celery_task_id": getattr(getattr(self, "request", None), "id", None),
+                **_runtime_selection_details(db),
+            }
+            if dispatch_project_dir:
+                _append_orchestration_event(
+                    project_dir=dispatch_project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.TASK_DISPATCH_REJECTED,
+                    details=reject_details,
+                )
+            emit_live(
+                "WARN",
+                f"[ORCHESTRATION] Rejected stale or duplicate task dispatch: {claim_reason}",
+                metadata=reject_details,
+            )
+            return {"status": "ignored", "reason": claim_reason}
+
+        claimed_details = {
+            "session_instance_id": session.instance_id,
+            "expected_session_instance_id": expected_session_instance_id,
+            "celery_task_id": getattr(getattr(self, "request", None), "id", None),
+            "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
+            **_runtime_selection_details(db),
+        }
+        if dispatch_project_dir:
+            _append_orchestration_event(
+                project_dir=dispatch_project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.TASK_CLAIMED,
+                details=claimed_details,
+            )
+        emit_live(
+            "INFO",
+            "[ORCHESTRATION] Worker claimed queued task dispatch",
+            metadata=claimed_details,
         )
 
         # Initialize orchestration state with new workspace architecture
@@ -629,7 +805,7 @@ def execute_orchestration_task(
 
         # Update task status
         task.status = TaskStatus.RUNNING
-        task.started_at = datetime.utcnow()
+        task.started_at = claim_started_at or task.started_at or datetime.utcnow()
         task.completed_at = None
         task.error_message = None
         task.current_step = 0
@@ -637,7 +813,7 @@ def execute_orchestration_task(
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         if session_task_link:
             session_task_link.status = TaskStatus.RUNNING
-            session_task_link.started_at = task.started_at
+            session_task_link.started_at = claim_started_at or task.started_at
             session_task_link.completed_at = None
         db.commit()
         _write_project_state_snapshot(db, project, task, session_id)
@@ -664,6 +840,52 @@ def execute_orchestration_task(
 
         # Get session context
         session_context = asyncio.run(runtime_service.get_session_context())
+
+        if project and project.workspace_path:
+            expected_root = Path(
+                resolve_project_workspace_path(project.workspace_path, project.name)
+            )
+            workspace_contract = verify_workspace_contract(
+                expected_root=expected_root,
+                task_dir=Path(orchestration_state.project_dir),
+                expected_task_subfolder=getattr(task, "task_subfolder", None),
+                allow_project_root_task_dir=runs_in_canonical_baseline,
+                runtime_session_context=session_context,
+            )
+            if not workspace_contract.get("ok"):
+                contract_error = "Workspace contract failed before execution: " + str(
+                    workspace_contract.get("reason") or "unknown mismatch"
+                )
+                task.status = TaskStatus.FAILED
+                task.completed_at = datetime.utcnow()
+                task.error_message = contract_error
+                task.workspace_status = "blocked"
+                if session_task_link:
+                    session_task_link.status = TaskStatus.FAILED
+                    session_task_link.completed_at = task.completed_at
+                session.status = "paused"
+                session.is_active = False
+                _set_session_alert(session, "error", contract_error[:2000])
+                db.commit()
+                contract_details = {
+                    **workspace_contract,
+                    "session_instance_id": session.instance_id,
+                    **runtime_service.get_backend_metadata(),
+                }
+                _append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.WORKSPACE_CONTRACT_FAILED,
+                    details=contract_details,
+                )
+                emit_live(
+                    "ERROR",
+                    f"[ORCHESTRATION] {contract_error}",
+                    metadata=contract_details,
+                )
+                _write_project_state_snapshot(db, project, task, session_id)
+                return {"status": "failed", "reason": "workspace_contract_failed"}
 
         checkpoint_service = CheckpointService(db)
         resumed_from_checkpoint = False

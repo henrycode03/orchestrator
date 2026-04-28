@@ -287,6 +287,7 @@ def assess_step_execution(
             missing_expected_files=missing_files,
             tool_failures=tool_failures,
             validation_profile=validation_profile,
+            reported_changed_files=step_result.get("files_changed", []),
             validation_severity=validation_severity,
             relaxed_mode=relaxed_mode,
         )

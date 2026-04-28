@@ -17,6 +17,16 @@ class TaskWorkspaceViolationError(ValueError):
     """Raised when a planned command escapes the task workspace."""
 
 
+_ALLOWED_ABSOLUTE_SINK_PATHS = frozenset(
+    {
+        "/dev/null",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/stdin",
+    }
+)
+
+
 def strip_heredoc_bodies(command_text: str) -> str:
     """Replace heredoc bodies so shell validation only sees the outer command."""
 
@@ -50,6 +60,8 @@ def normalize_path_reference(path_text: str, project_dir: Path) -> str:
         raise TaskWorkspaceViolationError(
             f"Home-directory path is not allowed in task workspace: {raw}"
         )
+    if raw in _ALLOWED_ABSOLUTE_SINK_PATHS:
+        return raw
 
     candidate = Path(raw)
     resolved = (
@@ -417,3 +429,66 @@ def normalize_plan_with_live_logging(
             metadata={"stage": stage},
         )
         raise
+
+
+def verify_workspace_contract(
+    *,
+    expected_root: Path,
+    task_dir: Path,
+    expected_task_subfolder: Optional[str] = None,
+    allow_project_root_task_dir: bool = False,
+    runtime_session_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate that orchestration and runtime agree on workspace locations."""
+
+    expected_root = Path(expected_root).resolve()
+    task_dir = Path(task_dir).resolve()
+    resolved_root = expected_root
+    reason: Optional[str] = None
+
+    if expected_task_subfolder and not allow_project_root_task_dir:
+        expected_task_dir = (expected_root / expected_task_subfolder).resolve()
+        if task_dir != expected_task_dir:
+            reason = (
+                "task workspace does not match locked task subfolder"
+                f" ({task_dir} != {expected_task_dir})"
+            )
+    elif allow_project_root_task_dir:
+        if task_dir != expected_root:
+            reason = (
+                "task workspace must execute in canonical project root"
+                f" ({task_dir} != {expected_root})"
+            )
+    elif not task_dir.is_relative_to(expected_root):
+        reason = (
+            "task workspace escapes configured project workspace"
+            f" ({task_dir} not under {expected_root})"
+        )
+    elif task_dir != expected_root:
+        resolved_root = task_dir.parent
+
+    runtime_session_context = runtime_session_context or {}
+    runtime_project_root = runtime_session_context.get("project_workspace_path")
+    if (
+        runtime_project_root
+        and Path(str(runtime_project_root)).resolve() != expected_root
+    ):
+        reason = (
+            "runtime project workspace path disagrees with configured project workspace"
+        )
+
+    runtime_task_dir = runtime_session_context.get(
+        "task_workspace_path"
+    ) or runtime_session_context.get("execution_cwd")
+    if runtime_task_dir and Path(str(runtime_task_dir)).resolve() != task_dir:
+        reason = (
+            "runtime task workspace path disagrees with orchestration task workspace"
+        )
+
+    return {
+        "ok": reason is None,
+        "expected_root": str(expected_root),
+        "resolved_root": str(resolved_root),
+        "task_dir": str(task_dir),
+        "reason": reason,
+    }

@@ -59,6 +59,20 @@ class PlannerService:
         combined = f"{task_prompt or ''}\n{project_context or ''}"
         lowered_context = (project_context or "").lower()
         lowered_task = (task_prompt or "").lower()
+        implementation_markers = (
+            "set up",
+            "setup",
+            "build",
+            "create",
+            "implement",
+            "frontend",
+            "backend",
+            "fastapi",
+            "node.js",
+            "react",
+            "vite",
+            "clean architecture",
+        )
         dense_context_markers = (
             "hydrated baseline sources available directly in this workspace",
             "canonical baseline available",
@@ -72,15 +86,20 @@ class PlannerService:
             "spec file",
             "unit test",
             "inspection",
-            "architecture",
             "analyze",
             "review",
+        )
+        task_looks_implementation_heavy = any(
+            marker in lowered_task for marker in implementation_markers
         )
         return (
             len(combined) > 8000
             or len(project_context or "") > 3500
             or any(marker in lowered_context for marker in dense_context_markers)
-            or any(marker in lowered_task for marker in compact_task_markers)
+            or (
+                any(marker in lowered_task for marker in compact_task_markers)
+                and not task_looks_implementation_heavy
+            )
         )
 
     @staticmethod

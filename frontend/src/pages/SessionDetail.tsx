@@ -523,6 +523,21 @@ export default function SessionDetail() {
         title = 'Task Completed';
         detail = messageText || `Task ${event.task_id} completed`;
         break;
+      case 'task_queued':
+        type = 'status';
+        title = 'Task Queued';
+        detail = messageText || 'Task queued and waiting for worker claim';
+        break;
+      case 'task_claimed':
+        type = 'task';
+        title = 'Task Claimed';
+        detail = messageText || 'Worker claimed queued task dispatch';
+        break;
+      case 'task_dispatch_rejected':
+        type = 'status';
+        title = 'Dispatch Rejected';
+        detail = messageText || detailToText(details.reason) || 'Stale or duplicate worker dispatch rejected';
+        break;
       case 'task_failed':
         type = 'error';
         title = 'Task Failed';
@@ -594,9 +609,15 @@ export default function SessionDetail() {
       case 'workspace_restore_skipped':
       case 'workspace_preserved':
       case 'resume_workspace_drift':
+      case 'workspace_contract_failed':
         type = 'checkpoint';
         title = humanizeToken(event.event_type);
         detail = messageText || reasonsText || title;
+        break;
+      case 'completion_evidence_failed':
+        type = 'error';
+        title = 'Completion Evidence Failed';
+        detail = messageText || reasonsText || 'Deterministic completion evidence check failed';
         break;
       case 'evaluator_result':
         type = 'validation';
@@ -722,12 +743,16 @@ export default function SessionDetail() {
       if (['tool_invoked', 'tool_failed'].includes(eventType)) return 'tool';
       if (
         [
+          'task_queued',
+          'task_claimed',
+          'task_dispatch_rejected',
           'checkpoint_saved',
           'checkpoint_loaded',
           'checkpoint_redirected',
           'workspace_restore_skipped',
           'workspace_preserved',
           'resume_workspace_drift',
+          'workspace_contract_failed',
         ].includes(eventType)
       ) {
         return 'workspace';
@@ -735,6 +760,7 @@ export default function SessionDetail() {
       if (
         [
           'validation_result',
+          'completion_evidence_failed',
           'health_score_updated',
           'divergence_detected',
           'intent_outcome_mismatch',

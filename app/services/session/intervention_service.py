@@ -28,6 +28,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -332,12 +333,30 @@ def _dispatch_resume(
             )
             return
         prompt = task.description or task.title or ""
+        session_task_link = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.session_id == session.id, SessionTask.task_id == task.id
+            )
+            .order_by(SessionTask.id.desc())
+            .first()
+        )
+        if session_task_link:
+            session_task_link.status = TaskStatus.PENDING
+            session_task_link.started_at = None
+            session_task_link.completed_at = None
+        task.status = TaskStatus.PENDING
+        task.started_at = None
+        task.completed_at = None
+        task.error_message = None
+        db.commit()
         execute_orchestration_task.delay(
             session_id=session.id,
             task_id=task.id,
             prompt=prompt,
             timeout_seconds=1800,
             resume_checkpoint_name=checkpoint_name,
+            expected_session_instance_id=session.instance_id,
         )
         session.status = "running"
         session.is_active = True

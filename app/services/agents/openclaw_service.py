@@ -1662,6 +1662,20 @@ class OpenClawSessionService:
             "task": task_context,
             "recent_logs": logs_data,
             "openclaw_session_key": self.openclaw_session_key,
+            "project_workspace_path": (
+                str(
+                    resolve_project_workspace_path(
+                        self.task_model.project.workspace_path,
+                        self.task_model.project.name,
+                    ).resolve()
+                )
+                if self.task_model
+                and self.task_model.project
+                and self.task_model.project.workspace_path
+                else None
+            ),
+            "task_workspace_path": self._resolve_execution_cwd(),
+            "execution_cwd": self._resolve_execution_cwd(),
         }
 
     async def invoke_prompt(
