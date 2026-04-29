@@ -28,7 +28,17 @@ ROOT_LEVEL_EXPECTED_DIRS = {
     "lib",
     "app",
     "spec",
+    "frontend",
+    "backend",
     ".github",
+}
+WORKFLOW_PHASE_ORDER = {
+    "fullstack_scaffold": [
+        "create_frontend_skeleton",
+        "create_backend_skeleton",
+        "wire_api_config",
+        "verify_dev_startup",
+    ]
 }
 
 
@@ -132,6 +142,24 @@ class ValidatorService:
         combined = " ".join(
             [task_prompt or "", title or "", description or "", execution_profile or ""]
         ).lower()
+        implementation_markers = (
+            "set up",
+            "setup",
+            "build",
+            "create",
+            "implement",
+            "frontend",
+            "backend",
+            "react",
+            "vite",
+            "node",
+            "node.js",
+            "fastapi",
+            "flask",
+            "django",
+        )
+        if any(marker in combined for marker in implementation_markers):
+            return "implementation"
 
         if execution_profile in {"review_only", "test_only"} or any(
             marker in combined
@@ -181,6 +209,63 @@ class ValidatorService:
             return False
         weak_markers = ("test -f", "test -d", "grep -q", "ls ", "echo ", "cat ")
         return any(marker in text for marker in weak_markers)
+
+    @staticmethod
+    def _normalize_failure_signature_parts(reasons: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for reason in reasons:
+            text = re.sub(r"\s+", " ", str(reason or "").strip().lower())
+            if text:
+                normalized.append(text)
+        return sorted(set(normalized))
+
+    @classmethod
+    def build_failure_signature(cls, reasons: List[str]) -> str:
+        parts = cls._normalize_failure_signature_parts(reasons)
+        return " | ".join(parts[:8])
+
+    @staticmethod
+    def _workspace_materialization_summary(project_dir: Path) -> Dict[str, int]:
+        file_count = 0
+        source_file_count = 0
+        config_file_count = 0
+        scaffold_only_count = 0
+
+        config_names = {
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "requirements.txt",
+            "pyproject.toml",
+            "tsconfig.json",
+            "vite.config.ts",
+            "vite.config.js",
+            "jest.config.js",
+            "vitest.config.ts",
+            ".gitignore",
+            ".env.example",
+        }
+        scaffold_only_names = {"package.json", "requirements.txt", "pyproject.toml"}
+
+        for path in project_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            relative_name = path.name.lower()
+            file_count += 1
+            if path.suffix.lower() in SOURCE_EXTENSIONS:
+                source_file_count += 1
+            if relative_name in config_names:
+                config_file_count += 1
+            if relative_name in scaffold_only_names:
+                scaffold_only_count += 1
+
+        return {
+            "file_count": file_count,
+            "source_file_count": source_file_count,
+            "config_file_count": config_file_count,
+            "scaffold_only_count": scaffold_only_count,
+        }
 
     @staticmethod
     def _plan_contains_stack_conflict(
@@ -408,6 +493,39 @@ class ValidatorService:
         return invalid_paths[:20]
 
     @staticmethod
+    def _plan_contains_unsafe_command_paths(
+        plan: List[Dict[str, Any]]
+    ) -> Dict[int, List[str]]:
+        """Detect parent-directory traversal in commands and step control fields."""
+
+        findings: Dict[int, List[str]] = {}
+        traversal_pattern = re.compile(
+            r"(?<![\w./-])\.\.(?:/[A-Za-z0-9._@:+-]+)+(?:/)?"
+        )
+
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
+            fragments: List[str] = []
+            step_text_parts = [
+                str(step.get("verification") or ""),
+                str(step.get("rollback") or ""),
+            ]
+            step_text_parts.extend(
+                str(command or "") for command in step.get("commands", []) or []
+            )
+
+            for text in step_text_parts:
+                for match in traversal_pattern.finditer(text):
+                    fragment = match.group(0)
+                    if fragment not in fragments:
+                        fragments.append(fragment)
+
+            if fragments:
+                findings[int(step_number)] = fragments[:6]
+
+        return findings
+
+    @staticmethod
     def _plan_nests_task_workspace(
         plan: List[Dict[str, Any]], project_dir: Optional[Path]
     ) -> List[int]:
@@ -522,6 +640,140 @@ class ValidatorService:
 
         return findings
 
+    @staticmethod
+    def _infer_workflow_phase_for_step(
+        step: Dict[str, Any], workflow_profile: Optional[str]
+    ) -> Optional[str]:
+        if workflow_profile != "fullstack_scaffold":
+            return None
+
+        text = " ".join(
+            [
+                str(step.get("description") or ""),
+                str(step.get("verification") or ""),
+                str(step.get("rollback") or ""),
+            ]
+            + [str(command or "") for command in step.get("commands", []) or []]
+            + [str(path or "") for path in step.get("expected_files", []) or []]
+        ).lower()
+        has_frontend_markers = any(
+            marker in text
+            for marker in (
+                "frontend",
+                "react",
+                "vite",
+                "src/main.tsx",
+                "src/app.tsx",
+                "package.json",
+                "tsconfig.json",
+                "npm install",
+            )
+        )
+        has_backend_markers = any(
+            marker in text
+            for marker in (
+                "fastapi",
+                "app/main.py",
+                "app/config.py",
+                "requirements.txt",
+                "pip install",
+                "pytest",
+                "backend",
+                ".venv/bin/python",
+            )
+        )
+
+        if any(
+            marker in text
+            for marker in (
+                "wire api config",
+                "proxy",
+                "cors",
+                "vite.config",
+                "api/client",
+                "localhost:8080",
+                "localhost:3000",
+                ".env",
+                "api config",
+            )
+        ):
+            return "wire_api_config"
+
+        if has_frontend_markers and not any(
+            marker in text
+            for marker in ("eslint", "vitest", "smoke check", "dev-ready")
+        ):
+            return "create_frontend_skeleton"
+
+        if has_backend_markers and not any(
+            marker in text
+            for marker in ("smoke check", "dev-ready", "health", "routes", "cors")
+        ):
+            return "create_backend_skeleton"
+
+        if any(
+            marker in text
+            for marker in (
+                "dev-ready",
+                "smoke check",
+                "health",
+                "routes",
+                "lint",
+                "vitest",
+                "eslint",
+                "type-check",
+                "tsc --noemit",
+                "build",
+                "verify_dev_startup",
+            )
+        ):
+            return "verify_dev_startup"
+
+        if has_frontend_markers:
+            return "create_frontend_skeleton"
+        if has_backend_markers:
+            return "create_backend_skeleton"
+
+        return None
+
+    @classmethod
+    def _workflow_phase_order_violations(
+        cls,
+        plan: List[Dict[str, Any]],
+        workflow_profile: Optional[str],
+    ) -> Dict[str, Any]:
+        phase_order = WORKFLOW_PHASE_ORDER.get(workflow_profile or "")
+        if not phase_order:
+            return {}
+
+        phase_positions = {phase: idx for idx, phase in enumerate(phase_order)}
+        seen_sequence: List[Dict[str, Any]] = []
+        last_position = -1
+        violating_steps: List[int] = []
+
+        for index, step in enumerate(plan, start=1):
+            phase = cls._infer_workflow_phase_for_step(step, workflow_profile)
+            if not phase:
+                continue
+            step_number = int(step.get("step_number", index))
+            position = phase_positions[phase]
+            seen_sequence.append({"step_number": step_number, "phase": phase})
+            if position < last_position:
+                violating_steps.append(step_number)
+            else:
+                last_position = position
+
+        missing_phases = [
+            phase
+            for phase in phase_order
+            if phase not in {entry["phase"] for entry in seen_sequence}
+        ]
+        return {
+            "phase_sequence": seen_sequence,
+            "violating_steps": violating_steps,
+            "missing_phases": missing_phases,
+        }
+
     @classmethod
     def validate_plan(
         cls,
@@ -534,6 +786,7 @@ class ValidatorService:
         title: Optional[str] = None,
         description: Optional[str] = None,
         validation_severity: str = "standard",
+        workflow_profile: Optional[str] = None,
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -581,6 +834,15 @@ class ValidatorService:
             )
             details["unsafe_expected_files"] = unsafe_paths
 
+        unsafe_command_paths = cls._plan_contains_unsafe_command_paths(plan)
+        if unsafe_command_paths:
+            bad_steps = sorted(unsafe_command_paths.keys())
+            rejected.append(
+                "Plan commands reference parent-directory paths outside the task workspace "
+                f"(steps: {bad_steps[:5]})"
+            )
+            details["unsafe_command_paths"] = unsafe_command_paths
+
         non_runnable_steps = cls._plan_contains_non_runnable_commands(plan)
         if non_runnable_steps:
             repairable.append(
@@ -615,6 +877,28 @@ class ValidatorService:
                 f"(steps: {bad_steps[:5]})"
             )
             details["duplicated_root_paths"] = duplicated_root_paths
+
+        workflow_phase_check = cls._workflow_phase_order_violations(
+            plan, workflow_profile
+        )
+        if workflow_phase_check:
+            details["workflow_phase_sequence"] = workflow_phase_check["phase_sequence"]
+            if workflow_phase_check["violating_steps"]:
+                repairable.append(
+                    "Plan violates required workflow phase order "
+                    f"for {workflow_profile} (steps: {workflow_phase_check['violating_steps'][:5]})"
+                )
+                details["workflow_phase_violations"] = workflow_phase_check[
+                    "violating_steps"
+                ]
+            if workflow_phase_check["missing_phases"]:
+                warnings.append(
+                    "Plan does not clearly cover every required workflow phase "
+                    f"for {workflow_profile} (missing: {workflow_phase_check['missing_phases'][:4]})"
+                )
+                details["missing_workflow_phases"] = workflow_phase_check[
+                    "missing_phases"
+                ]
 
         if profile == "implementation":
             weak_verification_steps = [
@@ -959,6 +1243,8 @@ class ValidatorService:
                 str(path.relative_to(project_dir)) for path in candidate_files[:20]
             ],
         }
+        workspace_summary = cls._workspace_materialization_summary(project_dir)
+        details["workspace_materialization"] = workspace_summary
         completion_evidence = completion_evidence or {}
         reported_changed_files = [
             str(path).strip()
@@ -1043,6 +1329,17 @@ class ValidatorService:
             else:
                 rejected.append("No core implementation source files were produced")
 
+        if profile == "implementation":
+            if workspace_summary["file_count"] <= 0:
+                rejected.append("Workspace is empty after completion")
+            elif (
+                workspace_summary["source_file_count"] <= 0
+                and workspace_summary["config_file_count"] > 0
+            ):
+                rejected.append(
+                    "Workspace contains only framework/config scaffolding without any implementation source files"
+                )
+
         workspace_consistency = workspace_consistency or {}
         plan_stack = cls._infer_stack_from_plan(plan)
         allows_multiple_stacks = cls._task_allows_multiple_stacks(
@@ -1071,6 +1368,12 @@ class ValidatorService:
                     target.append(
                         "Workspace contains mixed Python and Node/JS implementation artifacts for one task"
                     )
+
+        failure_signature = cls.build_failure_signature(
+            rejected + repairable + warnings
+        )
+        if failure_signature:
+            details["failure_signature"] = failure_signature
 
         return ValidationVerdict(
             stage="task_completion",

@@ -93,6 +93,7 @@ def test_workspace_inventory_summary_prefers_current_workspace_truth(tmp_path):
 
 def test_assembled_prompts_trim_dense_context_but_keep_workspace_inventory(tmp_path):
     ctx = _make_ctx(tmp_path)
+    ctx.workflow_profile = "fullstack_scaffold"
 
     planning_prompt = assemble_planning_prompt(
         ctx,
@@ -111,6 +112,11 @@ def test_assembled_prompts_trim_dense_context_but_keep_workspace_inventory(tmp_p
 
     assert "Current workspace inventory:" in planning_prompt
     assert "src/main.ts" in planning_prompt
+    assert "Workflow profile: fullstack_scaffold" in planning_prompt
+    assert "1. create_frontend_skeleton" in planning_prompt
+    assert "2. create_backend_skeleton" in planning_prompt
+    assert "3. wire_api_config" in planning_prompt
+    assert "4. verify_dev_startup" in planning_prompt
     assert len(planning_prompt) < 6200
     assert "Current workspace inventory:" in execution_prompt
     assert "tests/main.test.ts" in execution_prompt

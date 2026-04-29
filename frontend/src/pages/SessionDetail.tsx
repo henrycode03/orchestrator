@@ -72,6 +72,8 @@ interface InterventionToastState {
   message: string;
 }
 
+type CheckpointActionIntent = 'start' | 'resume';
+
 const MAX_TIMELINE_EVENTS = 150;
 
 export default function SessionDetail() {
@@ -92,6 +94,7 @@ export default function SessionDetail() {
   const [orchestrationEvents, setOrchestrationEvents] = useState<OrchestrationEvent[]>([]);
   const [checkpointCount, setCheckpointCount] = useState(0);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [recommendedCheckpointName, setRecommendedCheckpointName] = useState<string | null>(null);
   const [checkpointInspection, setCheckpointInspection] = useState<CheckpointInspection | null>(null);
   const [compareMatches, setCompareMatches] = useState<SessionDivergenceCompareResponse | null>(null);
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
@@ -99,6 +102,7 @@ export default function SessionDetail() {
   const [showInterventionForm, setShowInterventionForm] = useState(false);
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
   const [interventionToast, setInterventionToast] = useState<InterventionToastState | null>(null);
+  const [checkpointActionIntent, setCheckpointActionIntent] = useState<CheckpointActionIntent | null>(null);
   const [interventionPrompt, setInterventionPrompt] = useState('');
   const [interventionType, setInterventionType] = useState<'guidance' | 'approval'>('guidance');
   const [interventionSubmitting, setInterventionSubmitting] = useState(false);
@@ -826,9 +830,11 @@ export default function SessionDetail() {
       const checkpointsRes = await sessionsAPI.listCheckpoints(id);
       setCheckpointCount(checkpointsRes.data.total_count || 0);
       setCheckpoints(checkpointsRes.data.checkpoints || []);
+      setRecommendedCheckpointName(checkpointsRes.data.recommended_checkpoint_name || null);
     } catch {
       setCheckpointCount(0);
       setCheckpoints([]);
+      setRecommendedCheckpointName(null);
     }
   }, []);
 
@@ -1059,6 +1065,32 @@ export default function SessionDetail() {
     }
   }, [loadCheckpointCount, loadStateDiff, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
+  const getUsefulCheckpoints = useCallback(() => {
+    return [...checkpoints]
+      .filter((checkpoint) => {
+        if (checkpoint.resumable === false) {
+          return false;
+        }
+        if (checkpoint.recommended || checkpoint.name === recommendedCheckpointName) {
+          return true;
+        }
+        if ((checkpoint.completed_steps || 0) > 0 || (checkpoint.step_index || 0) > 0) {
+          return true;
+        }
+        if ((checkpoint.progress_score || 0) > 0) {
+          return true;
+        }
+        return checkpoint.restore_fidelity?.status === 'high' || checkpoint.restore_fidelity?.status === 'medium';
+      })
+      .sort((left, right) => {
+        if (left.recommended && !right.recommended) return -1;
+        if (!left.recommended && right.recommended) return 1;
+        if (left.name === recommendedCheckpointName && right.name !== recommendedCheckpointName) return -1;
+        if (left.name !== recommendedCheckpointName && right.name === recommendedCheckpointName) return 1;
+        return (right.progress_score || 0) - (left.progress_score || 0);
+      });
+  }, [checkpoints, recommendedCheckpointName]);
+
   useEffect(() => {
     if (!sessionId) {
       setError('Session ID not found');
@@ -1182,7 +1214,7 @@ export default function SessionDetail() {
     };
   }, [applyLogView, loadCheckpointCount, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
-  const handleStartSession = async () => {
+  const handleStartSessionFresh = async () => {
     if (!session || !sessionId) {
       console.error('Cannot start: session or sessionId missing');
       alert('Session not loaded properly');
@@ -1225,6 +1257,15 @@ export default function SessionDetail() {
       pushTimelineEvent(`Session start failed: ${errorMsg}`, 'ERROR');
       alert(`Failed to start session: ${errorMsg}`);
     }
+  };
+
+  const handleStartSession = async () => {
+    const usefulCheckpoints = getUsefulCheckpoints();
+    if (usefulCheckpoints.length > 0) {
+      setCheckpointActionIntent('start');
+      return;
+    }
+    await handleStartSessionFresh();
   };
 
   const handleStopSession = async (force: boolean = false) => {
@@ -1308,7 +1349,7 @@ export default function SessionDetail() {
     }
   };
 
-  const handleResumeSession = async () => {
+  const handleResumeSessionDefault = async () => {
     if (!session || !sessionId) return;
     const previousSession = session;
     const resumedAt = new Date().toISOString();
@@ -1342,6 +1383,40 @@ export default function SessionDetail() {
       console.error('Failed to resume session:', error);
       alert('Failed to resume session');
     }
+  };
+
+  const handleResumeSession = async () => {
+    const usefulCheckpoints = getUsefulCheckpoints();
+    if (usefulCheckpoints.length === 0) {
+      const recommendedCheckpoint = checkpoints.find(
+        (checkpoint) =>
+          checkpoint.name === recommendedCheckpointName && checkpoint.resumable !== false
+      );
+      if (recommendedCheckpoint) {
+        await replayCheckpoint(recommendedCheckpoint.name);
+        return;
+      }
+      const fallbackResumableCheckpoint = checkpoints.find(
+        (checkpoint) => checkpoint.resumable !== false
+      );
+      if (fallbackResumableCheckpoint) {
+        await replayCheckpoint(fallbackResumableCheckpoint.name);
+        return;
+      }
+      if (checkpointCount > 0) {
+        alert('Resume could not find a replayable checkpoint. Pick one from the inspector or start fresh.');
+        return;
+      }
+      await handleResumeSessionDefault();
+      return;
+    }
+
+    if (usefulCheckpoints.length === 1) {
+      await replayCheckpoint(usefulCheckpoints[0].name);
+      return;
+    }
+
+    setCheckpointActionIntent('resume');
   };
 
   const refreshTasksForSession = useCallback(async () => {
@@ -1659,6 +1734,83 @@ export default function SessionDetail() {
 
   return (
     <div className="p-6 space-y-6">
+      {checkpointActionIntent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 py-4">
+              <div>
+                <p className="text-sm font-semibold text-emerald-300">
+                  {checkpointActionIntent === 'resume' ? 'Choose A Resume Checkpoint' : 'Choose How To Restart'}
+                </p>
+                <p className="mt-1 text-sm text-slate-300">
+                  Only checkpoints with meaningful progress are shown here so we don&apos;t route back into empty or low-value replay states.
+                </p>
+              </div>
+              <button
+                onClick={() => setCheckpointActionIntent(null)}
+                className="rounded-md px-2 py-1 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              >
+                Close
+              </button>
+            </div>
+            <div className="max-h-[70vh] overflow-y-auto px-6 py-5 space-y-3">
+              {getUsefulCheckpoints().map((checkpoint) => (
+                <button
+                  key={checkpoint.name}
+                  onClick={async () => {
+                    setCheckpointActionIntent(null);
+                    await replayCheckpoint(checkpoint.name);
+                  }}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-left transition-colors hover:border-emerald-600 hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-white">
+                      {checkpoint.name}
+                      {checkpoint.recommended ? (
+                        <span className="ml-2 text-xs text-emerald-400">Recommended</span>
+                      ) : null}
+                    </p>
+                    <span className="text-xs text-slate-400">
+                      Score {checkpoint.progress_score || 0}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {formatDateTime(checkpoint.created_at)} • Step {checkpoint.step_index ?? 0} • Completed {checkpoint.completed_steps ?? 0}
+                  </p>
+                  {checkpoint.restore_fidelity ? (
+                    <p className="mt-2 text-xs text-slate-300">
+                      Replay fidelity: {checkpoint.restore_fidelity.status} ({checkpoint.restore_fidelity.score}/100)
+                    </p>
+                  ) : null}
+                  {checkpoint.resume_reason ? (
+                    <p className="mt-1 text-xs text-slate-400">{checkpoint.resume_reason}</p>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-800 px-6 py-4">
+              <button
+                onClick={() => setCheckpointActionIntent(null)}
+                className="rounded-lg px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+              >
+                Cancel
+              </button>
+              {checkpointActionIntent === 'start' && (
+                <button
+                  onClick={async () => {
+                    setCheckpointActionIntent(null);
+                    await handleStartSessionFresh();
+                  }}
+                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white transition-colors hover:bg-blue-500"
+                >
+                  Start Fresh Instead
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showAgentInterventionModal && pendingAgentInterventions.length > 0 && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
           <div className="w-full max-w-3xl rounded-2xl border border-amber-700/50 bg-slate-900 shadow-2xl">

@@ -231,6 +231,72 @@ def test_validator_flags_duplicated_root_paths_in_plan_commands_and_expected_fil
     }
 
 
+def test_validator_rejects_parent_directory_traversal_in_plan_commands():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Verify backend toolchain",
+                "commands": ["cd ../backend && npx tsx --version"],
+                "verification": "cd ../backend && test -f package.json",
+                "rollback": None,
+                "expected_files": ["backend/package.json"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Set up frontend and backend in one workspace",
+        execution_profile="full_lifecycle",
+    )
+
+    assert verdict.rejected is True
+    assert "parent-directory paths outside the task workspace" in " ".join(
+        verdict.reasons
+    )
+    assert verdict.details["unsafe_command_paths"] == {1: ["../backend"]}
+
+
+def test_validator_flags_fullstack_workflow_phase_order_drift():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Install backend Python dependencies and verify core imports",
+                "commands": [".venv/bin/pip install -r requirements.txt"],
+                "verification": ".venv/bin/python -c \"from app.main import app; print('backend imports OK')\"",
+                "rollback": "rm -rf .venv",
+                "expected_files": ["app/main.py", "requirements.txt"],
+            },
+            {
+                "step_number": 2,
+                "description": "Install frontend Node dependencies and run TypeScript type-check",
+                "commands": [
+                    "cd frontend && npm install",
+                    "cd frontend && npx tsc --noEmit",
+                ],
+                "verification": "cd frontend && npx tsc --noEmit",
+                "rollback": "cd frontend && rm -rf node_modules",
+                "expected_files": ["frontend/package.json", "frontend/src/main.tsx"],
+            },
+            {
+                "step_number": 3,
+                "description": "Wire API config: verify frontend proxy target matches backend port and CORS allows frontend origin",
+                "commands": ['grep "localhost:8080" frontend/vite.config.ts'],
+                "verification": ".venv/bin/python -c \"from app.config import Settings; print('cors aligned')\"",
+                "rollback": None,
+                "expected_files": ["frontend/vite.config.ts", "app/config.py"],
+            },
+        ],
+        output_text="[]",
+        task_prompt="Set up frontend and backend with clean architecture in one workspace",
+        execution_profile="full_lifecycle",
+        workflow_profile="fullstack_scaffold",
+    )
+
+    assert verdict.repairable is True
+    assert "workflow phase order" in " ".join(verdict.reasons)
+    assert verdict.details["workflow_phase_violations"] == [2]
+
+
 def test_policy_profile_lookup_falls_back_to_balanced():
     profile = get_policy_profile("does-not-exist")
 

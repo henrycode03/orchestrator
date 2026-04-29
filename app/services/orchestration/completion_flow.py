@@ -499,6 +499,32 @@ def _extract_completion_repair_step(
     return None
 
 
+def _completion_failure_signature(completion_validation: Any) -> str:
+    reasons = list(getattr(completion_validation, "reasons", []) or [])
+    details = getattr(completion_validation, "details", {}) or {}
+    existing = str(details.get("failure_signature") or "").strip()
+    if existing:
+        return existing
+    return ValidatorService.build_failure_signature(reasons)
+
+
+def _repeats_prior_completion_failure(
+    orchestration_state: Any, completion_validation: Any
+) -> bool:
+    current_signature = _completion_failure_signature(completion_validation)
+    if not current_signature:
+        return False
+    prior_signature = str(
+        (
+            (getattr(orchestration_state, "last_completion_validation", {}) or {})
+            .get("details", {})
+            .get("failure_signature")
+        )
+        or ""
+    ).strip()
+    return bool(prior_signature and prior_signature == current_signature)
+
+
 def _attempt_completion_repair(
     *,
     ctx: OrchestrationRunContext,
@@ -514,6 +540,37 @@ def _attempt_completion_repair(
 
     if orchestration_state.completion_repair_attempts >= ctx.completion_repair_budget:
         return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
+    if (
+        orchestration_state.completion_repair_attempts > 0
+        and _repeats_prior_completion_failure(
+            orchestration_state, completion_validation
+        )
+    ):
+        repeated_signature = _completion_failure_signature(completion_validation)
+        emit_live(
+            "ERROR",
+            "[ORCHESTRATION] Completion validation failed with the same root-cause signature after a prior repair; stopping instead of looping",
+            metadata={
+                "phase": "completion_repair",
+                "failure_signature": repeated_signature,
+                "attempt": orchestration_state.completion_repair_attempts,
+            },
+        )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_REJECTED,
+            details={
+                "phase": "completion_repair",
+                "reason": "repeat_completion_failure_signature",
+                "failure_signature": repeated_signature,
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": "repeat_completion_failure_signature",
+        }
 
     orchestration_state.completion_repair_attempts += 1
     next_step_number = len(orchestration_state.plan) + 1

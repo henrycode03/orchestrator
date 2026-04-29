@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.models import Project, Task, TaskStatus
+from app.services.orchestration.workflow_profiles import WORKFLOW_PROFILES
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -79,6 +80,55 @@ def should_force_review_execution_profile(
         "codebase walkthrough",
     )
     return any(marker in combined for marker in review_markers)
+
+
+def get_workflow_profile(
+    execution_profile: str,
+    title: Optional[str],
+    description: Optional[str],
+) -> str:
+    """Resolve task into a workflow-phase profile."""
+
+    if execution_profile == "review_only":
+        return "review_only"
+    if execution_profile == "debug_only":
+        return "debug_only"
+
+    combined = " ".join([title or "", description or ""]).lower()
+    has_frontend = any(
+        marker in combined
+        for marker in ("frontend", "react", "vite", "next.js", "nextjs")
+    )
+    has_backend = any(
+        marker in combined
+        for marker in (
+            "backend",
+            "fastapi",
+            "django",
+            "flask",
+            "express",
+            "node.js",
+            "api",
+        )
+    )
+    scaffold_markers = (
+        "set up",
+        "setup",
+        "scaffold",
+        "bootstrap",
+        "create",
+        "build",
+        "clean architecture",
+    )
+    if any(marker in combined for marker in scaffold_markers):
+        if has_frontend and has_backend:
+            return "fullstack_scaffold"
+        if has_frontend:
+            return "frontend_only"
+        if has_backend:
+            return "backend_only"
+
+    return "default" if "default" in WORKFLOW_PROFILES else execution_profile
 
 
 def get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:

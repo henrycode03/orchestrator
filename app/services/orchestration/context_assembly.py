@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
+from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
@@ -341,6 +342,10 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
         project_context=project_context,
         project_dir=prompt_project_dir,
         execution_profile=ctx.execution_profile,
+        workflow_profile=getattr(ctx, "workflow_profile", "default"),
+        workflow_phases=get_workflow_phases(
+            getattr(ctx, "workflow_profile", "default")
+        ),
     )
     return render_adapted_runtime_prompt(
         ctx.db,
@@ -354,6 +359,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
         context={
             "Project Directory": prompt_project_dir,
             "Execution Profile": ctx.execution_profile,
+            "Workflow Profile": getattr(ctx, "workflow_profile", "default"),
         },
         expected_output="JSON array of orchestration step objects.",
     )

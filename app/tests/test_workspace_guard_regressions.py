@@ -72,3 +72,50 @@ def test_normalize_write_pseudo_command_allows_http_route_literals(tmp_path):
 
     assert normalized.startswith("write apps/backend/src/index.ts:")
     assert "GET /health" in normalized
+
+
+def test_normalize_step_coerces_verification_and_rollback_lists(tmp_path):
+    project_dir = tmp_path / "skillsync"
+    project_dir.mkdir(parents=True)
+    logger = logging.getLogger("workspace-guard-test")
+
+    step = {
+        "step_number": 3,
+        "description": "Verify frontend setup",
+        "commands": ["mkdir -p frontend/src && touch frontend/src/main.tsx"],
+        "verification": ["test -f frontend/src/main.tsx", "echo ready"],
+        "rollback": ["rm -f frontend/src/main.tsx", "rmdir frontend/src || true"],
+        "expected_files": ["frontend/src/main.tsx"],
+    }
+
+    normalized = normalize_step(step, project_dir, logger, step_index=3)
+
+    assert normalized["verification"] == "test -f frontend/src/main.tsx && echo ready"
+    assert (
+        normalized["rollback"]
+        == "rm -f frontend/src/main.tsx && rmdir frontend/src || true"
+    )
+
+
+def test_normalize_step_strips_transient_expected_files(tmp_path):
+    project_dir = tmp_path / "skillsync"
+    project_dir.mkdir(parents=True)
+    logger = logging.getLogger("workspace-guard-test")
+
+    step = {
+        "step_number": 4,
+        "description": "Verify dev setup",
+        "commands": ["echo ok"],
+        "verification": "echo ok",
+        "rollback": None,
+        "expected_files": [
+            "app/main.py",
+            ".venv/bin/python",
+            "frontend/dist/index.html",
+            "frontend/src/main.tsx",
+        ],
+    }
+
+    normalized = normalize_step(step, project_dir, logger, step_index=4)
+
+    assert normalized["expected_files"] == ["app/main.py", "frontend/src/main.tsx"]

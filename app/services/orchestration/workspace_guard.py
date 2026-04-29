@@ -25,6 +25,17 @@ _ALLOWED_ABSOLUTE_SINK_PATHS = frozenset(
         "/dev/stdin",
     }
 )
+_TRANSIENT_EXPECTED_FILE_PARTS = frozenset(
+    {
+        ".venv",
+        "venv",
+        "node_modules",
+        "dist",
+        "build",
+        "__pycache__",
+        ".pytest_cache",
+    }
+)
 
 
 def strip_heredoc_bodies(command_text: str) -> str:
@@ -199,7 +210,10 @@ def normalize_command(command: str, project_dir: Path) -> str:
         if target in (".", "./"):
             current = remainder
         else:
-            current = f"cd {shlex.quote(target)} && {remainder}"
+            rewritten = f"cd {shlex.quote(target)} && {remainder}"
+            if rewritten == current:
+                break
+            current = rewritten
 
     abs_path_matches = []
     path_scan_target = strip_heredoc_bodies(current)
@@ -265,7 +279,19 @@ def normalize_expected_files(
             continue
         try:
             normalized = normalize_path_reference(raw_file_path, project_dir)
-            normalized_files.append("." if normalized == "." else normalized)
+            normalized = "." if normalized == "." else normalized
+            if any(
+                part in _TRANSIENT_EXPECTED_FILE_PARTS
+                for part in Path(normalized).parts
+            ):
+                step_label = f"step {step_index} " if step_index is not None else ""
+                logger_obj.warning(
+                    "[ISOLATION] Skipping %sexpected_files transient artifact: %s",
+                    step_label,
+                    raw_file_path,
+                )
+                continue
+            normalized_files.append(normalized)
         except TaskWorkspaceViolationError as exc:
             step_label = f"step {step_index} " if step_index is not None else ""
             logger_obj.warning(
@@ -275,6 +301,18 @@ def normalize_expected_files(
                 exc,
             )
     return normalized_files
+
+
+def _coerce_optional_command_field(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        if not parts:
+            return None
+        return " && ".join(parts)
+    rendered = str(value).strip()
+    return rendered or None
 
 
 def normalize_step(
@@ -305,7 +343,7 @@ def normalize_step(
             ) from exc
     normalized_step["commands"] = normalized_commands
 
-    raw_verification = str(step.get("verification") or "").strip()
+    raw_verification = _coerce_optional_command_field(step.get("verification"))
     if raw_verification:
         try:
             normalized_step["verification"] = normalize_command(
@@ -319,7 +357,7 @@ def normalize_step(
     else:
         normalized_step["verification"] = None
 
-    raw_rollback = str(step.get("rollback") or "").strip()
+    raw_rollback = _coerce_optional_command_field(step.get("rollback"))
     if raw_rollback:
         try:
             normalized_step["rollback"] = normalize_command(raw_rollback, project_dir)

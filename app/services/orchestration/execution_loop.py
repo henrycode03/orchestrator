@@ -1049,6 +1049,7 @@ def execute_step_loop(
                     title=task.title if task else None,
                     description=task.description if task else None,
                     validation_severity=ctx.validation_severity,
+                    workflow_profile=getattr(ctx, "workflow_profile", None),
                 )
                 record_validation_verdict(
                     db,

@@ -58,16 +58,45 @@ def test_qwen_local_prompt_profile_enforces_array_only_output():
     assert "Do not wrap it in an object" in prompt
 
 
+def test_minimal_planning_prompt_keeps_workflow_rules_for_existing_fullstack_workspace():
+    prompt = PlannerService.build_minimal_planning_prompt(
+        "Bring the existing frontend and backend to dev-ready state",
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        workflow_profile="fullstack_scaffold",
+        workflow_phases=[
+            "create_frontend_skeleton",
+            "create_backend_skeleton",
+            "wire_api_config",
+            "verify_dev_startup",
+        ],
+        workspace_has_existing_files=True,
+    )
+
+    assert "Workflow profile: fullstack_scaffold" in prompt
+    assert "Extend or verify existing files instead of re-scaffolding" in prompt
+    assert "Never use parent-directory traversal like `../backend`" in prompt
+    assert "`verification` must be a single shell string or null" in prompt
+    assert "Do not use background processes" in prompt
+
+
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
     prompt = PlannerService.build_planning_repair_prompt(
         "Build frontend and backend scaffolding",
         malformed_output='[{"step_number":1,"commands":["mkdir -p frontend/src/frontend/src"]}]',
         project_dir=__import__("pathlib").Path("/tmp/project"),
+        workflow_profile="fullstack_scaffold",
+        workflow_phases=[
+            "create_frontend_skeleton",
+            "create_backend_skeleton",
+            "wire_api_config",
+            "verify_dev_startup",
+        ],
     )
 
     assert "frontend/src/frontend/src" in prompt
     assert "backend/src/backend/src" in prompt
     assert "rooted exactly once" in prompt
+    assert "Never use parent-directory traversal like `../backend`" in prompt
 
 
 def test_local_qwen_single_step_plan_is_routed_to_repair():

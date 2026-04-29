@@ -19,6 +19,34 @@ class PlannerService:
     """Planning-stage fallback and repair helpers."""
 
     @staticmethod
+    def _render_workflow_guidance(
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
+    ) -> str:
+        phases = workflow_phases or []
+        lines: List[str] = []
+        if phases:
+            lines.append(f"Workflow profile: {workflow_profile}")
+            lines.append("Follow this phase order exactly:")
+            lines.extend(f"{idx}. {phase}" for idx, phase in enumerate(phases, start=1))
+            lines.append("Keep steps grouped inside this sequence. Do not skip ahead.")
+        if workspace_has_existing_files:
+            lines.append(
+                "Workspace already contains implementation files. Extend or verify existing files instead of re-scaffolding from scratch."
+            )
+        if workflow_profile == "fullstack_scaffold" or (
+            "create_frontend_skeleton" in phases and "create_backend_skeleton" in phases
+        ):
+            lines.append(
+                "Keep frontend work under `frontend/` and backend work under `app/` or `backend/` inside this same workspace."
+            )
+            lines.append(
+                "Never use parent-directory traversal like `../backend` and never create sibling project folders."
+            )
+        return "\n".join(lines)
+
+    @staticmethod
     def select_prompt_profile(
         backend_name: Optional[str],
         model_family: Optional[str],
@@ -133,13 +161,24 @@ class PlannerService:
         task_description: str,
         project_dir: Path,
         prompt_profile: str = "default",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
         display_project_dir = render_workspace_path_for_prompt(project_dir)
+        workflow_guidance = PlannerService._render_workflow_guidance(
+            workflow_profile=workflow_profile,
+            workflow_phases=workflow_phases,
+            workspace_has_existing_files=workspace_has_existing_files,
+        )
         prompt = f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
 
 Task:
 {concise_task}
+
+Workflow:
+{workflow_guidance or "No explicit workflow phases. Use the smallest valid sequential plan."}
 
 Rules:
 1. Assume working directory is {display_project_dir}
@@ -147,11 +186,16 @@ Rules:
 3. Do not use absolute paths, .., or ~
 4. Return 3 to 6 small sequential steps
 5. Each step must include: step_number, description, commands, verification, rollback, expected_files
-6. expected_files must be relative paths or []
-7. Do not use `cat > file <<EOF`, heredocs, or multi-line inline file creation in planning output
-8. Do not join separate shell commands with commas
-9. Prefer mkdir/touch/package-manager/editor-friendly commands and one-file-at-a-time edits
-10. Output JSON array only
+6. `commands` must be an array of strings
+7. `verification` must be a single shell string or null
+8. `rollback` must be a single shell string or null
+9. expected_files must be relative file paths or []
+10. Do not use `cat > file <<EOF`, heredocs, or multi-line inline file creation in planning output
+11. Do not join separate shell commands with commas
+12. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+13. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
+14. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
+15. Output JSON array only
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -160,15 +204,25 @@ Rules:
         task_description: str,
         project_dir: Path,
         prompt_profile: str = "default",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:700]
         display_project_dir = render_workspace_path_for_prompt(project_dir)
+        workflow_guidance = PlannerService._render_workflow_guidance(
+            workflow_profile=workflow_profile,
+            workflow_phases=workflow_phases,
+            workspace_has_existing_files=workspace_has_existing_files,
+        )
         prompt = f"""Return JSON array only. No prose.
 
 Task:
 {concise_task}
 
 Working directory: {display_project_dir}
+Workflow:
+{workflow_guidance or "No explicit workflow phases."}
 
 Requirements:
 1. 2 to 5 steps only
@@ -176,7 +230,9 @@ Requirements:
 3. No heredocs, no long inline source dumps, no absolute paths, no .., no ~
 4. Each step must contain exactly these keys:
    step_number, description, commands, verification, rollback, expected_files
-5. Keep each command short and machine-runnable
+5. `verification` and `rollback` must each be one shell string or null
+6. No background processes or long-running servers
+7. Keep each command short and machine-runnable
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -192,10 +248,18 @@ Requirements:
         project_dir: Path,
         rejection_reasons: Optional[List[str]] = None,
         prompt_profile: str = "default",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:2000]
         broken_output = (malformed_output or "")[:8000]
         display_project_dir = render_workspace_path_for_prompt(project_dir)
+        workflow_guidance = PlannerService._render_workflow_guidance(
+            workflow_profile=workflow_profile,
+            workflow_phases=workflow_phases,
+            workspace_has_existing_files=workspace_has_existing_files,
+        )
         structured_feedback = ""
         if rejection_reasons:
             reason_lines = "\n".join(
@@ -214,6 +278,9 @@ Task:
 Working directory:
 {display_project_dir}
 
+Workflow:
+{workflow_guidance or "No explicit workflow phases."}
+
 Malformed planning output:
 {broken_output}
 {structured_feedback}
@@ -222,15 +289,19 @@ Rules:
 1. Return a JSON array only
 2. Keep 3 to 8 sequential steps
 3. Each step must include: step_number, description, commands, verification, rollback, expected_files
-4. Use relative paths only in shell commands and expected_files
-5. Do not use absolute paths, .., or ~
-6. Do not use heredocs, `cat > file <<EOF`, or multi-line inline file dumps in the repaired plan
-7. Do not join separate shell commands with commas
-8. Prefer short setup/edit commands over dumping full source files in planning output
-9. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
-10. expected_files must be a JSON array
-11. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
-12. Paths must be rooted exactly once from the canonical project workspace
+4. `commands` must be an array of strings
+5. `verification` must be one shell string or null
+6. `rollback` must be one shell string or null
+7. Use relative paths only in shell commands and expected_files
+8. Do not use absolute paths, .., or ~
+9. Do not use heredocs, `cat > file <<EOF`, or multi-line inline file dumps in the repaired plan
+10. Do not join separate shell commands with commas
+11. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+12. Prefer short setup/edit commands over dumping full source files in planning output
+13. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
+14. expected_files must be a JSON array of relative file paths
+15. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
+16. Paths must be rooted exactly once from the canonical project workspace
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -246,6 +317,9 @@ Rules:
         reason: str,
         rejection_reasons: Optional[List[str]] = None,
         prompt_profile: str = "default",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
     ) -> Dict[str, Any]:
         logger.warning(
             "[ORCHESTRATION] Planning output was not machine-parseable; "
@@ -285,6 +359,9 @@ Rules:
                         task_description,
                         project_dir,
                         prompt_profile=prompt_profile,
+                        workflow_profile=workflow_profile,
+                        workflow_phases=workflow_phases,
+                        workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=minimal_timeout,
                 )
@@ -330,6 +407,9 @@ Rules:
                         task_description,
                         project_dir,
                         prompt_profile=prompt_profile,
+                        workflow_profile=workflow_profile,
+                        workflow_phases=workflow_phases,
+                        workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                 )
@@ -348,6 +428,9 @@ Rules:
         reason: str,
         rejection_reasons: Optional[List[str]] = None,
         prompt_profile: str = "default",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
     ) -> Dict[str, Any]:
         logger.warning(
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
@@ -389,6 +472,9 @@ Rules:
                         project_dir,
                         rejection_reasons=rejection_reasons,
                         prompt_profile=prompt_profile,
+                        workflow_profile=workflow_profile,
+                        workflow_phases=workflow_phases,
+                        workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=repair_timeout,
                 )
@@ -434,6 +520,9 @@ Rules:
                         task_description,
                         project_dir,
                         prompt_profile=prompt_profile,
+                        workflow_profile=workflow_profile,
+                        workflow_phases=workflow_phases,
+                        workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                 )

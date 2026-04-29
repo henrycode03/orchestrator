@@ -30,6 +30,7 @@ WORKSPACE_RESTORE_ALLOWED_REASON_MARKERS = (
     "planning parse error",  # planning_flow: "planning parse error"
     "planning validation failure",  # planning_flow: "planning validation failure"
     "truncated multi-step plan",  # planning_flow: "truncated multi-step plan"
+    "planning circuit breaker opened",  # planning_flow: circuit breaker abort
     # Execution failures — restore so half-written files don't persist
     "max step attempts reached",
     "repeated tool/path failures",

@@ -318,6 +318,9 @@ class PromptTemplates:
 **Execution Profile Rules:**
 {execution_profile_rules}
 
+**Workflow Phases:**
+{workflow_guidance}
+
 **Output (JSON ONLY):**
 [
   {{
@@ -823,6 +826,8 @@ Examples:
         workspace_root: Optional[str] = None,
         project_dir: Optional[str] = None,
         execution_profile: str = "full_lifecycle",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -855,6 +860,22 @@ Examples:
         compact_project_context = (
             project_context or "No additional context provided."
         )[:2200]
+        workflow_phases = workflow_phases or []
+        workflow_guidance = (
+            "No explicit phase structure. Use current default planning behavior."
+        )
+        if workflow_phases:
+            phase_lines = "\n".join(
+                f"{idx}. {phase}" for idx, phase in enumerate(workflow_phases, start=1)
+            )
+            workflow_guidance = (
+                f"Workflow profile: {workflow_profile}\n"
+                "Plan must respect this phase order:\n"
+                f"{phase_lines}\n"
+                "Keep steps grouped inside this sequence. Do not skip ahead.\n"
+                "If the task includes frontend and backend work, create both as subdirectories inside the current task workspace root "
+                "(for example `frontend/...` and `backend/...`). Never use parent-directory traversal like `../backend` or create sibling project folders."
+            )
 
         context = {
             "task_description": compact_task_description,
@@ -865,6 +886,7 @@ Examples:
             "project_context": compact_project_context,
             "workspace_root": ws_root,
             "project_dir": proj_dir,
+            "workflow_guidance": workflow_guidance,
         }
 
         return cls.render("task_planning", **context)

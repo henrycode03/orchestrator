@@ -22,11 +22,20 @@ from app.services.orchestration.persistence import (
     write_orchestration_state_snapshot,
 )
 from app.services.orchestration.planner import PlannerService
-from app.services.orchestration.policy import clamp_planning_timeout
+from app.services.orchestration.policy import (
+    PLANNING_REPAIR_TIMEOUT_SECONDS,
+    clamp_planning_timeout,
+)
+from app.services.orchestration.task_rules import get_workflow_profile
+from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
+
+# Circuit breaker: abort planning after this many consecutive validation failures
+# to prevent infinite retry loops that hang the session.
+MAX_PLANNING_RETRIES = 3
 
 
 def _should_repair_truncated_single_step_plan(
@@ -43,6 +52,19 @@ def _should_repair_truncated_single_step_plan(
         and isinstance(extracted_plan, list)
         and len(extracted_plan) == 1
     )
+
+
+class _PlanningRetryState:
+    """Track retry/repair attempts to implement circuit breaking."""
+
+    def __init__(self):
+        self.consecutive_failures = 0
+        self.minimal_prompt_used = False
+        self.repair_prompt_used = False
+
+    @property
+    def circuit_open(self) -> bool:
+        return self.consecutive_failures >= MAX_PLANNING_RETRIES
 
 
 def execute_planning_phase(
@@ -87,6 +109,13 @@ def execute_planning_phase(
     except Exception:
         pass
 
+    ctx.workflow_profile = get_workflow_profile(
+        ctx.execution_profile,
+        getattr(ctx.task, "title", None),
+        getattr(ctx.task, "description", None),
+    )
+    ctx.workflow_phases = get_workflow_phases(ctx.workflow_profile)
+    ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
     planning_prompt = (
         assemble_planning_prompt(ctx, workspace_review) if ctx.runtime_service else None
     )
@@ -160,6 +189,11 @@ def execute_planning_phase(
             emit_live=ctx.emit_live,
             reason="dense_planning_context",
             prompt_profile=prompt_profile,
+            workflow_profile=getattr(ctx, "workflow_profile", "default"),
+            workflow_phases=getattr(ctx, "workflow_phases", []),
+            workspace_has_existing_files=getattr(
+                ctx, "workspace_has_existing_files", False
+            ),
         )
     else:
         planning_result = asyncio.run(
@@ -209,13 +243,52 @@ def execute_planning_phase(
             emit_live=ctx.emit_live,
             reason=(planning_result.get("error") or initial_output_text),
             prompt_profile=prompt_profile,
+            workflow_profile=getattr(ctx, "workflow_profile", "default"),
+            workflow_phases=getattr(ctx, "workflow_phases", []),
+            workspace_has_existing_files=getattr(
+                ctx, "workspace_has_existing_files", False
+            ),
         )
         used_minimal_planning_prompt = True
 
     try:
-        used_planning_repair_prompt = False
+        retry_state = _PlanningRetryState()
         while True:
+            # Circuit breaker: abort after too many consecutive validation failures
+            if retry_state.circuit_open:
+                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                ctx.orchestration_state.abort_reason = (
+                    f"Planning failed {MAX_PLANNING_RETRIES} consecutive times; "
+                    "circuit breaker opened to prevent infinite retry loop"
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="ERROR",
+                    phase="planning",
+                    message=(
+                        f"[ORCHESTRATION] Planning circuit breaker opened after "
+                        f"{MAX_PLANNING_RETRIES} consecutive failures"
+                    ),
+                    details={"reason": "planning_circuit_breaker_opened"},
+                )
+                ctx.task.status = TaskStatus.FAILED
+                ctx.task.error_message = (
+                    f"Planning failed {MAX_PLANNING_RETRIES} consecutive times. "
+                    "The agent was unable to produce a valid execution plan."
+                )
+                ctx.db.commit()
+                if ctx.restore_workspace_snapshot_if_needed:
+                    ctx.restore_workspace_snapshot_if_needed(
+                        "planning circuit breaker opened"
+                    )
+                return {"status": "failed", "reason": "planning_circuit_breaker_opened"}
+
             output_result = planning_result.get("output", {})
+            ctx.logger.info(
+                "[ORCHESTRATION] Attempting JSON parse (failure_count=%d)",
+                retry_state.consecutive_failures,
+            )
             output_text = __coerce_output_text(
                 ctx=ctx,
                 planning_result=planning_result,
@@ -226,6 +299,10 @@ def execute_planning_phase(
             success, plan_data, strategy_info = ctx.error_handler.attempt_json_parsing(
                 output_text, context="planning"
             )
+            if not success:
+                ctx.logger.warning(
+                    "[ORCHESTRATION] JSON parse failed: %s", strategy_info
+                )
 
             if (
                 PlannerService.should_retry_with_minimal_prompt(
@@ -238,17 +315,21 @@ def execute_planning_phase(
                     f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
                 )
 
-            if not success and not used_minimal_planning_prompt:
+            if not success and not retry_state.minimal_prompt_used:
+                ctx.logger.info(
+                    "[ORCHESTRATION] JSON parse failed, switching to minimal prompt"
+                )
                 planning_result = __retry_with_minimal_prompt(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
                     reason=f"json_parse_failed: {output_text[:240]}",
                     prompt_profile=prompt_profile,
                 )
-                used_minimal_planning_prompt = True
+                retry_state.minimal_prompt_used = True
+                retry_state.consecutive_failures += 1
                 continue
 
-            if not success and not used_planning_repair_prompt:
+            if not success and not retry_state.repair_prompt_used:
                 emit_phase_event(
                     ctx.orchestration_state,
                     ctx.emit_live,
@@ -262,6 +343,9 @@ def execute_planning_phase(
                         "output_chars": len(output_text or ""),
                     },
                 )
+                ctx.logger.info(
+                    "[ORCHESTRATION] Calling repair pass for planning output"
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -269,7 +353,8 @@ def execute_planning_phase(
                     reason=f"json_parse_failed_after_minimal: {strategy_info}",
                     prompt_profile=prompt_profile,
                 )
-                used_planning_repair_prompt = True
+                retry_state.repair_prompt_used = True
+                retry_state.consecutive_failures += 1
                 continue
 
             if not success:
@@ -298,17 +383,24 @@ def execute_planning_phase(
                 return {"status": "failed", "reason": "planning_json_error"}
 
             extracted_plan = extract_plan_steps(plan_data)
-            if extracted_plan is None and not used_minimal_planning_prompt:
+            if extracted_plan is None and not retry_state.minimal_prompt_used:
+                ctx.logger.info(
+                    "[ORCHESTRATION] Plan extraction failed, switching to minimal prompt"
+                )
                 planning_result = __retry_with_minimal_prompt(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
                     reason=f"unexpected_plan_shape: {str(plan_data)[:240]}",
                     prompt_profile=prompt_profile,
                 )
-                used_minimal_planning_prompt = True
+                retry_state.minimal_prompt_used = True
+                retry_state.consecutive_failures += 1
                 continue
 
-            if extracted_plan is None and not used_planning_repair_prompt:
+            if extracted_plan is None and not retry_state.repair_prompt_used:
+                ctx.logger.info(
+                    "[ORCHESTRATION] Plan extraction failed, calling repair"
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -316,12 +408,13 @@ def execute_planning_phase(
                     reason="unexpected_plan_shape_after_minimal",
                     prompt_profile=prompt_profile,
                 )
-                used_planning_repair_prompt = True
+                retry_state.repair_prompt_used = True
+                retry_state.consecutive_failures += 1
                 continue
 
             if (
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
-                and not used_minimal_planning_prompt
+                and not retry_state.minimal_prompt_used
             ):
                 if _should_repair_truncated_single_step_plan(
                     prompt_profile=prompt_profile,
@@ -350,7 +443,8 @@ def execute_planning_phase(
                         reason="truncated_multistep_plan_detected",
                         prompt_profile=prompt_profile,
                     )
-                    used_planning_repair_prompt = True
+                    retry_state.repair_prompt_used = True
+                    retry_state.consecutive_failures += 1
                     continue
                 else:
                     planning_result = __retry_with_minimal_prompt(
@@ -359,12 +453,13 @@ def execute_planning_phase(
                         reason="truncated_multistep_plan_detected",
                         prompt_profile=prompt_profile,
                     )
-                    used_minimal_planning_prompt = True
+                    retry_state.minimal_prompt_used = True
+                    retry_state.consecutive_failures += 1
                     continue
 
             if (
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
-                and not used_planning_repair_prompt
+                and not retry_state.repair_prompt_used
             ):
                 planning_result = __repair_planning_output(
                     ctx=ctx,
@@ -373,7 +468,8 @@ def execute_planning_phase(
                     reason="truncated_multistep_plan_after_minimal",
                     prompt_profile=prompt_profile,
                 )
-                used_planning_repair_prompt = True
+                retry_state.repair_prompt_used = True
+                retry_state.consecutive_failures += 1
                 continue
 
             if looks_like_truncated_multistep_plan(output_text, extracted_plan):
@@ -433,6 +529,7 @@ def execute_planning_phase(
                 title=ctx.task.title if ctx.task else None,
                 description=ctx.task.description if ctx.task else None,
                 validation_severity=ctx.validation_severity,
+                workflow_profile=getattr(ctx, "workflow_profile", None),
             )
             record_validation_verdict(
                 ctx.db,
@@ -477,7 +574,11 @@ def execute_planning_phase(
             except Exception:
                 pass
 
-            if not plan_verdict.accepted and not used_planning_repair_prompt:
+            if not plan_verdict.accepted and not retry_state.repair_prompt_used:
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Plan validation failed, calling repair (failure_count=%d)",
+                    retry_state.consecutive_failures,
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -487,37 +588,21 @@ def execute_planning_phase(
                     rejection_reasons=plan_verdict.reasons,
                     prompt_profile=prompt_profile,
                 )
-                used_planning_repair_prompt = True
+                retry_state.repair_prompt_used = True
+                retry_state.consecutive_failures += 1
                 continue
 
             if not plan_verdict.accepted:
-                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
-                ctx.orchestration_state.abort_reason = (
-                    "Planning output failed validation: "
-                    + "; ".join(plan_verdict.reasons[:3])
+                # Validation failed even after repair -- the circuit breaker at the
+                # top of the while loop will abort on the next iteration, so just
+                # increment the failure counter and let the loop continue.
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Plan validation failed after repair (failure_count=%d), "
+                    "circuit breaker will evaluate on next iteration",
+                    retry_state.consecutive_failures,
                 )
-                emit_phase_event(
-                    ctx.orchestration_state,
-                    ctx.emit_live,
-                    level="ERROR",
-                    phase="planning",
-                    message="[ORCHESTRATION] Planning output failed validation",
-                    details={
-                        "reason": "planning_validation_failed",
-                        "validation_status": plan_verdict.status,
-                        "reasons": plan_verdict.reasons[:10],
-                    },
-                )
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = "Planning failed validation: " + "; ".join(
-                    plan_verdict.reasons[:5]
-                )
-                ctx.db.commit()
-                if ctx.restore_workspace_snapshot_if_needed:
-                    ctx.restore_workspace_snapshot_if_needed(
-                        "planning validation failure"
-                    )
-                return {"status": "failed", "reason": "planning_validation_failed"}
+                retry_state.consecutive_failures += 1
+                continue
 
             ctx.logger.info(
                 "[ORCHESTRATION] Generated %s steps in plan (using %s)",
@@ -709,6 +794,11 @@ def __retry_with_minimal_prompt(
         emit_live=ctx.emit_live,
         reason=reason,
         prompt_profile=prompt_profile,
+        workflow_profile=getattr(ctx, "workflow_profile", "default"),
+        workflow_phases=getattr(ctx, "workflow_phases", []),
+        workspace_has_existing_files=getattr(
+            ctx, "workspace_has_existing_files", False
+        ),
     )
 
 
@@ -732,6 +822,11 @@ def __repair_planning_output(
         reason=reason,
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
+        workflow_profile=getattr(ctx, "workflow_profile", "default"),
+        workflow_phases=getattr(ctx, "workflow_phases", []),
+        workspace_has_existing_files=getattr(
+            ctx, "workspace_has_existing_files", False
+        ),
     )
 
 

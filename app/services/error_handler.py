@@ -139,6 +139,9 @@ class EnhancedErrorHandler:
 
         fixed = text
 
+        fixed = self._normalize_markdown_links(fixed)
+        fixed = self._repair_plan_like_json_strings(fixed)
+
         # Fix missing commas between array/object elements
         fixed = re.sub(r"\}\s*\{", "},{", fixed)
         fixed = re.sub(r"\}\s*,?\s*\[", "},[", fixed)
@@ -147,12 +150,104 @@ class EnhancedErrorHandler:
         # Fix trailing commas (remove them)
         fixed = re.sub(r",(\s*[}\]])", r"\1", fixed)
 
-        # Fix single quotes to double quotes (carefully)
-        fixed = re.sub(r"'([^']*)'", r'"\1"', fixed)
-
         if fixed != text:
             logger.debug(f"[JSON-FIX] Applied {len(text) - len(fixed)} fixes")
 
+        return fixed
+
+    def _normalize_markdown_links(self, text: str) -> str:
+        """Collapse markdown/autolink localhost artifacts back to plain URLs."""
+        if not text:
+            return text
+
+        fixed = text
+        fixed = re.sub(
+            r"\[\]\((https?://[^)\s]+)\)<[^>]+>",
+            r"\1",
+            fixed,
+        )
+        fixed = re.sub(
+            r"\[([^\]]*)\]\((https?://[^)\s]+)\)",
+            r"\2",
+            fixed,
+        )
+        fixed = re.sub(r"<(https?://[^>\s]+)>", r"\1", fixed)
+        return fixed
+
+    def _repair_plan_like_json_strings(self, text: str) -> str:
+        """Repair common quote corruption in plan JSON string fields."""
+        if not text:
+            return text
+
+        fixed = text
+
+        def escape_inner_quotes(value: str) -> str:
+            return re.sub(r'(?<!\\)"', r'\\"', value)
+
+        def repair_string_field(match: re.Match[str]) -> str:
+            prefix, value, suffix = match.groups()
+            return prefix + escape_inner_quotes(value) + suffix
+
+        for key in ("description", "verification", "rollback"):
+            pattern = (
+                rf'("{key}"\s*:\s*")'
+                r"(.*?)"
+                r'("(?=\s*,\s*"[A-Za-z_][A-Za-z0-9_]*"\s*:|\s*}))'
+            )
+            fixed = re.sub(pattern, repair_string_field, fixed, flags=re.DOTALL)
+
+        commands_pattern = (
+            r'("commands"\s*:\s*\[)(.*?)(\](?=\s*,\s*"verification"\s*:))'
+        )
+
+        def repair_commands_block(match: re.Match[str]) -> str:
+            prefix, body, suffix = match.groups()
+            chars = list(body)
+            result: list[str] = []
+            in_string = False
+            escape_next = False
+            i = 0
+            length = len(chars)
+
+            while i < length:
+                char = chars[i]
+                if not in_string:
+                    result.append(char)
+                    if char == '"':
+                        in_string = True
+                    i += 1
+                    continue
+
+                if escape_next:
+                    result.append(char)
+                    escape_next = False
+                    i += 1
+                    continue
+
+                if char == "\\":
+                    result.append(char)
+                    escape_next = True
+                    i += 1
+                    continue
+
+                if char == '"':
+                    j = i + 1
+                    while j < length and chars[j].isspace():
+                        j += 1
+                    if j >= length or chars[j] in ",]":
+                        result.append(char)
+                        in_string = False
+                    else:
+                        result.append('\\"')
+                    i += 1
+                    continue
+
+                result.append(char)
+                i += 1
+
+            return prefix + "".join(result) + suffix
+
+        fixed = re.sub(commands_pattern, repair_commands_block, fixed, flags=re.DOTALL)
         return fixed
 
     def _find_json_in_text(self, text: str) -> Optional[str]:

@@ -494,35 +494,6 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             reopen_failed_ordered_task_if_needed(db, session)
             pending_tasks = task_service.get_project_tasks(session.project_id)
 
-            if not any(task.status == TaskStatus.PENDING for task in pending_tasks):
-                retryable_failed_tasks = [
-                    task
-                    for task in pending_tasks
-                    if task.status in [TaskStatus.FAILED, TaskStatus.CANCELLED]
-                ]
-                for task in retryable_failed_tasks:
-                    task.status = TaskStatus.PENDING
-                    task.error_message = None
-                    task.started_at = None
-                    task.completed_at = None
-                    task.current_step = 0
-                    task.steps = None
-
-                if retryable_failed_tasks:
-                    db.add(
-                        LogEntry(
-                            session_id=session_id,
-                            session_instance_id=session_instance_id,
-                            level="INFO",
-                            message=(
-                                f"Recovered {len(retryable_failed_tasks)} failed/cancelled "
-                                "task(s) for retry"
-                            ),
-                        )
-                    )
-                    db.commit()
-                    pending_tasks = task_service.get_project_tasks(session.project_id)
-
             queued_tasks = []
             if session.execution_mode == "automatic":
                 next_task = task_service.get_next_pending_task(session.project_id)

@@ -111,6 +111,46 @@ class CheckpointService:
             + context_score
         )
 
+    def _checkpoint_has_execution_progress(self, data: Dict[str, Any]) -> bool:
+        orchestration_state = data.get("orchestration_state", {}) or {}
+        step_results = data.get("step_results", []) or []
+        execution_results = orchestration_state.get("execution_results", []) or []
+        current_step_index = (
+            orchestration_state.get("current_step_index")
+            or data.get("current_step_index")
+            or 0
+        )
+        return bool(
+            orchestration_state.get("plan")
+            or step_results
+            or execution_results
+            or int(current_step_index or 0) > 0
+        )
+
+    def _checkpoint_is_repair_exhausted(self, data: Dict[str, Any]) -> bool:
+        orchestration_state = data.get("orchestration_state", {}) or {}
+        plan = orchestration_state.get("plan", []) or []
+        current_step_index = int(
+            orchestration_state.get("current_step_index")
+            or data.get("current_step_index")
+            or 0
+        )
+        completion_repair_attempts = int(
+            orchestration_state.get("completion_repair_attempts") or 0
+        )
+        latest_completion_validation = (
+            orchestration_state.get("last_completion_validation") or {}
+        )
+        validation_status = str(
+            latest_completion_validation.get("status") or ""
+        ).strip()
+        return bool(
+            completion_repair_attempts > 0
+            and validation_status in {"repair_required", "rejected"}
+            and plan
+            and current_step_index >= len(plan)
+        )
+
     def _checkpoint_resume_metadata(self, data: Dict[str, Any]) -> Dict[str, Any]:
         context = data.get("context", {}) or {}
         orchestration_state = data.get("orchestration_state", {}) or {}
@@ -118,6 +158,13 @@ class CheckpointService:
         execution_results = orchestration_state.get("execution_results", []) or []
         plan = orchestration_state.get("plan", []) or []
 
+        if self._checkpoint_is_repair_exhausted(data):
+            return {
+                "resumable": False,
+                "resume_reason": (
+                    "Checkpoint ends at a failed completion-repair boundary; choose an earlier checkpoint instead"
+                ),
+            }
         if plan:
             return {
                 "resumable": True,
@@ -128,18 +175,16 @@ class CheckpointService:
                 "resumable": True,
                 "resume_reason": "Saved step results available",
             }
-        if context.get("task_id") and (
-            context.get("task_subfolder")
-            or context.get("project_dir_override")
-            or context.get("task_description")
-        ):
+        if context.get("task_id") and self._checkpoint_has_execution_progress(data):
             return {
                 "resumable": True,
                 "resume_reason": "Saved task/workspace context available",
             }
         return {
             "resumable": False,
-            "resume_reason": "Checkpoint is missing replay state: no task, plan, or workspace context was saved",
+            "resume_reason": (
+                "Checkpoint is missing meaningful replay state: no saved plan, step results, or execution progress was recorded"
+            ),
         }
 
     def _checkpoint_restore_fidelity(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -303,10 +348,15 @@ class CheckpointService:
         if not entries:
             return None
 
-        best_entry = entries[0]
+        resumable_entries = [
+            entry
+            for entry in entries
+            if self._checkpoint_resume_metadata(entry.get("data", {})).get("resumable")
+        ]
+        best_entry = resumable_entries[0] if resumable_entries else entries[0]
 
         if not requested_checkpoint_name:
-            return best_entry["name"]
+            return best_entry["name"] if resumable_entries else None
 
         requested_entry = next(
             (e for e in entries if e["name"] == requested_checkpoint_name),
@@ -321,11 +371,27 @@ class CheckpointService:
                 f"Requested checkpoint '{requested_checkpoint_name}' not found; "
                 f"falling back to best available '{best_entry['name']}'",
             )
-            return best_entry["name"]
+            return best_entry["name"] if resumable_entries else None
 
         # Same entry → trivial.
         if requested_entry["name"] == best_entry["name"]:
             return requested_entry["name"]
+
+        requested_resume_metadata = self._checkpoint_resume_metadata(
+            requested_entry.get("data", {})
+        )
+        if (
+            not requested_resume_metadata.get("resumable")
+            and resumable_entries
+            and best_entry["name"] != requested_entry["name"]
+        ):
+            self._log_checkpoint(
+                session_id,
+                "WARN",
+                f"Requested checkpoint '{requested_checkpoint_name}' is not replayable; "
+                f"using best resumable checkpoint '{best_entry['name']}' instead",
+            )
+            return best_entry["name"]
 
         requested_score = requested_entry["progress_score"]
         best_score = best_entry["progress_score"]

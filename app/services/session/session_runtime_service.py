@@ -30,6 +30,7 @@ from app.services.workspace.system_settings import (
 
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
+MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS = 1
 
 
 def slugify_task_name(name: str) -> str:
@@ -81,6 +82,41 @@ def prepare_task_for_fresh_execution(
     task.current_step = 0
     if clear_saved_plan:
         task.steps = None
+
+
+def _task_failure_requires_operator_review(task: Task) -> bool:
+    failure_text = str(getattr(task, "error_message", "") or "").strip().lower()
+    if not failure_text:
+        return False
+
+    hard_stop_markers = (
+        "completion validation failed",
+        "completion repair failed",
+        "planning failed",
+        "planning circuit breaker opened",
+        "workspace contract failed",
+        "max step attempts reached",
+        "step failed after",
+        "repeat_completion_failure_signature",
+        "root cause",
+    )
+    return any(marker in failure_text for marker in hard_stop_markers)
+
+
+def _count_automatic_recovery_attempts(
+    db: Session, session_id: int, task_id: int
+) -> int:
+    return (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.task_id == task_id,
+            LogEntry.message.like(
+                "Recovered earliest failed/cancelled ordered task for automatic retry:%"
+            ),
+        )
+        .count()
+    )
 
 
 def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
@@ -388,6 +424,49 @@ def reopen_failed_ordered_task_if_needed(
         .first()
     )
     if not retryable_task:
+        return None
+
+    if _task_failure_requires_operator_review(retryable_task):
+        set_session_alert(
+            db,
+            session,
+            "warning",
+            (
+                "Automatic execution paused because the next failed task needs "
+                f"operator review before retry: #{getattr(retryable_task, 'plan_position', None)} "
+                f"{retryable_task.title}"
+            )[:2000],
+        )
+        db.commit()
+        return None
+
+    prior_recovery_attempts = _count_automatic_recovery_attempts(
+        db, session.id, retryable_task.id
+    )
+    if prior_recovery_attempts >= MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS:
+        set_session_alert(
+            db,
+            session,
+            "warning",
+            (
+                "Automatic execution paused because the next failed task has "
+                "already been retried automatically once and still needs a real fix: "
+                f"#{getattr(retryable_task, 'plan_position', None)} {retryable_task.title}"
+            )[:2000],
+        )
+        db.add(
+            LogEntry(
+                session_id=session.id,
+                session_instance_id=session.instance_id,
+                task_id=retryable_task.id,
+                level="WARN",
+                message=(
+                    "Skipped automatic retry for failed ordered task because the "
+                    "automatic recovery budget was exhausted"
+                ),
+            )
+        )
+        db.commit()
         return None
 
     retryable_task.status = TaskStatus.PENDING

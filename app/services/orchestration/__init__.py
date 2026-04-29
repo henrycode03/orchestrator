@@ -78,6 +78,7 @@ from .step_support import (
     step_needs_command_repair,
 )
 from .task_rules import (
+    get_workflow_profile,
     get_task_report_path,
     is_verification_style_task,
     run_virtual_merge_gate,
@@ -154,6 +155,7 @@ __all__ = [
     "clamp_planning_timeout",
     "should_restore_workspace_on_failure",
     "get_task_report_path",
+    "get_workflow_profile",
     "is_verification_style_task",
     "run_virtual_merge_gate",
     "should_execute_in_canonical_project_root",
