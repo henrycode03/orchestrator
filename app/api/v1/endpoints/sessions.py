@@ -44,6 +44,7 @@ from app.services import (
     ensure_unique_session_name as _ensure_unique_session_name,
     get_session_logs_payload as _get_session_logs_payload,
     get_session_divergence_compare_payload as _get_session_divergence_compare_payload,
+    get_session_dispatch_watchdog_payload as _get_session_dispatch_watchdog_payload,
     get_session_state_diff_payload as _get_session_state_diff_payload,
     get_session_workspace_info_payload as _get_session_workspace_info_payload,
     get_session_statistics_payload as _get_session_statistics_payload,
@@ -56,6 +57,7 @@ from app.services import (
     queue_task_for_session as _queue_task_for_session,
     replay_session_checkpoint_payload as _replay_session_checkpoint_payload,
     replay_session_checkpoint_counterfactual_payload as _replay_session_checkpoint_counterfactual_payload,
+    refresh_session_dispatch_watchdog_alert as _refresh_session_dispatch_watchdog_alert,
     save_session_checkpoint_payload as _save_session_checkpoint_payload,
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
@@ -866,6 +868,20 @@ def get_session_divergence_compare(
         session_id,
         limit=limit,
     )
+
+
+@router.get("/sessions/{session_id}/dispatch-watchdog")
+def get_session_dispatch_watchdog(
+    session_id: int,
+    sync_alert: bool = True,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return queue/claim watchdog state for session tasks."""
+
+    if sync_alert:
+        return _refresh_session_dispatch_watchdog_alert(db, session_id)
+    return _get_session_dispatch_watchdog_payload(db, session_id)
 
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")

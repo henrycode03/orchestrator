@@ -79,6 +79,9 @@ from app.services.streaming_health import (
 )
 from app.services.workspace.system_settings import get_effective_mobile_gateway_key
 from app.services.task_service import TaskService
+from app.services.session.session_inspection_service import (
+    refresh_session_dispatch_watchdog_alert,
+)
 
 logger = logging.getLogger(__name__)
 TREE_MAX_DEPTH = 3
@@ -558,6 +561,8 @@ def get_session_summary(
     # Get task progress
     tasks = db.query(Task).filter(Task.project_id == session.project_id).all()
     task_counts = _build_task_counts(tasks)
+    dispatch_watchdog = refresh_session_dispatch_watchdog_alert(db, session_id)
+    latest_failure = dispatch_watchdog.get("latest_failure")
 
     return {
         "session_id": session_id,
@@ -586,6 +591,8 @@ def get_session_summary(
             "running": task_counts["running"],
             "failed": task_counts["failed"],
         },
+        "dispatch_watchdog": dispatch_watchdog,
+        "latest_failure": latest_failure,
         "recent_logs": [
             {
                 "level": log.level,

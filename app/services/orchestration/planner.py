@@ -182,20 +182,21 @@ Workflow:
 
 Rules:
 1. Assume working directory is {display_project_dir}
-2. Use relative paths only
-3. Do not use absolute paths, .., or ~
-4. Return 3 to 6 small sequential steps
-5. Each step must include: step_number, description, commands, verification, rollback, expected_files
-6. `commands` must be an array of strings
-7. `verification` must be a single shell string or null
-8. `rollback` must be a single shell string or null
-9. expected_files must be relative file paths or []
-10. Do not use `cat > file <<EOF`, heredocs, or multi-line inline file creation in planning output
-11. Do not join separate shell commands with commas
-12. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
-13. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
-14. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
-15. Output JSON array only
+2. Use relative paths only in shell commands and expected_files
+3. If a step will later need file-read or file-write tools, keep the planned path relative; the executor will expand it to an absolute path under {display_project_dir}
+4. Do not use absolute paths, .., or ~
+5. Return 3 to 6 small sequential steps
+6. Each step must include: step_number, description, commands, verification, rollback, expected_files
+7. `commands` must be an array of strings
+8. `verification` must be a single shell string or null
+9. `rollback` must be a single shell string or null
+10. expected_files must be relative file paths or []
+11. Do not use `cat > file <<EOF`, heredocs, or multi-line inline file creation in planning output
+12. Do not join separate shell commands with commas
+13. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+14. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
+15. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
+16. Output JSON array only
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -226,13 +227,14 @@ Workflow:
 
 Requirements:
 1. 2 to 5 steps only
-2. Use short relative shell commands only
-3. No heredocs, no long inline source dumps, no absolute paths, no .., no ~
-4. Each step must contain exactly these keys:
+2. Use short relative shell commands only, and keep expected_files relative
+3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
+4. No heredocs, no long inline source dumps, no absolute paths, no .., no ~
+5. Each step must contain exactly these keys:
    step_number, description, commands, verification, rollback, expected_files
-5. `verification` and `rollback` must each be one shell string or null
-6. No background processes or long-running servers
-7. Keep each command short and machine-runnable
+6. `verification` and `rollback` must each be one shell string or null
+7. No background processes or long-running servers
+8. Keep each command short and machine-runnable
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -293,15 +295,16 @@ Rules:
 5. `verification` must be one shell string or null
 6. `rollback` must be one shell string or null
 7. Use relative paths only in shell commands and expected_files
-8. Do not use absolute paths, .., or ~
-9. Do not use heredocs, `cat > file <<EOF`, or multi-line inline file dumps in the repaired plan
-10. Do not join separate shell commands with commas
-11. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
-12. Prefer short setup/edit commands over dumping full source files in planning output
-13. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
-14. expected_files must be a JSON array of relative file paths
-15. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
-16. Paths must be rooted exactly once from the canonical project workspace
+8. If a step will later use file-read or file-write tools, keep that path relative here; execution will expand it under {display_project_dir}
+9. Do not use absolute paths, .., or ~
+10. Do not use heredocs, `cat > file <<EOF`, or multi-line inline file dumps in the repaired plan
+11. Do not join separate shell commands with commas
+12. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+13. Prefer short setup/edit commands over dumping full source files in planning output
+14. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
+15. expected_files must be a JSON array of relative file paths
+16. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
+17. Paths must be rooted exactly once from the canonical project workspace
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 

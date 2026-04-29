@@ -265,6 +265,29 @@ export interface Checkpoint {
   };
 }
 
+export interface FailureEnvelopeSummary {
+  schema_version: number;
+  event_id?: string | null;
+  event_type?: string | null;
+  timestamp?: string | null;
+  phase?: string | null;
+  step_index?: number | null;
+  model_id?: string | null;
+  root_cause?: string | null;
+  stderr_preview?: string | null;
+  output_preview?: string | null;
+  task_id?: number | null;
+  task_title?: string | null;
+}
+
+export interface ReasoningArtifact {
+  schema_version: number;
+  intent: string;
+  workspace_facts: string[];
+  planned_actions: string[];
+  verification_plan: string[];
+}
+
 export interface CheckpointInspection {
   session_id: number;
   checkpoint_name: string;
@@ -293,6 +316,7 @@ export interface CheckpointInspection {
     adaptation_profile: string;
     derived_from_current_settings: boolean;
   };
+  reasoning_artifact?: ReasoningArtifact | null;
   validation_verdicts?: {
     latest_status?: string | null;
     plan_status?: string | null;
@@ -314,6 +338,9 @@ export interface CheckpointInspection {
     present_signals: string[];
     warnings: string[];
   };
+  dispatch_watchdog?: SessionDispatchWatchdogResponse | null;
+  latest_failure?: FailureEnvelopeSummary | null;
+  failure_history_preview?: FailureEnvelopeSummary[];
   validation_history: Record<string, unknown>[];
   plan_preview: Array<Record<string, unknown>>;
   step_results_preview: Array<Record<string, unknown>>;
@@ -391,6 +418,34 @@ export interface SessionDivergenceCompareResponse {
     similarity_score: number;
     shared_tags: string[];
   }>;
+}
+
+export interface SessionDispatchWatchdogTask {
+  task_id: number;
+  task_title: string;
+  dispatch_state: 'queued' | 'claimed' | 'rejected' | 'unknown';
+  queued_at?: string | null;
+  claimed_at?: string | null;
+  rejected_at?: string | null;
+  queue_age_seconds?: number | null;
+  queue_latency_seconds?: number | null;
+  queued_event_id?: string | null;
+  claim_event_id?: string | null;
+  reject_event_id?: string | null;
+  stale: boolean;
+  failure_root_cause?: string | null;
+  latest_failure?: FailureEnvelopeSummary | null;
+}
+
+export interface SessionDispatchWatchdogResponse {
+  session_id: number;
+  sla_seconds: number;
+  stale_task_count: number;
+  has_stale_dispatches: boolean;
+  latest_failure?: FailureEnvelopeSummary | null;
+  failure_history_preview?: FailureEnvelopeSummary[];
+  tasks: SessionDispatchWatchdogTask[];
+  stale_tasks: SessionDispatchWatchdogTask[];
 }
 
 export interface BackendDescriptor {

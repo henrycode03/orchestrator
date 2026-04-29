@@ -12,7 +12,7 @@ import asyncio
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.celery_app import celery_app
 from app.models import (
@@ -55,6 +55,7 @@ from app.services.orchestration.context_assembly import (
 from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event as _append_orchestration_event,
+    find_latest_orchestration_event as _find_latest_orchestration_event,
     record_live_log as _record_live_log,
     record_validation_verdict as _record_validation_verdict,
     restore_step_result as _restore_step_result,
@@ -96,6 +97,19 @@ from app.services.orchestration.workspace_guard import verify_workspace_contract
 logger = logging.getLogger(__name__)
 
 _PROGRESS_NOTES_MAX_BYTES = 8000
+
+
+def _parse_event_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
+    text = str(raw_timestamp or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _inject_progress_notes_into_context(
@@ -369,6 +383,21 @@ def execute_orchestration_task(
                     dispatch_project_dir / str(task.task_subfolder)
                 ).resolve()
 
+        queued_event = None
+        queue_latency_seconds = None
+        if dispatch_project_dir:
+            queued_event = _find_latest_orchestration_event(
+                dispatch_project_dir,
+                session_id,
+                task_id,
+                event_types={EventType.TASK_QUEUED},
+            )
+            queued_at = _parse_event_timestamp((queued_event or {}).get("timestamp"))
+            if queued_at is not None:
+                queue_latency_seconds = round(
+                    (datetime.now(timezone.utc) - queued_at).total_seconds(), 3
+                )
+
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         claim_ok = False
         claim_reason = "unclaimed"
@@ -403,6 +432,8 @@ def execute_orchestration_task(
                     str(dispatch_project_dir) if dispatch_project_dir else None
                 ),
                 "celery_task_id": getattr(getattr(self, "request", None), "id", None),
+                "queue_latency_seconds": queue_latency_seconds,
+                "queued_event_id": (queued_event or {}).get("event_id"),
                 **_runtime_selection_details(db),
             }
             if dispatch_project_dir:
@@ -425,6 +456,8 @@ def execute_orchestration_task(
             "expected_session_instance_id": expected_session_instance_id,
             "celery_task_id": getattr(getattr(self, "request", None), "id", None),
             "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
+            "queue_latency_seconds": queue_latency_seconds,
+            "queued_event_id": (queued_event or {}).get("event_id"),
             **_runtime_selection_details(db),
         }
         if dispatch_project_dir:

@@ -132,6 +132,97 @@ class ValidatorService:
 
         return {"valid": not errors, "errors": errors, "details": details}
 
+    @classmethod
+    def validate_reasoning_artifact(
+        cls,
+        artifact: Any,
+        *,
+        plan: Optional[List[Dict[str, Any]]] = None,
+        validation_severity: str = "standard",
+    ) -> ValidationVerdict:
+        warnings: List[str] = []
+        repairable: List[str] = []
+        rejected: List[str] = []
+        details: Dict[str, Any] = {}
+
+        if not isinstance(artifact, dict):
+            return ValidationVerdict(
+                stage="reasoning_artifact",
+                status=apply_validation_policy(
+                    "rejected",
+                    severity=validation_severity,
+                    stage="reasoning_artifact",
+                ),
+                profile="control_plane",
+                reasons=["Reasoning artifact must be a JSON object"],
+                details={"received_type": type(artifact).__name__},
+                confidence="high",
+            )
+
+        intent = str(artifact.get("intent") or "").strip()
+        workspace_facts = artifact.get("workspace_facts")
+        planned_actions = artifact.get("planned_actions")
+        verification_plan = artifact.get("verification_plan")
+
+        if not intent:
+            rejected.append("Reasoning artifact must include a non-empty intent")
+        elif len(intent) < 12:
+            warnings.append("Reasoning artifact intent is unusually short")
+
+        for field_name, value in (
+            ("workspace_facts", workspace_facts),
+            ("planned_actions", planned_actions),
+            ("verification_plan", verification_plan),
+        ):
+            if not isinstance(value, list):
+                rejected.append(f"Reasoning artifact {field_name} must be an array")
+                continue
+            cleaned_items = [
+                str(item or "").strip() for item in value if str(item or "").strip()
+            ]
+            details[f"{field_name}_count"] = len(cleaned_items)
+            if not cleaned_items:
+                repairable.append(
+                    f"Reasoning artifact {field_name} must contain at least one entry"
+                )
+            elif len(cleaned_items) > 12:
+                warnings.append(
+                    f"Reasoning artifact {field_name} is longer than needed for checkpoint inspection"
+                )
+
+        plan_count = len(plan or [])
+        action_count = details.get("planned_actions_count", 0)
+        if plan_count and action_count and action_count < min(plan_count, 2):
+            repairable.append(
+                "Reasoning artifact planned_actions does not cover enough planned steps"
+            )
+
+        status = cls._select_status(
+            warnings=warnings,
+            repairable=repairable,
+            rejected=rejected,
+            severity=validation_severity,
+            stage="reasoning_artifact",
+        )
+        confidence = "high"
+        if repairable:
+            confidence = "medium"
+        elif warnings:
+            confidence = "low"
+
+        return ValidationVerdict(
+            stage="reasoning_artifact",
+            status=status,
+            profile="control_plane",
+            reasons=cls._ordered_reasons(
+                warnings=warnings,
+                repairable=repairable,
+                rejected=rejected,
+            ),
+            details=details,
+            confidence=confidence,
+        )
+
     @staticmethod
     def infer_validation_profile(
         task_prompt: str,

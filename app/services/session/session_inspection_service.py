@@ -18,7 +18,11 @@ from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
 from app.services.orchestration.persistence import diff_orchestration_state_snapshots
-from app.services.orchestration.persistence import read_orchestration_events
+from app.services.orchestration.persistence import (
+    append_orchestration_event,
+    read_orchestration_events,
+)
+from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     read_session_fingerprint_index,
     write_session_fingerprint_index,
@@ -41,6 +45,8 @@ from app.services.session.session_runtime_service import (
     get_session_task_subfolder,
     revoke_session_celery_tasks,
 )
+
+QUEUE_WATCHDOG_SLA_SECONDS = 30
 
 
 def _get_session_or_404(db: Session, session_id: int) -> SessionModel:
@@ -84,6 +90,241 @@ def _session_task_event_roots(
             }
         )
     return roots
+
+
+def _parse_timestamp(raw_value: Any) -> Optional[datetime]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _extract_failure_summary(
+    event: Dict[str, Any],
+    details: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    envelope = details.get("failure_envelope")
+    if not isinstance(envelope, dict):
+        return None
+
+    stderr_text = str(envelope.get("stderr") or "").strip()
+    output_payload = envelope.get("output")
+    output_text = ""
+    if isinstance(output_payload, dict):
+        output_text = str(
+            output_payload.get("error_message")
+            or output_payload.get("verification_output")
+            or output_payload.get("output")
+            or ""
+        ).strip()
+
+    return {
+        "schema_version": int(envelope.get("schema_version") or 1),
+        "event_id": event.get("event_id"),
+        "event_type": event.get("event_type"),
+        "timestamp": event.get("timestamp"),
+        "phase": envelope.get("phase"),
+        "step_index": envelope.get("step_index"),
+        "model_id": envelope.get("model_id"),
+        "root_cause": envelope.get("root_cause"),
+        "stderr_preview": stderr_text[:240] or None,
+        "output_preview": output_text[:240] or None,
+    }
+
+
+def get_session_dispatch_watchdog_payload(
+    db: Session,
+    session_id: int,
+    *,
+    sla_seconds: int = QUEUE_WATCHDOG_SLA_SECONDS,
+) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    roots = _session_task_event_roots(db, session)
+    now = datetime.now(UTC)
+    task_summaries: List[Dict[str, Any]] = []
+    stale_tasks: List[Dict[str, Any]] = []
+    failure_history: List[Dict[str, Any]] = []
+
+    for root in roots:
+        events = read_orchestration_events(
+            root["project_dir"],
+            session.id,
+            root["task_id"],
+        )
+        queue_event = None
+        claim_event = None
+        reject_event = None
+        latest_failure_summary = None
+        for event in reversed(events):
+            event_type = str(event.get("event_type") or "")
+            details = event.get("details") or {}
+            failure_summary = _extract_failure_summary(event, details)
+            if failure_summary:
+                failure_summary["task_id"] = root["task_id"]
+                failure_summary["task_title"] = root["task_title"]
+                failure_history.append(failure_summary)
+                if latest_failure_summary is None:
+                    latest_failure_summary = failure_summary
+            if queue_event is None and event_type == "task_queued":
+                queue_event = event
+            elif claim_event is None and event_type == "task_claimed":
+                claim_event = event
+            elif reject_event is None and event_type == "task_dispatch_rejected":
+                reject_event = event
+            if queue_event and claim_event and reject_event and latest_failure_summary:
+                break
+
+        queue_at = _parse_timestamp((queue_event or {}).get("timestamp"))
+        claim_at = _parse_timestamp((claim_event or {}).get("timestamp"))
+        reject_at = _parse_timestamp((reject_event or {}).get("timestamp"))
+        latest_terminal = max(
+            [item for item in [claim_at, reject_at] if item is not None],
+            default=None,
+        )
+        queue_age_seconds = (
+            round((now - queue_at).total_seconds(), 3) if queue_at is not None else None
+        )
+        is_stale = bool(
+            queue_at is not None
+            and queue_age_seconds is not None
+            and queue_age_seconds > sla_seconds
+            and (latest_terminal is None or latest_terminal < queue_at)
+        )
+        if claim_at and queue_at and claim_at >= queue_at:
+            dispatch_state = "claimed"
+        elif reject_at and queue_at and reject_at >= queue_at:
+            dispatch_state = "rejected"
+        elif queue_at:
+            dispatch_state = "queued"
+        else:
+            dispatch_state = "unknown"
+
+        summary = {
+            "task_id": root["task_id"],
+            "task_title": root["task_title"],
+            "project_dir": root["project_dir"],
+            "dispatch_state": dispatch_state,
+            "queued_at": queue_at.isoformat() if queue_at else None,
+            "claimed_at": claim_at.isoformat() if claim_at else None,
+            "rejected_at": reject_at.isoformat() if reject_at else None,
+            "queue_age_seconds": queue_age_seconds,
+            "queue_latency_seconds": ((claim_event or {}).get("details", {}) or {}).get(
+                "queue_latency_seconds"
+            ),
+            "queued_event_id": (queue_event or {}).get("event_id"),
+            "claim_event_id": (claim_event or {}).get("event_id"),
+            "reject_event_id": (reject_event or {}).get("event_id"),
+            "stale": is_stale,
+            "failure_root_cause": (
+                latest_failure_summary.get("root_cause")
+                if isinstance(latest_failure_summary, dict)
+                else None
+            ),
+            "latest_failure": latest_failure_summary,
+        }
+        task_summaries.append(summary)
+        if is_stale:
+            stale_tasks.append(summary)
+
+    sorted_failures = sorted(
+        failure_history,
+        key=lambda item: (
+            _parse_timestamp(item.get("timestamp")) or datetime.min.replace(tzinfo=UTC)
+        ),
+        reverse=True,
+    )
+
+    return {
+        "session_id": session.id,
+        "sla_seconds": sla_seconds,
+        "stale_task_count": len(stale_tasks),
+        "has_stale_dispatches": bool(stale_tasks),
+        "latest_failure": sorted_failures[0] if sorted_failures else None,
+        "failure_history_preview": sorted_failures[:5],
+        "tasks": task_summaries,
+        "stale_tasks": stale_tasks,
+    }
+
+
+def refresh_session_dispatch_watchdog_alert(
+    db: Session,
+    session_id: int,
+    *,
+    sla_seconds: int = QUEUE_WATCHDOG_SLA_SECONDS,
+) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    watchdog = get_session_dispatch_watchdog_payload(
+        db, session_id, sla_seconds=sla_seconds
+    )
+    if watchdog.get("has_stale_dispatches"):
+        stale_tasks = list(watchdog.get("stale_tasks") or [])
+        stale = stale_tasks[0] if stale_tasks else {}
+        task_title = str(stale.get("task_title") or f"task {stale.get('task_id')}")
+        age_value = stale.get("queue_age_seconds")
+        age_text = (
+            f"{float(age_value):.1f}s"
+            if isinstance(age_value, (int, float))
+            else "over SLA"
+        )
+        session.last_alert_level = "warning"
+        session.last_alert_message = (
+            f"Queued dispatch appears stalled for {task_title} ({age_text} in queue)."
+        )[:2000]
+        session.last_alert_at = datetime.now(UTC)
+        for item in stale_tasks:
+            project_dir = item.get("project_dir")
+            if not project_dir:
+                continue
+            events = read_orchestration_events(
+                project_dir,
+                session.id,
+                int(item.get("task_id") or 0),
+            )
+            latest_stale_event = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if event.get("event_type") == EventType.TASK_QUEUE_STALE
+                ),
+                None,
+            )
+            queued_event_id = item.get("queued_event_id")
+            if (
+                latest_stale_event
+                and ((latest_stale_event.get("details") or {}).get("queued_event_id"))
+                == queued_event_id
+            ):
+                continue
+            append_orchestration_event(
+                project_dir=project_dir,
+                session_id=session.id,
+                task_id=int(item.get("task_id") or 0),
+                event_type=EventType.TASK_QUEUE_STALE,
+                details={
+                    "task_title": item.get("task_title"),
+                    "queued_event_id": queued_event_id,
+                    "queue_age_seconds": item.get("queue_age_seconds"),
+                    "sla_seconds": sla_seconds,
+                    "failure_root_cause": item.get("failure_root_cause"),
+                },
+            )
+    elif getattr(
+        session, "last_alert_level", None
+    ) == "warning" and "Queued dispatch appears stalled" in str(
+        getattr(session, "last_alert_message", "") or ""
+    ):
+        session.last_alert_level = None
+        session.last_alert_message = None
+        session.last_alert_at = None
+    db.commit()
+    db.refresh(session)
+    return watchdog
 
 
 def _build_session_divergence_fingerprint(
@@ -500,6 +741,7 @@ def inspect_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
     _get_session_or_404(db, session_id)
+    dispatch_watchdog = get_session_dispatch_watchdog_payload(db, session_id)
     checkpoint_service = CheckpointService(db)
     payload = checkpoint_service.load_checkpoint(session_id, checkpoint_name)
     resume_metadata = checkpoint_service._checkpoint_resume_metadata(payload)
@@ -576,6 +818,7 @@ def inspect_session_checkpoint_payload(
             "derived_from_current_settings": not bool(runtime_metadata),
         },
         "validation_verdicts": validation_verdicts,
+        "reasoning_artifact": orchestration_state.get("reasoning_artifact"),
         "replay_source": {
             "requested_checkpoint_name": payload.get("_requested_checkpoint_name"),
             "resolved_checkpoint_name": payload.get("_resolved_checkpoint_name")
@@ -584,6 +827,9 @@ def inspect_session_checkpoint_payload(
         },
         "resume_readiness": resume_metadata,
         "restore_fidelity": restore_fidelity,
+        "dispatch_watchdog": dispatch_watchdog,
+        "latest_failure": dispatch_watchdog.get("latest_failure"),
+        "failure_history_preview": dispatch_watchdog.get("failure_history_preview", []),
         "validation_history": validation_history[-10:],
         "plan_preview": plan[:5],
         "step_results_preview": step_results[-5:],

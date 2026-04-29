@@ -27,6 +27,7 @@ from app.services.orchestration.parsing import extract_structured_text
 from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
+    attach_failure_envelope,
     record_validation_verdict,
     save_orchestration_checkpoint,
     set_session_alert,
@@ -38,7 +39,11 @@ from app.services.orchestration.policy import (
 from app.services.orchestration.runtime import write_project_state_snapshot
 from app.services.orchestration.step_support import coerce_execution_step_result
 from app.services.orchestration.telemetry import emit_phase_event
-from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
+from app.services.orchestration.types import (
+    FailureEnvelope,
+    OrchestrationRunContext,
+    ValidationVerdict,
+)
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
@@ -383,8 +388,15 @@ def _build_completion_repair_prompt(
     project_context: str,
     next_step_number: int,
     workspace_inventory: str,
+    failure_envelope: Optional[FailureEnvelope] = None,
 ) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(project_dir)
+    failure_block = (
+        "\n\nNormalized execution error:\n"
+        + failure_envelope.to_prompt_block(max_chars=1800)
+        if failure_envelope is not None
+        else ""
+    )
     return f"""Return one minimal JSON repair step to fix completion validation issues. Output JSON object only.
 
 Task:
@@ -398,6 +410,8 @@ Completion validation issues:
 
 Prior completed results:
 {prior_results_summary[:2000]}
+
+{failure_block}
 
 Project context:
 {project_context[:2500]}
@@ -537,6 +551,44 @@ def _attempt_completion_repair(
     task = ctx.task
     db = ctx.db
     session = ctx.session
+    runtime_metadata = (
+        ctx.runtime_service.get_backend_metadata()
+        if ctx.runtime_service and hasattr(ctx.runtime_service, "get_backend_metadata")
+        else {}
+    )
+    failure_envelope = FailureEnvelope(
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        phase="completion_repair",
+        step_index=len(orchestration_state.plan) + 1,
+        model_id=":".join(
+            part
+            for part in [
+                str(runtime_metadata.get("backend") or "").strip(),
+                str(runtime_metadata.get("model_family") or "").strip(),
+            ]
+            if part
+        ),
+        input={
+            "expected_core_files": list(
+                (getattr(completion_validation, "details", {}) or {}).get(
+                    "expected_core_files", []
+                )[:20]
+            ),
+            "reasons": list(getattr(completion_validation, "reasons", []) or [])[:10],
+        },
+        output={
+            "validation_status": str(getattr(completion_validation, "status", "")),
+            "details": dict(getattr(completion_validation, "details", {}) or {}),
+        },
+        stderr=str(
+            (getattr(completion_validation, "details", {}) or {}).get(
+                "verification_output_preview"
+            )
+            or ""
+        )[:1200],
+        root_cause="validation_failure",
+    )
 
     if orchestration_state.completion_repair_attempts >= ctx.completion_repair_budget:
         return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
@@ -561,11 +613,14 @@ def _attempt_completion_repair(
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
-            details={
-                "phase": "completion_repair",
-                "reason": "repeat_completion_failure_signature",
-                "failure_signature": repeated_signature,
-            },
+            details=attach_failure_envelope(
+                {
+                    "phase": "completion_repair",
+                    "reason": "repeat_completion_failure_signature",
+                    "failure_signature": repeated_signature,
+                },
+                failure_envelope,
+            ),
         )
         return {
             "status": "failed",
@@ -589,11 +644,14 @@ def _attempt_completion_repair(
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         event_type=EventType.REPAIR_GENERATED,
-        details={
-            "phase": "completion_repair",
-            "attempt": orchestration_state.completion_repair_attempts,
-            "reasons": completion_validation.reasons[:10],
-        },
+        details=attach_failure_envelope(
+            {
+                "phase": "completion_repair",
+                "attempt": orchestration_state.completion_repair_attempts,
+                "reasons": completion_validation.reasons[:10],
+            },
+            failure_envelope,
+        ),
     )
 
     repair_context = assemble_completion_repair_inputs(ctx, completion_validation)
@@ -605,6 +663,7 @@ def _attempt_completion_repair(
         project_context=repair_context["project_context"],
         next_step_number=next_step_number,
         workspace_inventory=repair_context["workspace_inventory"],
+        failure_envelope=failure_envelope,
     )
     repair_prompt = render_adapted_runtime_prompt(
         ctx.db,

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.services.error_handler import error_handler
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.orchestration.types import FailureEnvelope
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 
@@ -30,8 +31,15 @@ def build_step_repair_prompt(
     project_dir: Path,
     prior_results_summary: str,
     project_context: str,
+    failure_envelope: Optional[FailureEnvelope] = None,
 ) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(project_dir)
+    failure_block = (
+        "\n\nNormalized execution error:\n"
+        + failure_envelope.to_prompt_block(max_chars=1800)
+        if failure_envelope is not None
+        else ""
+    )
     return f"""Repair this execution step so it becomes machine-runnable JSON. Return JSON object only.
 
 Task:
@@ -48,6 +56,8 @@ Project context:
 
 Prior completed results:
 {prior_results_summary[:2000]}
+
+{failure_block}
 
 Rules:
 1. Working directory is {prompt_project_dir}
@@ -90,6 +100,7 @@ def repair_step_commands_with_self_correction(
         [Dict[str, Any], Path, logging.Logger, int], Dict[str, Any]
     ],
     record_live_log: Callable[..., None],
+    failure_envelope: Optional[FailureEnvelope] = None,
 ) -> Optional[Dict[str, Any]]:
     repair_prompt = build_step_repair_prompt(
         task_prompt=task_prompt,
@@ -98,6 +109,7 @@ def repair_step_commands_with_self_correction(
         project_dir=project_dir,
         prior_results_summary=prior_results_summary,
         project_context=project_context,
+        failure_envelope=failure_envelope,
     )
     repair_prompt = render_adapted_runtime_prompt(
         db,

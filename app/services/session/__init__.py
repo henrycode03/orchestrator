@@ -18,6 +18,7 @@ from .session_inspection_service import (
     delete_session_checkpoint_payload,
     get_session_logs_payload,
     get_session_divergence_compare_payload,
+    get_session_dispatch_watchdog_payload,
     get_session_state_diff_payload,
     get_session_workspace_info_payload,
     get_sorted_logs_payload,
@@ -26,6 +27,7 @@ from .session_inspection_service import (
     load_session_checkpoint_payload,
     replay_session_checkpoint_payload,
     replay_session_checkpoint_counterfactual_payload,
+    refresh_session_dispatch_watchdog_alert,
     save_session_checkpoint_payload,
 )
 from .session_lifecycle_service import (
@@ -84,6 +86,7 @@ __all__ = [
     "delete_session_checkpoint_payload",
     "get_session_logs_payload",
     "get_session_divergence_compare_payload",
+    "get_session_dispatch_watchdog_payload",
     "get_session_state_diff_payload",
     "get_session_workspace_info_payload",
     "get_sorted_logs_payload",
@@ -92,6 +95,7 @@ __all__ = [
     "load_session_checkpoint_payload",
     "replay_session_checkpoint_payload",
     "replay_session_checkpoint_counterfactual_payload",
+    "refresh_session_dispatch_watchdog_alert",
     "save_session_checkpoint_payload",
     "pause_session_lifecycle",
     "resume_session_lifecycle",

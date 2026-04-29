@@ -461,6 +461,7 @@ def assemble_debugging_prompt(
     attempt_number: int,
     max_attempts: int,
     compact: bool = False,
+    failure_envelope: Any = None,
 ) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
@@ -478,6 +479,11 @@ def assemble_debugging_prompt(
         project_dir=prompt_project_dir,
         compact=compact,
     )
+    if failure_envelope is not None and hasattr(failure_envelope, "to_prompt_block"):
+        raw_prompt += (
+            "\n\nNormalized execution error:\n"
+            + failure_envelope.to_prompt_block(max_chars=1800)
+        )
     return render_adapted_runtime_prompt(
         ctx.db,
         objective="Diagnose the failed orchestration step and return the next repair action.",

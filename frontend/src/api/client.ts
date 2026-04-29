@@ -20,6 +20,7 @@ import type {
   Checkpoint,
   CheckpointInspection,
   OrchestrationEvent,
+  SessionDispatchWatchdogResponse,
   SessionStateDiffResponse,
   SessionDivergenceCompareResponse,
   AppSettings,
@@ -462,6 +463,14 @@ export const sessionsAPI = {
       `/sessions/${sessionId}/compare-divergence`,
       {
         params: { limit },
+      }
+    ),
+
+  getSessionDispatchWatchdog: (sessionId: number, syncAlert: boolean = true) =>
+    apiClient.get<SessionDispatchWatchdogResponse>(
+      `/sessions/${sessionId}/dispatch-watchdog`,
+      {
+        params: { sync_alert: syncAlert },
       }
     ),
 

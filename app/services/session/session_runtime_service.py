@@ -33,6 +33,10 @@ DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS = 1
 
 
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
 def slugify_task_name(name: str) -> str:
     """Convert task titles into stable folder names."""
     if not name:
@@ -377,15 +381,19 @@ def queue_task_for_session(
     )
     db.commit()
 
+    queued_at = _utc_now_iso()
     append_orchestration_event(
         project_dir=task_workspace["workspace_path"],
         session_id=session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
         details={
+            "queued_at": queued_at,
             "session_instance_id": session.instance_id,
             "celery_task_id": result.id,
             "project_dir": task_workspace["workspace_path"],
+            "task_title": task.title,
+            "execution_profile": task.execution_profile,
             **_runtime_selection_details(db),
         },
     )

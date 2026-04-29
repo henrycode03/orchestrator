@@ -6,6 +6,7 @@ import type {
   InterventionRequest,
   Project,
   Session,
+  SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
   SessionStateDiffResponse,
   Task,
@@ -258,6 +259,7 @@ interface SessionLogsPanelProps {
   anomalyEvents?: Array<{ title: string; detail: string; at: string }>;
   compareMatches?: SessionDivergenceCompareResponse | null;
   displayLogs: TerminalLogEntry[];
+  dispatchWatchdog?: SessionDispatchWatchdogResponse | null;
   formatDateTime: (value?: string | null) => string;
   handleRefreshLogs: () => Promise<void>;
   healthEvents?: Array<{ timestamp: string; score: number; slope?: number | null }>;
@@ -275,6 +277,7 @@ export function SessionLogsPanel({
   anomalyEvents = [],
   compareMatches,
   displayLogs,
+  dispatchWatchdog,
   formatDateTime,
   handleRefreshLogs,
   healthEvents = [],
@@ -288,6 +291,9 @@ export function SessionLogsPanel({
   wsConnected,
 }: SessionLogsPanelProps) {
   const latestHealth = healthEvents[healthEvents.length - 1] || null;
+  const staleDispatch = dispatchWatchdog?.stale_tasks?.[0] || null;
+  const queuedDispatches =
+    dispatchWatchdog?.tasks?.filter((task) => task.dispatch_state === 'queued') || [];
 
   return (
     <div className="space-y-4">
@@ -343,6 +349,70 @@ export function SessionLogsPanel({
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
+        <div
+          className={cn(
+            'rounded-lg border p-4',
+            staleDispatch
+              ? 'border-amber-800/70 bg-amber-950/20'
+              : 'border-slate-700 bg-slate-900'
+          )}
+        >
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Dispatch Watchdog</h3>
+            <span
+              className={cn(
+                'text-xs font-medium',
+                staleDispatch ? 'text-amber-300' : 'text-emerald-400'
+              )}
+            >
+              {dispatchWatchdog
+                ? staleDispatch
+                  ? `${dispatchWatchdog.stale_task_count} stale`
+                  : 'healthy'
+                : 'Unavailable'}
+            </span>
+          </div>
+          {!dispatchWatchdog ? (
+            <p className="text-sm text-slate-500">
+              Queue/claim watchdog data appears after session events are indexed.
+            </p>
+          ) : (
+            <div className="space-y-2 text-sm">
+              <p className="text-slate-300">
+                SLA: <span className="font-medium text-white">{dispatchWatchdog.sla_seconds}s</span>
+              </p>
+              <p className="text-slate-300">
+                Queued now: <span className="font-medium text-white">{queuedDispatches.length}</span>
+              </p>
+              {staleDispatch ? (
+                <>
+                  <p className="text-amber-200">
+                    Stalled: <span className="font-medium">{staleDispatch.task_title}</span>
+                  </p>
+                  <p className="text-slate-300">
+                    Queue age:{' '}
+                    <span className="font-medium text-white">
+                      {(staleDispatch.queue_age_seconds || 0).toFixed(1)}s
+                    </span>
+                  </p>
+                  {staleDispatch.failure_root_cause && (
+                    <p className="text-slate-300">
+                      Last root cause:{' '}
+                      <span className="font-medium text-white">
+                        {staleDispatch.failure_root_cause}
+                      </span>
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-slate-500">
+                  No queued dispatch has exceeded the watchdog SLA.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-slate-200">Health Score</h3>
@@ -889,6 +959,34 @@ export function SessionSettingsPanel({
             <p className="mt-2 text-xs text-slate-300">
               Plan steps {checkpointInspection.summary.plan_step_count} • Completed {checkpointInspection.summary.completed_step_count} • Repairs {checkpointInspection.summary.completion_repair_attempts}
             </p>
+            {checkpointInspection.reasoning_artifact ? (
+              <div className="mt-3 rounded-lg border border-sky-800/60 bg-sky-950/20 p-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-sky-300">
+                  Reasoning Artifact
+                </p>
+                <p className="mt-1 text-sm text-sky-100">
+                  {checkpointInspection.reasoning_artifact.intent}
+                </p>
+                <p className="mt-2 text-xs text-sky-200/90">
+                  Workspace facts:{' '}
+                  {checkpointInspection.reasoning_artifact.workspace_facts
+                    .slice(0, 3)
+                    .join(' • ')}
+                </p>
+                <p className="mt-1 text-xs text-sky-200/90">
+                  Planned actions:{' '}
+                  {checkpointInspection.reasoning_artifact.planned_actions
+                    .slice(0, 3)
+                    .join(' • ')}
+                </p>
+                <p className="mt-1 text-xs text-sky-200/90">
+                  Verification:{' '}
+                  {checkpointInspection.reasoning_artifact.verification_plan
+                    .slice(0, 2)
+                    .join(' • ')}
+                </p>
+              </div>
+            ) : null}
             {checkpointInspection.restore_fidelity ? (
               <p
                 className={cn(
@@ -901,6 +999,35 @@ export function SessionSettingsPanel({
                 )}
               >
                 Replay fidelity {checkpointInspection.restore_fidelity.status} ({checkpointInspection.restore_fidelity.score}/100): {checkpointInspection.restore_fidelity.summary}
+              </p>
+            ) : null}
+            {checkpointInspection.latest_failure ? (
+              <div className="mt-3 rounded-lg border border-amber-800/60 bg-amber-950/30 p-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-amber-300">
+                  Latest Failure
+                </p>
+                <p className="mt-1 text-sm text-amber-100">
+                  {checkpointInspection.latest_failure.root_cause || 'unknown'} {checkpointInspection.latest_failure.task_title ? `• ${checkpointInspection.latest_failure.task_title}` : ''}
+                </p>
+                <p className="mt-1 text-xs text-amber-200/80">
+                  {checkpointInspection.latest_failure.phase || 'execution'} {typeof checkpointInspection.latest_failure.step_index === 'number' ? `• step ${checkpointInspection.latest_failure.step_index + 1}` : ''}
+                  {checkpointInspection.latest_failure.timestamp ? ` • ${formatDateTime(checkpointInspection.latest_failure.timestamp)}` : ''}
+                </p>
+                {checkpointInspection.latest_failure.stderr_preview && (
+                  <p className="mt-2 text-xs text-amber-100/90">
+                    {checkpointInspection.latest_failure.stderr_preview}
+                  </p>
+                )}
+              </div>
+            ) : null}
+            {checkpointInspection.failure_history_preview &&
+            checkpointInspection.failure_history_preview.length > 1 ? (
+              <p className="mt-2 text-xs text-slate-300">
+                Recent failure roots:{' '}
+                {checkpointInspection.failure_history_preview
+                  .slice(0, 3)
+                  .map((failure) => failure.root_cause || 'unknown')
+                  .join(' • ')}
               </p>
             ) : null}
             {checkpointInspection.latest_validation && (

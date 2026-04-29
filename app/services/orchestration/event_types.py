@@ -27,12 +27,14 @@ class EventType:
     TASK_STARTED = "task_started"
     TASK_QUEUED = "task_queued"
     TASK_CLAIMED = "task_claimed"
+    TASK_QUEUE_STALE = "task_queue_stale"
     TASK_DISPATCH_REJECTED = "task_dispatch_rejected"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
 
     # ── Planning ──────────────────────────────────────────────────────────────
     PLAN_REVISED = "plan_revised"
+    REASONING_ARTIFACT_GENERATED = "reasoning_artifact_generated"
 
     # ── Human-in-the-loop ─────────────────────────────────────────────────────
     WAITING_FOR_INPUT = "waiting_for_input"

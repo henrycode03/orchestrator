@@ -26,6 +26,7 @@ from app.services.orchestration.executor import ExecutorService
 from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
+    attach_failure_envelope,
     emit_intent_outcome_mismatch,
     maybe_emit_divergence_detected,
     read_orchestration_events,
@@ -41,7 +42,11 @@ from app.services.orchestration.step_support import (
     step_needs_command_repair,
 )
 from app.services.orchestration.telemetry import emit_phase_event
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import (
+    FailureEnvelope,
+    OrchestrationRunContext,
+    classify_failure_root_cause,
+)
 from app.services.orchestration.workspace_guard import (
     compute_workspace_checksum,
     detect_scope_violations,
@@ -102,6 +107,40 @@ def execute_step_loop(
     emit_live = ctx.emit_live
     error_handler = ctx.error_handler
     restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
+
+    reasoning_verdict = ValidatorService.validate_reasoning_artifact(
+        getattr(orchestration_state, "reasoning_artifact", None),
+        plan=orchestration_state.plan,
+        validation_severity=ctx.validation_severity,
+    )
+    if not reasoning_verdict.accepted:
+        orchestration_state.status = OrchestrationStatus.ABORTED
+        orchestration_state.abort_reason = (
+            "Structured reasoning artifact is missing or invalid for execution"
+        )
+        record_validation_verdict(
+            db,
+            session_id,
+            task_id,
+            orchestration_state,
+            reasoning_verdict,
+        )
+        task.status = TaskStatus.FAILED
+        task.error_message = (
+            "Execution blocked before step 1 because the reasoning artifact is invalid: "
+            + "; ".join(reasoning_verdict.reasons[:4])
+        )
+        if session_task_link:
+            session_task_link.status = TaskStatus.FAILED
+            session_task_link.completed_at = datetime.now(timezone.utc)
+        if session:
+            session.status = "paused"
+            session.is_active = False
+            set_session_alert(session, "error", task.error_message[:2000])
+        db.commit()
+        restore_workspace_snapshot_if_needed("reasoning artifact gate failed")
+        write_project_state_snapshot_fn(db, project, task, session_id)
+        return {"status": "failed", "reason": "reasoning_artifact_gate_failed"}
 
     orchestration_state.status = OrchestrationStatus.EXECUTING
     logger.info(
@@ -218,6 +257,15 @@ def execute_step_loop(
                     extract_structured_text=extract_structured_text,
                     normalize_step=normalize_step,
                     record_live_log=record_live_log_fn,
+                    failure_envelope=FailureEnvelope(
+                        session_id=session_id,
+                        task_id=task_id,
+                        phase="step_validation",
+                        step_index=step_index + 1,
+                        root_cause="malformed_prompt_output",
+                        input={"step": dict(step or {})},
+                        output={},
+                    ),
                 )
                 if repaired_step is not None:
                     orchestration_state.plan[step_index] = repaired_step
@@ -556,6 +604,49 @@ def execute_step_loop(
             error_message=step_result.get("error", ""),
             attempt=current_attempt,
         )
+        runtime_metadata = (
+            runtime_service.get_backend_metadata()
+            if runtime_service and hasattr(runtime_service, "get_backend_metadata")
+            else {}
+        )
+        failure_envelope = FailureEnvelope(
+            session_id=session_id,
+            task_id=task_id,
+            phase="debugging",
+            step_index=step_index + 1,
+            model_id=":".join(
+                part
+                for part in [
+                    str(runtime_metadata.get("backend") or "").strip(),
+                    str(runtime_metadata.get("model_family") or "").strip(),
+                ]
+                if part
+            ),
+            input={
+                "step_description": step_description,
+                "commands": list(step_commands or []),
+                "verification": verification_command,
+                "expected_files": list(expected_files or []),
+            },
+            output={
+                "step_status": step_status,
+                "files_changed": list(step_record.files_changed or []),
+                "tool_failures": list(assessment.tool_failures or [])[:10],
+            },
+            stderr="\n".join(
+                part
+                for part in [
+                    step_record.error_message,
+                    step_record.verification_output,
+                ]
+                if part
+            )[:1200],
+            root_cause=classify_failure_root_cause(
+                error_message=step_record.error_message,
+                verification_output=step_record.verification_output,
+                tool_failures=assessment.tool_failures,
+            ),
+        )
         step_finished_event = None
         try:
             step_finished_event = append_orchestration_event(
@@ -698,11 +789,14 @@ def execute_step_loop(
                 parent_event_id=(step_finished_event or step_started_event or {}).get(
                     "event_id"
                 ),
-                details={
-                    "step_index": step_index + 1,
-                    "attempt": current_attempt,
-                    "reason": step_record.error_message[:240],
-                },
+                details=attach_failure_envelope(
+                    {
+                        "step_index": step_index + 1,
+                        "attempt": current_attempt,
+                        "reason": step_record.error_message[:240],
+                    },
+                    failure_envelope,
+                ),
             )
             write_orchestration_state_snapshot(
                 project_dir=orchestration_state.project_dir,
@@ -955,6 +1049,7 @@ def execute_step_loop(
             verification_output=step_record.verification_output,
             attempt_number=current_attempt,
             max_attempts=max_attempts,
+            failure_envelope=failure_envelope,
         )
 
         debug_result = asyncio.run(
@@ -987,6 +1082,7 @@ def execute_step_loop(
                 attempt_number=current_attempt,
                 max_attempts=max_attempts,
                 compact=True,
+                failure_envelope=failure_envelope,
             )
             debug_result = asyncio.run(
                 runtime_service.execute_task(

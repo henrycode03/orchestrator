@@ -8,6 +8,7 @@ import type {
   OrchestrationEvent,
   Project,
   Session,
+  SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
   SessionStateDiffResponse,
   Task,
@@ -97,6 +98,7 @@ export default function SessionDetail() {
   const [recommendedCheckpointName, setRecommendedCheckpointName] = useState<string | null>(null);
   const [checkpointInspection, setCheckpointInspection] = useState<CheckpointInspection | null>(null);
   const [compareMatches, setCompareMatches] = useState<SessionDivergenceCompareResponse | null>(null);
+  const [dispatchWatchdog, setDispatchWatchdog] = useState<SessionDispatchWatchdogResponse | null>(null);
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
   const [showInterventionForm, setShowInterventionForm] = useState(false);
@@ -356,6 +358,10 @@ export default function SessionDetail() {
 
   const toTimelineEventFromOrchestrationEvent = useCallback((event: OrchestrationEvent): TimelineEvent => {
     const details = event.details || {};
+    const failureEnvelope =
+      details.failure_envelope && typeof details.failure_envelope === 'object'
+        ? (details.failure_envelope as Record<string, unknown>)
+        : null;
     const phase = typeof details.phase === 'string' ? details.phase : '';
     const phaseLabel = humanizeToken(phase || event.event_type);
     const stepIndex =
@@ -374,6 +380,19 @@ export default function SessionDetail() {
     const statusText = detailToText(details.status);
     const reasonsText = detailToText(details.reasons);
     const messageText = detailToText(details.message);
+    const failureRootCause = detailToText(failureEnvelope?.root_cause);
+    const queueLatencySeconds =
+      typeof details.queue_latency_seconds === 'number'
+        ? details.queue_latency_seconds
+        : typeof details.queue_latency_seconds === 'string'
+          ? Number(details.queue_latency_seconds)
+          : null;
+    const queueAgeSeconds =
+      typeof details.queue_age_seconds === 'number'
+        ? details.queue_age_seconds
+        : typeof details.queue_age_seconds === 'string'
+          ? Number(details.queue_age_seconds)
+          : null;
 
     let type: TimelineEventType = 'info';
     let title = humanizeToken(event.event_type);
@@ -473,12 +492,30 @@ export default function SessionDetail() {
       case 'retry_entered':
         type = 'debugging';
         title = 'Retry Entered';
-        detail = messageText || 'A retry/debug cycle started';
+        detail = [
+          messageText || 'A retry/debug cycle started',
+          failureRootCause ? `root cause: ${humanizeToken(failureRootCause)}` : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ');
         break;
       case 'plan_revised':
         type = 'revising_plan';
         title = 'Plan Revised';
         detail = messageText || 'The orchestration plan was revised';
+        break;
+      case 'reasoning_artifact_generated':
+        type = 'validation';
+        title = 'Reasoning Artifact Ready';
+        detail = [
+          detailToText(details.intent) || 'Structured reasoning artifact generated',
+          typeof details.planned_action_count === 'number'
+            ? `${details.planned_action_count} actions`
+            : null,
+          statusText ? `status: ${statusText}` : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ');
         break;
       case 'task_started':
         type = 'task';
@@ -493,17 +530,52 @@ export default function SessionDetail() {
       case 'task_queued':
         type = 'status';
         title = 'Task Queued';
-        detail = messageText || 'Task queued and waiting for worker claim';
+        detail = [
+          messageText || 'Task queued and waiting for worker claim',
+          queueAgeSeconds !== null && Number.isFinite(queueAgeSeconds)
+            ? `age: ${queueAgeSeconds.toFixed(1)}s`
+            : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ');
         break;
       case 'task_claimed':
         type = 'task';
         title = 'Task Claimed';
-        detail = messageText || 'Worker claimed queued task dispatch';
+        detail = [
+          messageText || 'Worker claimed queued task dispatch',
+          queueLatencySeconds !== null && Number.isFinite(queueLatencySeconds)
+            ? `queue latency: ${queueLatencySeconds.toFixed(1)}s`
+            : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ');
+        break;
+      case 'task_queue_stale':
+        type = 'error';
+        title = 'Queue Stalled';
+        detail = [
+          messageText || 'Queued task exceeded the dispatch watchdog SLA',
+          queueAgeSeconds !== null && Number.isFinite(queueAgeSeconds)
+            ? `age: ${queueAgeSeconds.toFixed(1)}s`
+            : null,
+          failureRootCause ? `root cause: ${humanizeToken(failureRootCause)}` : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ');
         break;
       case 'task_dispatch_rejected':
         type = 'status';
         title = 'Dispatch Rejected';
-        detail = messageText || detailToText(details.reason) || 'Stale or duplicate worker dispatch rejected';
+        detail = [
+          messageText || detailToText(details.reason) || 'Stale or duplicate worker dispatch rejected',
+          failureRootCause ? `root cause: ${humanizeToken(failureRootCause)}` : null,
+          queueLatencySeconds !== null && Number.isFinite(queueLatencySeconds)
+            ? `queue latency: ${queueLatencySeconds.toFixed(1)}s`
+            : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(' | ');
         break;
       case 'task_failed':
         type = 'error';
@@ -662,6 +734,16 @@ export default function SessionDetail() {
     }
   }, []);
 
+  const loadDispatchWatchdog = useCallback(async (currentSessionId: number) => {
+    try {
+      const response = await sessionsAPI.getSessionDispatchWatchdog(currentSessionId);
+      setDispatchWatchdog(response.data);
+    } catch (loadError) {
+      console.debug('Dispatch watchdog unavailable:', loadError);
+      setDispatchWatchdog(null);
+    }
+  }, []);
+
   const healthEvents = orchestrationEvents
     .filter((event) => event.event_type === 'health_score_updated')
     .map((event) => {
@@ -712,6 +794,7 @@ export default function SessionDetail() {
         [
           'task_queued',
           'task_claimed',
+          'task_queue_stale',
           'task_dispatch_rejected',
           'checkpoint_saved',
           'checkpoint_loaded',
@@ -727,6 +810,7 @@ export default function SessionDetail() {
       if (
         [
           'validation_result',
+          'reasoning_artifact_generated',
           'completion_evidence_failed',
           'health_score_updated',
           'divergence_detected',
@@ -969,11 +1053,19 @@ export default function SessionDetail() {
             appendOrchestrationTimelineEvent(data as OrchestrationEvent);
             if (
               sessionId &&
-              ['phase_finished', 'checkpoint_saved', 'retry_entered', 'tool_failed', 'validation_result'].includes(
+              ['phase_finished', 'checkpoint_saved', 'retry_entered', 'tool_failed', 'validation_result', 'reasoning_artifact_generated'].includes(
                 String(data.event_type || '')
               )
             ) {
               void loadStateDiff(Number(sessionId), tasksRef.current);
+            }
+            if (
+              sessionId &&
+              ['task_queued', 'task_claimed', 'task_dispatch_rejected', 'retry_entered'].includes(
+                String(data.event_type || '')
+              )
+            ) {
+              void loadDispatchWatchdog(Number(sessionId));
             }
           } else if (data.type === 'ping') {
             console.debug('Received ping, sending pong');
@@ -1017,7 +1109,7 @@ export default function SessionDetail() {
           setupWebSocket(session_id);
         }, 3000);
       };
-  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadStateDiff, logVerbosity, logViewMode, sessionId]);
+  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadDispatchWatchdog, loadStateDiff, logVerbosity, logViewMode, sessionId]);
 
   const scheduleWebSocketConnect = useCallback(
     (session_id: number, delayMs: number = 0) => {
@@ -1113,6 +1205,7 @@ export default function SessionDetail() {
         setProject(projectRes.data);
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
+        await loadDispatchWatchdog(sessionRes.data.id);
         if (sessionRes.data.status === 'running') {
           await loadStateDiff(sessionRes.data.id, tasksRes.data || []);
         }
@@ -1212,7 +1305,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadDispatchWatchdog, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSessionFresh = async () => {
     if (!session || !sessionId) {
@@ -1984,6 +2077,7 @@ export default function SessionDetail() {
             anomalyEvents={anomalyEvents}
             compareMatches={compareMatches}
             displayLogs={displayLogs}
+            dispatchWatchdog={dispatchWatchdog}
             formatDateTime={formatDateTime}
             healthEvents={healthEvents}
             handleRefreshLogs={handleRefreshLogs}

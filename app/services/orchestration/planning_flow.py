@@ -30,12 +30,63 @@ from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import ReasoningArtifact
 from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 # Circuit breaker: abort planning after this many consecutive validation failures
 # to prevent infinite retry loops that hang the session.
 MAX_PLANNING_RETRIES = 3
+
+
+def _build_reasoning_artifact(
+    *,
+    ctx: OrchestrationRunContext,
+    workspace_review: Dict[str, Any],
+) -> Dict[str, Any]:
+    plan = list(ctx.orchestration_state.plan or [])
+    workspace_facts = [
+        f"project_dir={ctx.orchestration_state.project_dir}",
+        f"execution_profile={ctx.execution_profile}",
+        f"workflow_profile={getattr(ctx, 'workflow_profile', 'default')}",
+    ]
+    if workspace_review.get("has_existing_files"):
+        workspace_facts.append("workspace already contains project files")
+    file_count = int(workspace_review.get("file_count") or 0)
+    source_file_count = int(workspace_review.get("source_file_count") or 0)
+    if file_count or source_file_count:
+        workspace_facts.append(
+            f"workspace inventory shows {file_count} files and {source_file_count} source files"
+        )
+    review_summary = str(workspace_review.get("summary") or "").strip()
+    if review_summary:
+        workspace_facts.append(review_summary[:180])
+
+    planned_actions = [
+        str(step.get("description") or f"Step {index + 1}").strip()
+        for index, step in enumerate(plan[:8])
+        if str(step.get("description") or "").strip()
+    ]
+    verification_plan = []
+    for step in plan[:8]:
+        verification = str(step.get("verification") or "").strip()
+        if verification:
+            verification_plan.append(verification)
+        elif step.get("expected_files"):
+            verification_plan.append(
+                "materialize expected files: "
+                + ", ".join(
+                    str(item) for item in (step.get("expected_files") or [])[:4]
+                )
+            )
+
+    artifact = ReasoningArtifact(
+        intent=" ".join(str(ctx.prompt or "").split())[:220],
+        workspace_facts=workspace_facts[:8],
+        planned_actions=planned_actions[:8],
+        verification_plan=verification_plan[:8] or ["verify each planned step outcome"],
+    )
+    return artifact.to_dict()
 
 
 def _should_repair_truncated_single_step_plan(
@@ -603,6 +654,82 @@ def execute_planning_phase(
                 )
                 retry_state.consecutive_failures += 1
                 continue
+
+            reasoning_artifact = _build_reasoning_artifact(
+                ctx=ctx,
+                workspace_review=workspace_review,
+            )
+            reasoning_verdict = ValidatorService.validate_reasoning_artifact(
+                reasoning_artifact,
+                plan=ctx.orchestration_state.plan,
+                validation_severity=ctx.validation_severity,
+            )
+            record_validation_verdict(
+                ctx.db,
+                ctx.session_id,
+                ctx.task_id,
+                ctx.orchestration_state,
+                reasoning_verdict,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
+            )
+            if not reasoning_verdict.accepted:
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Reasoning artifact validation failed after plan acceptance"
+                )
+                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                ctx.orchestration_state.abort_reason = (
+                    "Structured reasoning artifact failed validation before execution"
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="ERROR",
+                    phase="planning",
+                    message="[ORCHESTRATION] Structured reasoning artifact failed validation before execution",
+                    details={
+                        "reason": "reasoning_artifact_validation_failed",
+                        "validation_status": reasoning_verdict.status,
+                    },
+                )
+                ctx.task.status = TaskStatus.FAILED
+                ctx.task.error_message = (
+                    "Structured reasoning artifact failed validation: "
+                    + "; ".join(reasoning_verdict.reasons[:4])
+                )
+                ctx.db.commit()
+                if ctx.restore_workspace_snapshot_if_needed:
+                    ctx.restore_workspace_snapshot_if_needed(
+                        "reasoning artifact validation failed"
+                    )
+                return {
+                    "status": "failed",
+                    "reason": "reasoning_artifact_validation_failed",
+                }
+
+            ctx.orchestration_state.reasoning_artifact = reasoning_artifact
+            try:
+                append_orchestration_event(
+                    project_dir=ctx.orchestration_state.project_dir,
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    event_type=EventType.REASONING_ARTIFACT_GENERATED,
+                    parent_event_id=(planning_phase_event or {}).get("event_id"),
+                    details={
+                        "intent": reasoning_artifact.get("intent"),
+                        "workspace_fact_count": len(
+                            reasoning_artifact.get("workspace_facts", [])
+                        ),
+                        "planned_action_count": len(
+                            reasoning_artifact.get("planned_actions", [])
+                        ),
+                        "verification_count": len(
+                            reasoning_artifact.get("verification_plan", [])
+                        ),
+                        "validation_status": reasoning_verdict.status,
+                    },
+                )
+            except Exception:
+                pass
 
             ctx.logger.info(
                 "[ORCHESTRATION] Generated %s steps in plan (using %s)",

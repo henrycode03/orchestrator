@@ -18,6 +18,9 @@ PLANNING_START_MESSAGES = {
     "[ORCHESTRATION] Phase 1: PLANNING - generating step plan",
 }
 
+QUEUE_MESSAGES = ("Queued task ",)
+CLAIM_MESSAGES = ("[ORCHESTRATION] Worker claimed queued task dispatch",)
+
 PLANNING_RETRY_MARKERS = (
     "Planning output needed a strict JSON retry",
     "Planning response was malformed or truncated; starting repair pass",
@@ -134,6 +137,35 @@ def diagnose_planning_stuck(
                 "Tighten the planner repair prompt to explicitly forbid repeated path roots.",
                 "Add/strengthen validator rules for duplicated path segments in commands as well as expected_files.",
                 "Treat this as a bad returned plan, not a phantom stuck UI state.",
+            ),
+        )
+
+    if (
+        snapshot.task_status.upper() == "PENDING"
+        and snapshot.task_current_step == 0
+        and any(marker in latest_message for marker in QUEUE_MESSAGES)
+        and latest_age_seconds is not None
+        and latest_age_seconds >= orphaned_after_seconds
+        and not any(
+            any(claim_marker in (log.message or "") for claim_marker in CLAIM_MESSAGES)
+            for log in snapshot.latest_logs
+        )
+    ):
+        return PlanningDiagnosis(
+            state="queued_but_unclaimed",
+            summary=(
+                "The task was queued for execution, but no worker claim has landed "
+                "within the expected handoff window."
+            ),
+            evidence=(
+                f"Task {snapshot.task_id} is still PENDING at step 0.",
+                f"Latest log is queue submission and is {int(latest_age_seconds)}s old.",
+                "No worker-claim log was recorded after queueing.",
+            ),
+            recommendations=(
+                "Check Celery worker health and task routing before treating this as a planner bug.",
+                "Use dispatch watchdog data or orchestration events to confirm whether the task is stale in queue.",
+                "If the session instance changed, expect the original dispatch to be rejected rather than claimed.",
             ),
         )
 

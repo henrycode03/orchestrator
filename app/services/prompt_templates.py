@@ -93,6 +93,7 @@ class OrchestrationState:
         default_factory=list
     )  # per-step retry history
     changed_files: List[str] = field(default_factory=list)
+    reasoning_artifact: Optional[Dict[str, Any]] = None
     validation_history: List[Dict[str, Any]] = field(default_factory=list)
     phase_history: List[Dict[str, Any]] = field(default_factory=list)
     last_plan_validation: Optional[Dict[str, Any]] = None
@@ -279,10 +280,11 @@ class PromptTemplates:
 
 **Execution Boundary:**
 1. Every command MUST run inside `{project_dir}`
-2. Use relative paths only
-3. Do NOT use `..`, `~`, or absolute paths
-4. Do NOT create sibling project folders under `{workspace_root}`
-5. Assume the working directory is already `{project_dir}`
+2. Use relative paths only in shell commands and `expected_files`
+3. If execution later needs a file-read or file-write tool, keep the path relative here; the executor will expand it into an absolute path rooted under `{project_dir}`
+4. Do NOT use `..`, `~`, or absolute paths in planning output
+5. Do NOT create sibling project folders under `{workspace_root}`
+6. Assume the working directory is already `{project_dir}`
 
 **Requirements:**
 1. Create 3-8 sequential steps
@@ -314,6 +316,7 @@ class PromptTemplates:
 16. If the context mentions completed or promoted prior task artifacts, assume those files have already been hydrated into `{project_dir}` and extend them instead of recreating parallel implementations
 17. Never join separate shell commands with commas; each command must stand alone as a valid shell command
 18. Use only relative paths in `expected_files` — never absolute paths like `/root/...` or `/home/...`
+19. Do not pre-expand planned file paths to `{project_dir}/...`; keep them relative and let execution promote them only when a file tool call is needed
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -359,7 +362,7 @@ class PromptTemplates:
 **Path Rules:**
 1. Run everything from `{project_dir}`
 2. Treat shell command paths as relative to `{project_dir}`
-3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}` because the tool resolver may not inherit the shell working directory
+3. Planned file paths may remain relative, but each file-read or file-write tool call must use an absolute canonical path rooted under `{project_dir}` because the tool resolver may not inherit the shell working directory
 4. Never shorten the absolute workspace path. Use the full real path beginning with `{project_dir}`, not a truncated variant like `/vault/...`
 5. Do NOT create files or folders outside `{project_dir}`
 6. Do NOT create documentation files unless the task explicitly requires them
@@ -418,7 +421,7 @@ class PromptTemplates:
 **Path Rules:**
 1. Keep every proposed fix inside `{project_dir}`
 2. Use relative paths for shell commands and verification commands
-3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}`
+3. Keep planned file references relative, but use absolute canonical paths rooted under `{project_dir}` when invoking file-read or file-write tools
 4. Never shorten the absolute workspace path; use the full real path beginning with `{project_dir}`
 5. Do NOT suggest creating or modifying files outside `{project_dir}`
 6. Do NOT propose documentation files unless the task explicitly requires them
@@ -467,7 +470,7 @@ Return your analysis ONLY as JSON text in your response. The orchestrator reads 
 **Path Rules:**
 1. Revised commands MUST stay inside `{project_dir}`
 2. Use relative paths for shell commands and verification commands
-3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}`
+3. Keep planned file references relative, but use absolute canonical paths rooted under `{project_dir}` when invoking file-read or file-write tools
 4. Never shorten the absolute workspace path; use the full real path beginning with `{project_dir}`
 5. Do NOT create sibling folders under `{workspace_root}`
 6. Do NOT add documentation-only steps unless the task explicitly requires them

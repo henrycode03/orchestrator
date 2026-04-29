@@ -18,7 +18,7 @@ from app.services.prompt_templates import OrchestrationState, StepResult
 
 from .event_types import EventType
 from .policy import MAX_STEP_ATTEMPTS
-from .types import ValidationVerdict
+from .types import FailureEnvelope, ValidationVerdict
 
 
 def _orchestration_event_log_path(
@@ -544,6 +544,9 @@ def build_orchestration_state_snapshot(
         "related_event_id": related_event_id,
         "status": orchestration_state.status.value,
         "plan_steps": list(orchestration_state.plan or []),
+        "reasoning_artifact_present": bool(
+            getattr(orchestration_state, "reasoning_artifact", None)
+        ),
         "current_step_index": int(orchestration_state.current_step_index or 0),
         "retry_budget_remaining": retry_budget_remaining,
         "validation_verdicts": validation_verdicts,
@@ -595,6 +598,9 @@ def write_checkpoint_state_snapshot(
         "related_event_id": related_event_id,
         "status": orchestration_state.get("status"),
         "plan_steps": list(orchestration_state.get("plan", []) or []),
+        "reasoning_artifact_present": bool(
+            orchestration_state.get("reasoning_artifact")
+        ),
         "current_step_index": int(
             orchestration_state.get(
                 "current_step_index", checkpoint_payload.get("current_step_index", 0)
@@ -682,6 +688,16 @@ def append_orchestration_event(
     return payload
 
 
+def attach_failure_envelope(
+    details: Optional[Dict[str, Any]],
+    envelope: Optional[FailureEnvelope],
+) -> Dict[str, Any]:
+    payload = dict(details or {})
+    if envelope is not None:
+        payload["failure_envelope"] = envelope.to_dict()
+    return payload
+
+
 def set_session_alert(
     session: Optional[SessionModel],
     level: Optional[str] = None,
@@ -745,6 +761,7 @@ def save_orchestration_checkpoint(
         orchestration_state={
             "status": orchestration_state.status.value,
             "plan": orchestration_state.plan,
+            "reasoning_artifact": orchestration_state.reasoning_artifact,
             "current_step_index": orchestration_state.current_step_index,
             "debug_attempts": orchestration_state.debug_attempts,
             "changed_files": orchestration_state.changed_files,
@@ -823,6 +840,7 @@ def record_validation_verdict(
                 "profile": verdict.profile,
                 "step_number": step_number,
                 "reasons": verdict.reasons[:10],
+                "confidence": verdict.confidence,
             },
         )
         write_orchestration_state_snapshot(
