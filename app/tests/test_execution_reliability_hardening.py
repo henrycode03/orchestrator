@@ -11,6 +11,7 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.tasks.worker import _claim_queued_task_for_worker
+from app.tasks.worker import _should_reject_stale_dispatch_claim
 
 
 def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
@@ -138,6 +139,33 @@ def test_worker_claim_guard_claims_once_and_rejects_duplicate(db_session):
     )
     assert claimed_again is False
     assert reason_again.startswith("task_not_claimable:")
+
+
+def test_worker_rejects_stale_dispatch_that_already_progressed(tmp_path):
+    project_dir = tmp_path / "skillsync"
+    project_dir.mkdir()
+
+    queue_event = {"event_id": "queued-1", "timestamp": "2026-04-29T14:59:02+00:00"}
+    verify_project_dir = project_dir
+    from app.services.orchestration.persistence import append_orchestration_event
+
+    append_orchestration_event(
+        project_dir=verify_project_dir,
+        session_id=36,
+        task_id=2,
+        event_type=EventType.TASK_CLAIMED,
+        details={"queued_event_id": "queued-1"},
+    )
+
+    reason = _should_reject_stale_dispatch_claim(
+        dispatch_project_dir=verify_project_dir,
+        session_id=36,
+        task_id=2,
+        queued_event=queue_event,
+        queue_latency_seconds=20000.0,
+    )
+
+    assert reason == "stale_queue_dispatch_already_progressed"
 
 
 def test_worker_claim_guard_rejects_stale_session_instance(db_session):

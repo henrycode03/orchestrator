@@ -7,6 +7,7 @@ from app.services.orchestration.context_assembly import (
     assemble_execution_prompt,
     assemble_planning_prompt,
     build_workspace_inventory_summary,
+    collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )
 from app.services.prompt_templates import OrchestrationState, StepResult
@@ -192,6 +193,21 @@ def test_progress_notes_filter_stale_file_references_against_live_workspace(tmp_
     assert "Ignore prior-note file references" in sanitized
     assert "src/utils/format.test.ts" in sanitized
     assert "package.json restored to vitest run" in sanitized
+
+
+def test_workspace_inventory_skips_ignored_directories_without_descending(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "src").mkdir(parents=True)
+    (project_dir / "src" / "main.ts").write_text("export const ok = true;\n")
+    (project_dir / "node_modules" / "pkg").mkdir(parents=True)
+    (project_dir / "node_modules" / "pkg" / "index.js").write_text(
+        "module.exports = {}\n"
+    )
+
+    inventory = collect_workspace_inventory_paths(project_dir, max_files=10)
+
+    assert "src/main.ts" in inventory
+    assert all("node_modules" not in path for path in inventory)
 
 
 def test_render_workspace_path_for_prompt_uses_configured_workspace_root(monkeypatch):

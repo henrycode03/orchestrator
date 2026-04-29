@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 import pytest
 
 from app.services.orchestration.event_types import EventType, is_known_event_type
+from app.services.orchestration.observability import build_trace_export
 from app.services.orchestration.persistence import (
     _apply_counterfactual_overrides_to_checkpoint,
     append_orchestration_event,
@@ -442,3 +443,27 @@ def test_counterfactual_replay_returns_404_for_unknown_session(authenticated_cli
         json={},
     )
     assert resp.status_code == 404
+
+
+def test_trace_export_sorts_timestamps_by_actual_instant():
+    trace = build_trace_export(
+        session_id=1,
+        task_id=2,
+        events=[
+            {
+                "event_id": "late",
+                "event_type": EventType.PHASE_STARTED,
+                "timestamp": "2026-01-01T10:00:00+05:30",
+                "details": {"phase": "planning"},
+            },
+            {
+                "event_id": "early",
+                "event_type": EventType.PHASE_STARTED,
+                "timestamp": "2026-01-01T05:00:00Z",
+                "details": {"phase": "execution"},
+            },
+        ],
+        snapshots=[],
+    )
+
+    assert [span["span_id"] for span in trace["spans"]] == ["late", "early"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -155,6 +156,49 @@ class PlannerService:
                 and not task_looks_implementation_heavy
             )
         )
+
+    @staticmethod
+    def _uses_background_process(command: str) -> bool:
+        text = str(command or "").strip().lower()
+        if not text:
+            return False
+        if re.search(r"(^|[^&])&(?=[^&]|$)", text):
+            return True
+        background_markers = (
+            "nohup ",
+            " disown",
+            "tail -f",
+            "npm run dev",
+            "pnpm dev",
+            "yarn dev",
+            "vite dev",
+            "next dev",
+            "webpack serve",
+        )
+        return any(marker in text for marker in background_markers)
+
+    @staticmethod
+    def find_immediate_repair_step_issues(
+        plan: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, List[int]]:
+        issues: Dict[str, List[int]] = {
+            "non_runnable_steps": [],
+            "background_process_steps": [],
+        }
+        for index, step in enumerate(plan or [], start=1):
+            step_number = int(step.get("step_number") or index)
+            for command in step.get("commands", []) or []:
+                rendered = str(command or "").strip()
+                lowered = rendered.lower()
+                if lowered.startswith(
+                    ("write ", "edit ", "verify ", "check ", "ensure ", "confirm ")
+                ):
+                    issues["non_runnable_steps"].append(step_number)
+                    break
+                if PlannerService._uses_background_process(rendered):
+                    issues["background_process_steps"].append(step_number)
+                    break
+        return {key: sorted(set(value)) for key, value in issues.items() if value}
 
     @staticmethod
     def build_minimal_planning_prompt(

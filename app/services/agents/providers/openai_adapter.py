@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.services.agents.agent_backends import get_backend_descriptor
-from app.services.agents.interfaces import AgentRuntimeError, UnsupportedCapabilityError
+from app.services.agents.interfaces import (
+    AgentInterfaceDescriptor,
+    AgentRuntimeError,
+    ContextWindowPolicy,
+    RetryStrategy,
+    UnsupportedCapabilityError,
+)
+from app.services.model_adaptation import resolve_adaptation_profile
 from app.services.workspace.system_settings import get_effective_agent_model_family
 
 
@@ -149,15 +156,57 @@ class OpenAIResponsesRuntime:
         }
 
     def get_backend_metadata(self) -> dict[str, Any]:
+        model_family = get_effective_agent_model_family(
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+        )
+        adaptation_profile = resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+        )
         return {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
-            "model_family": get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
-            ),
+            "model_family": model_family,
+            "adaptation_profile": adaptation_profile.name,
+            "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+
+    def describe_interface(self) -> AgentInterfaceDescriptor:
+        model_family = get_effective_agent_model_family(
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+        )
+        profile = resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+        )
+        return AgentInterfaceDescriptor(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+            planning_prompt_template="assemble_planning_prompt",
+            execution_prompt_template="assemble_execution_prompt",
+            prompt_dialect=profile.prompt_dialect,
+            tool_capability_map={
+                "shell": False,
+                "filesystem": False,
+                "checkpoint_resume": False,
+                "streaming": bool(
+                    self.backend_descriptor.capabilities.supports_streaming
+                ),
+            },
+            tool_shape=profile.tool_shape,
+            preferred_retry_strategy=RetryStrategy(
+                planning="structured_retry",
+                execution="unsupported",
+                completion="structured_retry",
+            ),
+            context_window_policy=ContextWindowPolicy(
+                max_input_tokens=self.backend_descriptor.capabilities.max_context_tokens,
+                overflow_strategy="summarize_and_retry",
+                compaction_strategy=profile.context_window_policy,
+            ),
+        )
 
     def reports_context_overflow(self, result: Optional[dict[str, Any]]) -> bool:
         if not result:

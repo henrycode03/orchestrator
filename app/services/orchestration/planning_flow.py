@@ -39,6 +39,30 @@ from app.services.prompt_templates import OrchestrationStatus, estimate_token_co
 MAX_PLANNING_RETRIES = 3
 
 
+def _compress_project_context_for_planning(
+    orchestration_state: Any,
+    *,
+    max_chars: int = 2800,
+) -> str:
+    current_context = str(getattr(orchestration_state, "project_context", "") or "")
+    if len(current_context) <= max_chars:
+        return current_context
+
+    compact_state_summary = compress_orchestration_context(
+        orchestration_state, max_chars=max_chars // 2
+    )
+    if compact_state_summary and compact_state_summary != "Step progress: 0/0":
+        return compact_state_summary
+
+    normalized = " ".join(current_context.split())
+    if len(normalized) <= max_chars:
+        return normalized
+
+    head = normalized[: max_chars // 2].rstrip()
+    tail = normalized[-(max_chars // 3) :].lstrip()
+    return f"{head}\n...\n{tail}"
+
+
 def _build_reasoning_artifact(
     *,
     ctx: OrchestrationRunContext,
@@ -157,8 +181,11 @@ def execute_planning_phase(
             trigger="phase_started",
             related_event_id=planning_phase_event.get("event_id"),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        ctx.logger.debug(
+            "[ORCHESTRATION] Failed to persist planning phase start event/snapshot: %s",
+            exc,
+        )
 
     ctx.workflow_profile = get_workflow_profile(
         ctx.execution_profile,
@@ -167,6 +194,16 @@ def execute_planning_phase(
     )
     ctx.workflow_phases = get_workflow_phases(ctx.workflow_profile)
     ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
+    if len(ctx.orchestration_state.project_context or "") > 3500:
+        compressed_context = _compress_project_context_for_planning(
+            ctx.orchestration_state
+        )
+        if compressed_context != (ctx.orchestration_state.project_context or ""):
+            ctx.orchestration_state.project_context = compressed_context
+            ctx.logger.info(
+                "[ORCHESTRATION] Compressed oversized planning context before first prompt (%d chars)",
+                len(compressed_context),
+            )
     planning_prompt = (
         assemble_planning_prompt(ctx, workspace_review) if ctx.runtime_service else None
     )
@@ -571,6 +608,49 @@ def execute_planning_phase(
                 ctx.session_instance_id,
                 "Planning output",
             )
+            immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
+                ctx.orchestration_state.plan
+            )
+            if immediate_repair_issues and not retry_state.repair_prompt_used:
+                issue_fragments = []
+                if immediate_repair_issues.get("non_runnable_steps"):
+                    issue_fragments.append(
+                        "non-runnable pseudo-commands in steps "
+                        f"{immediate_repair_issues['non_runnable_steps'][:5]}"
+                    )
+                if immediate_repair_issues.get("background_process_steps"):
+                    issue_fragments.append(
+                        "background processes in steps "
+                        f"{immediate_repair_issues['background_process_steps'][:5]}"
+                    )
+                planning_result = __repair_planning_output(
+                    ctx=ctx,
+                    planning_timeout_seconds=planning_timeout_seconds,
+                    malformed_output=output_text,
+                    reason="plan_contains_immediate_repair_issues: "
+                    + "; ".join(issue_fragments),
+                    rejection_reasons=issue_fragments,
+                    prompt_profile=prompt_profile,
+                )
+                retry_state.repair_prompt_used = True
+                retry_state.consecutive_failures += 1
+                continue
+            if immediate_repair_issues:
+                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                ctx.orchestration_state.abort_reason = "Planning repair still produced non-runnable or long-running commands"
+                ctx.task.status = TaskStatus.FAILED
+                ctx.task.error_message = (
+                    "Planning repair still produced invalid commands: "
+                    + "; ".join(
+                        f"{key}={value[:5]}"
+                        for key, value in immediate_repair_issues.items()
+                    )
+                )
+                ctx.db.commit()
+                return {
+                    "status": "failed",
+                    "reason": "planning_invalid_commands_after_repair",
+                }
             plan_verdict = ValidatorService.validate_plan(
                 ctx.orchestration_state.plan,
                 output_text=output_text,
@@ -598,8 +678,11 @@ def execute_planning_phase(
                         task_id=ctx.task_id,
                         parent_event_id=(planning_phase_event or {}).get("event_id"),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    ctx.logger.debug(
+                        "[ORCHESTRATION] Failed to emit planning divergence signal: %s",
+                        exc,
+                    )
             ctx.db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
@@ -622,8 +705,11 @@ def execute_planning_phase(
                     trigger="phase_finished",
                     related_event_id=phase_finished_event.get("event_id"),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                ctx.logger.debug(
+                    "[ORCHESTRATION] Failed to persist planning phase finish event/snapshot: %s",
+                    exc,
+                )
 
             if not plan_verdict.accepted and not retry_state.repair_prompt_used:
                 ctx.logger.warning(
@@ -644,15 +730,21 @@ def execute_planning_phase(
                 continue
 
             if not plan_verdict.accepted:
-                # Validation failed even after repair -- the circuit breaker at the
-                # top of the while loop will abort on the next iteration, so just
-                # increment the failure counter and let the loop continue.
+                planning_result = __repair_planning_output(
+                    ctx=ctx,
+                    planning_timeout_seconds=planning_timeout_seconds,
+                    malformed_output=output_text,
+                    reason="plan_validation_failed_after_repair: "
+                    + "; ".join(plan_verdict.reasons[:3]),
+                    rejection_reasons=plan_verdict.reasons,
+                    prompt_profile=prompt_profile,
+                )
                 ctx.logger.warning(
-                    "[ORCHESTRATION] Plan validation failed after repair (failure_count=%d), "
-                    "circuit breaker will evaluate on next iteration",
+                    "[ORCHESTRATION] Plan validation failed after repair; requesting a fresh planning result (failure_count=%d)",
                     retry_state.consecutive_failures,
                 )
                 retry_state.consecutive_failures += 1
+                retry_state.repair_prompt_used = True
                 continue
 
             reasoning_artifact = _build_reasoning_artifact(
@@ -728,8 +820,11 @@ def execute_planning_phase(
                         "validation_status": reasoning_verdict.status,
                     },
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                ctx.logger.debug(
+                    "[ORCHESTRATION] Failed to persist reasoning artifact event: %s",
+                    exc,
+                )
 
             ctx.logger.info(
                 "[ORCHESTRATION] Generated %s steps in plan (using %s)",
@@ -805,8 +900,11 @@ def execute_planning_phase(
                 trigger="phase_finished",
                 related_event_id=phase_finished_event.get("event_id"),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to persist planning timeout phase-finish snapshot: %s",
+                exc,
+            )
         ctx.task.status = TaskStatus.FAILED
         ctx.task.error_message = str(exc)
         ctx.db.commit()
@@ -853,8 +951,11 @@ def execute_planning_phase(
                 trigger="phase_finished",
                 related_event_id=phase_finished_event.get("event_id"),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to persist planning soft-time-limit phase-finish snapshot: %s",
+                exc,
+            )
         ctx.task.status = TaskStatus.FAILED
         ctx.task.error_message = "Planning exceeded the worker soft time limit before a valid plan was produced"
         ctx.db.commit()
@@ -895,8 +996,11 @@ def execute_planning_phase(
                 trigger="phase_finished",
                 related_event_id=phase_finished_event.get("event_id"),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to persist planning parse-error phase-finish snapshot: %s",
+                exc,
+            )
         ctx.task.status = TaskStatus.FAILED
         ctx.task.error_message = str(exc)
         ctx.db.commit()

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from app.services.orchestration.workspace_guard import normalize_command, normalize_step
+import pytest
+
+from app.services.orchestration.workspace_guard import (
+    TaskWorkspaceViolationError,
+    normalize_command,
+    normalize_step,
+)
 
 
 def test_normalize_command_allows_dev_null_redirection(tmp_path):
@@ -156,3 +162,26 @@ def test_normalize_command_repairs_workspace_relative_cd_target(tmp_path):
     normalized = normalize_command("cd ../service && npm install", project_dir)
 
     assert normalized == "cd service && npm install"
+
+
+def test_normalize_command_allows_return_to_workspace_root_after_child_cd(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "frontend").mkdir(parents=True)
+
+    normalized = normalize_command(
+        "cd frontend && rm -rf node_modules package-lock.json && cd .. && rm -rf frontend",
+        project_dir,
+    )
+
+    assert (
+        normalized
+        == "cd frontend && rm -rf node_modules package-lock.json && rm -rf frontend"
+    )
+
+
+def test_normalize_command_rejects_malformed_shell_quoting(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+
+    with pytest.raises(TaskWorkspaceViolationError, match="malformed shell quoting"):
+        normalize_command("echo 'unterminated", project_dir)

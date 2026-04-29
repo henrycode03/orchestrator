@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -56,15 +57,24 @@ def collect_workspace_inventory_paths(
     if not project_dir.exists():
         return existing_files
 
-    for path in sorted(project_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(project_dir)
-        if any(part in _IGNORED_PARTS for part in relative.parts):
-            continue
-        existing_files.append(str(relative))
-        if len(existing_files) >= max_files:
-            break
+    for root, dirs, files in os.walk(project_dir, topdown=True):
+        root_path = Path(root)
+        relative_root = (
+            root_path.relative_to(project_dir) if root_path != project_dir else Path()
+        )
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in _IGNORED_PARTS
+            and not any(part in _IGNORED_PARTS for part in (*relative_root.parts, name))
+        ]
+        for file_name in sorted(files):
+            relative = relative_root / file_name
+            if any(part in _IGNORED_PARTS for part in relative.parts):
+                continue
+            existing_files.append(str(relative))
+            if len(existing_files) >= max_files:
+                return existing_files
     return existing_files
 
 
@@ -324,7 +334,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
     workspace_summary = build_workspace_inventory_summary(
         Path(ctx.orchestration_state.project_dir),
         workspace_review=workspace_review,
-        max_files=50,
+        max_files=10,
     )
     project_context = _shape_project_context(
         ctx.orchestration_state.project_context,
@@ -335,7 +345,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
         validation_history=_condense_dict_events(
             ctx.orchestration_state.validation_history, max_entries=3
         ),
-        max_chars=2200,
+        max_chars=650,
     )
     raw_prompt = PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,

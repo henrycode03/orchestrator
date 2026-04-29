@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
+import time
 import uuid
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,7 +53,7 @@ def write_session_fingerprint_index(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {**fingerprint, "indexed_at": datetime.now(UTC).isoformat()}
     try:
-        path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        _write_json_payload_atomic(path, payload)
     except OSError:
         pass
 
@@ -156,10 +159,52 @@ def _safe_jsonl_length(log_path: Path) -> int:
         return 0
 
 
+_WORKSPACE_HASH_CACHE: Dict[str, tuple[float, Optional[str]]] = {}
+_WORKSPACE_HASH_CACHE_TTL_SECONDS = 1.0
+
+
+def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+        handle.write(json.dumps(payload, default=str))
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp_path.replace(path)
+
+
+def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
+    import fcntl
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = log_path.with_suffix(f"{log_path.suffix}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, default=str) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def _compute_workspace_hash(project_dir: Any) -> Optional[str]:
     path = Path(project_dir)
     if not path.exists() or not path.is_dir():
         return None
+    cache_key = str(path.resolve())
+    now = time.monotonic()
+    cached = _WORKSPACE_HASH_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _WORKSPACE_HASH_CACHE_TTL_SECONDS:
+        return cached[1]
 
     digest = hashlib.sha256()
     try:
@@ -175,7 +220,9 @@ def _compute_workspace_hash(project_dir: Any) -> Optional[str]:
             digest.update(str(int(stat.st_mtime_ns)).encode("utf-8"))
     except OSError:
         return None
-    return digest.hexdigest()
+    result = digest.hexdigest()
+    _WORKSPACE_HASH_CACHE[cache_key] = (now, result)
+    return result
 
 
 def _build_health_inputs(events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -622,9 +669,7 @@ def write_checkpoint_state_snapshot(
         ),
         "snapshot_index": _safe_jsonl_length(log_path),
     }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, default=str) + "\n")
+    _append_jsonl_line(log_path, payload)
     return payload
 
 
@@ -648,9 +693,7 @@ def write_orchestration_state_snapshot(
         related_event_id=related_event_id,
     )
     payload["snapshot_index"] = _safe_jsonl_length(log_path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, default=str) + "\n")
+    _append_jsonl_line(log_path, payload)
     return payload
 
 
@@ -673,10 +716,13 @@ def append_orchestration_event(
         "details": details or {},
     }
     log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, default=str) + "\n")
-    if event_type != EventType.HEALTH_SCORE_UPDATED:
+    _append_jsonl_line(log_path, payload)
+    suppress_health_update_for = {
+        EventType.HEALTH_SCORE_UPDATED,
+        EventType.TASK_QUEUED,
+        EventType.WAITING_FOR_INPUT,
+    }
+    if event_type not in suppress_health_update_for:
         try:
             _append_health_score_update(
                 project_dir=project_dir,

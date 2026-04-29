@@ -34,6 +34,45 @@ def render_openclaw_prompt(envelope: PromptEnvelope) -> str:
     return "\n\n".join(sections)
 
 
+def render_qwen_compact_json_prompt(envelope: PromptEnvelope) -> str:
+    """Render a smaller JSON envelope for compact-context local models."""
+
+    payload = {
+        "objective": envelope.objective.strip(),
+        "mode": envelope.execution_mode.strip(),
+        "instructions": [
+            item.strip() for item in envelope.instructions if item.strip()
+        ],
+        "context": {
+            key: value for key, value in envelope.context.items() if value is not None
+        },
+        "expected_output": (envelope.expected_output or "").strip(),
+        "body": (envelope.prompt_body or "").strip(),
+    }
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def render_claude_strict_tools_prompt(envelope: PromptEnvelope) -> str:
+    """Render a schema-forward prompt for strict tool-routing backends."""
+
+    payload = {
+        "system_contract": {
+            "objective": envelope.objective.strip(),
+            "execution_mode": envelope.execution_mode.strip(),
+            "tool_policy": "only call tools when inputs are complete and valid",
+        },
+        "instructions": [
+            item.strip() for item in envelope.instructions if item.strip()
+        ],
+        "context": {
+            key: value for key, value in envelope.context.items() if value is not None
+        },
+        "expected_output": (envelope.expected_output or "").strip(),
+        "prompt_body": (envelope.prompt_body or "").strip(),
+    }
+    return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
 def render_openai_responses_prompt(envelope: PromptEnvelope) -> str:
     """Render a neutral prompt envelope as a compact JSON-style input payload."""
 

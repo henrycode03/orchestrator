@@ -206,6 +206,61 @@ def test_start_stuck_pending_session_resets_and_proceeds(db_session, monkeypatch
     assert session.status == "running"
 
 
+def test_start_automatic_session_requeues_failed_task_even_after_auto_budget_exhausted(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="stopped",
+        is_active=False,
+        execution_mode="automatic",
+    )
+    task = _make_task(db_session, project, status=TaskStatus.FAILED)
+    task.error_message = (
+        "step 1 rollback blocked: Parent-directory traversal is not allowed"
+    )
+    db_session.commit()
+
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            level="INFO",
+            message=(
+                "Recovered earliest failed/cancelled ordered task for automatic retry: "
+                "#None Test task"
+            ),
+        )
+    )
+    db_session.commit()
+
+    class _FakeRuntime:
+        backend_descriptor = type("D", (), {"name": "local_openclaw"})()
+
+        async def create_session(self, task_description):
+            return "fake-key"
+
+    queued = []
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *a, **kw: _FakeRuntime(),
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        lambda **kw: queued.append(kw["task_id"]) or {"task_id": kw["task_id"]},
+    )
+
+    result = asyncio.run(start_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "started"
+    assert queued == [task.id]
+    db_session.refresh(task)
+    assert task.status == TaskStatus.PENDING
+
+
 # ── stop boundary conditions ──────────────────────────────────────────────────
 
 

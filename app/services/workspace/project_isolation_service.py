@@ -66,6 +66,8 @@ def resolve_project_workspace_path(
     project_name: Optional[str] = None,
     db: Optional[Session] = None,
 ) -> Path:
+    if workspace_path and Path(workspace_path).is_absolute():
+        return Path(workspace_path).resolve()
     relative = normalize_project_workspace_path(workspace_path, project_name, db=db)
     return (_resolve_workspace_root(db=db) / relative).resolve()
 

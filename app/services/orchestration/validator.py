@@ -494,7 +494,7 @@ class ValidatorService:
                     heredoc_count += 1
                 if "cat >" in lowered and "<< eof" in lowered:
                     heredoc_count += 1
-                if re.search(r"mkdir\s+-p\s+[^|;&\n]+,cat\s+>", lowered):
+                if re.search(r"mkdir\s+-p\s+[^|;&\n]+\s*(?:&&|\|)\s*cat\s+>", lowered):
                     return True
                 if raw_command.count("\n") > 25:
                     return True
@@ -516,6 +516,8 @@ class ValidatorService:
         lowered = text.lower()
         if not text:
             return True
+        if lowered.startswith("write "):
+            return True
         if lowered.startswith("edit "):
             return True
         if lowered.startswith("verify "):
@@ -527,6 +529,40 @@ class ValidatorService:
         if lowered.startswith("confirm "):
             return True
         return False
+
+    @staticmethod
+    def _uses_background_process(command: str) -> bool:
+        text = str(command or "").strip().lower()
+        if not text:
+            return False
+        if re.search(r"(^|[^&])&(?=[^&]|$)", text):
+            return True
+        return any(
+            marker in text
+            for marker in (
+                "nohup ",
+                " disown",
+                "tail -f",
+                "npm run dev",
+                "pnpm dev",
+                "yarn dev",
+                "vite dev",
+                "next dev",
+                "webpack serve",
+            )
+        )
+
+    @classmethod
+    def _plan_contains_background_processes(
+        cls, plan: List[Dict[str, Any]]
+    ) -> List[int]:
+        bad_steps: List[int] = []
+        for step in plan:
+            for command in step.get("commands", []) or []:
+                if cls._uses_background_process(str(command or "")):
+                    bad_steps.append(step.get("step_number"))
+                    break
+        return [step for step in bad_steps if step is not None]
 
     @classmethod
     def _plan_contains_non_runnable_commands(
@@ -942,6 +978,14 @@ class ValidatorService:
             )
             details["non_runnable_steps"] = non_runnable_steps
 
+        background_process_steps = cls._plan_contains_background_processes(plan)
+        if background_process_steps:
+            repairable.append(
+                "Plan contains background processes or long-running dev servers "
+                f"(steps: {background_process_steps[:5]})"
+            )
+            details["background_process_steps"] = background_process_steps
+
         nested_workspace_steps = cls._plan_nests_task_workspace(plan, project_dir)
         if nested_workspace_steps:
             repairable.append(
@@ -1099,7 +1143,7 @@ class ValidatorService:
             reasons.append(f"{path.name} still contains TODO or placeholder markers")
         if "notimplemented" in lowered or "raise notimplementederror" in lowered:
             reasons.append(f"{path.name} still contains not-implemented markers")
-        if "__main__" in content and "if __name__ == __main__" in content:
+        if "__main__" in content and 'if __name__ == "__main__"' not in content:
             reasons.append(f"{path.name} has a broken Python __main__ entrypoint check")
         if path.suffix == ".py":
             try:

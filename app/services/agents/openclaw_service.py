@@ -23,7 +23,7 @@ import shlex
 import time
 import re
 from typing import Optional, Dict, Any, List, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
@@ -35,6 +35,13 @@ from app.services.prompt_templates import (
     PromptTemplates,
 )
 from app.services.agents.agent_backends import BackendDescriptor, get_backend_descriptor
+from app.services.agents.interfaces import (
+    AgentInterfaceDescriptor,
+    AgentRuntimeError,
+    ContextWindowPolicy,
+    RetryStrategy,
+)
+from app.services.model_adaptation import resolve_adaptation_profile
 from app.services.workspace.project_isolation_service import (
     ProjectIsolationService,
     resolve_project_workspace_path,
@@ -58,7 +65,6 @@ from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
 )
-from app.services.agents.interfaces import AgentRuntimeError
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +139,7 @@ class OpenClawSessionService:
         self.task_model = (
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
+        self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
@@ -147,15 +154,59 @@ class OpenClawSessionService:
     def get_backend_metadata(self) -> Dict[str, Any]:
         """Return normalized backend metadata for logs, APIs, and orchestration."""
 
+        model_family = get_effective_agent_model_family(
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+        )
+        adaptation_profile = resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+        )
         return {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
-            "model_family": get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
-            ),
+            "model_family": model_family,
+            "adaptation_profile": adaptation_profile.name,
+            "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+
+    def describe_interface(self) -> AgentInterfaceDescriptor:
+        model_family = get_effective_agent_model_family(
+            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+        )
+        profile = resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+        )
+        return AgentInterfaceDescriptor(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+            planning_prompt_template="assemble_planning_prompt",
+            execution_prompt_template="assemble_execution_prompt",
+            prompt_dialect=profile.prompt_dialect,
+            tool_capability_map={
+                "shell": True,
+                "filesystem": True,
+                "checkpoint_resume": bool(
+                    self.backend_descriptor.capabilities.supports_checkpoint_resume
+                ),
+                "streaming": bool(
+                    self.backend_descriptor.capabilities.supports_streaming
+                ),
+            },
+            tool_shape=profile.tool_shape,
+            preferred_retry_strategy=RetryStrategy(
+                planning="minimal_prompt_then_repair",
+                execution="compact_prompt_then_debug",
+                completion="repair_step_then_revalidate",
+            ),
+            context_window_policy=ContextWindowPolicy(
+                max_input_tokens=self.backend_descriptor.capabilities.max_context_tokens,
+                overflow_strategy="retry_compact",
+                compaction_strategy=profile.context_window_policy,
+            ),
+        )
 
     def build_cli_agent_command(
         self,
@@ -297,6 +348,10 @@ class OpenClawSessionService:
         project_dir = self._resolve_execution_cwd()
         if not project_dir:
             return
+        if getattr(self.task_model, "task_subfolder", None):
+            project_dir = str(
+                (Path(project_dir) / str(self.task_model.task_subfolder)).resolve()
+            )
 
         try:
             append_orchestration_event(
@@ -403,7 +458,10 @@ class OpenClawSessionService:
         return await self.create_session(task_description, context=context)
 
     async def execute_task(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: callable = None
+        self,
+        prompt: str,
+        timeout_seconds: int = 300,
+        log_callback: Optional[Callable[..., None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute a task via OpenClaw session (legacy single-mode)
@@ -598,9 +656,10 @@ class OpenClawSessionService:
             # Return False to indicate permission is pending
             return False
 
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError) as e:
             self._log_entry(
-                "ERROR", f"Permission check failed: {str(e)}. Allowing operation..."
+                "ERROR",
+                f"Permission check failed and operation was allowed: {str(e)}",
             )
             # Fail open - allow operation if permission system fails
             return True
@@ -685,7 +744,7 @@ class OpenClawSessionService:
                     )
                     prompt = f"{safety_prompt}\n\n{prompt}"
                     # OPTIMIZATION: Only log safety prompt injection once
-                    if not hasattr(self, "_safety_prompt_injected"):
+                    if not self._safety_prompt_injected:
                         self._log_entry(
                             "INFO", "Project isolation safety prompt injected"
                         )
@@ -900,34 +959,19 @@ class OpenClawSessionService:
                             "INFO", f"[ORCHESTRATION] Generated {len(plan)} steps"
                         )
                     else:
-                        # Fallback to single step
-                        orchestration_state.plan = [
-                            {
-                                "step_number": 1,
-                                "description": prompt,
-                                "commands": [prompt],
-                                "verification": None,
-                                "rollback": None,
-                                "expected_files": [],
-                            }
-                        ]
                         self._log_entry(
-                            "INFO", "[ORCHESTRATION] Using fallback single-step plan"
+                            "WARN",
+                            "[ORCHESTRATION] Planning output was not a step list; aborting instead of executing raw prompt",
+                        )
+                        raise OpenClawSessionError(
+                            "Planning output was not a valid step list"
                         )
                 except json.JSONDecodeError:
-                    orchestration_state.plan = [
-                        {
-                            "step_number": 1,
-                            "description": prompt,
-                            "commands": [prompt],
-                            "verification": None,
-                            "rollback": None,
-                            "expected_files": [],
-                        }
-                    ]
                     self._log_entry(
-                        "INFO", "[ORCHESTRATION] Using fallback single-step plan"
+                        "WARN",
+                        "[ORCHESTRATION] Planning output was not valid JSON; aborting instead of executing raw prompt",
                     )
+                    raise OpenClawSessionError("Planning output was not valid JSON")
 
             # Phase 2: EXECUTING
             orchestration_state.status = OrchestrationStatus.EXECUTING
@@ -1314,7 +1358,7 @@ class OpenClawSessionService:
                     {
                         "level": "ERROR",
                         "message": cli_error_message,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                 ],
             }
@@ -1391,7 +1435,7 @@ class OpenClawSessionService:
                         {
                             "level": "ERROR",
                             "message": f"Garbled output detected: '{stdout[:500]}'",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }
                     ],
                     "execution_time": 0.0,
@@ -1421,7 +1465,7 @@ class OpenClawSessionService:
                         {
                             "level": "ERROR",
                             "message": f"Context window exceeded: {error_str}",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }
                     ],
                     "execution_time": 0.0,
@@ -1438,7 +1482,7 @@ class OpenClawSessionService:
                         {
                             "level": "ERROR",
                             "message": f"Process was killed: {error_str}",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }
                     ],
                     "execution_time": 0.0,
@@ -1456,7 +1500,7 @@ class OpenClawSessionService:
                         {
                             "level": "ERROR",
                             "message": f"Error: {error_str}",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }
                     ],
                     "execution_time": 0.0,
@@ -1652,8 +1696,11 @@ class OpenClawSessionService:
             try:
                 process.kill()
                 await process.wait()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
+                    exc,
+                )
 
             raise OpenClawSessionError(f"Task timed out after {timeout_seconds}s")
 
@@ -1679,7 +1726,7 @@ class OpenClawSessionService:
                 "params": params,
                 "result": str(result)[:1000],  # Truncate long results
                 "success": success,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "session_id": self.session_id,
                 "task_id": self.task_id,
             }
@@ -1952,14 +1999,14 @@ class OpenClawSessionService:
                             ),
                         }
                     )
-            except Exception:
-                pass  # Ignore tool tracking errors
+            except Exception as exc:
+                logger.debug("[OPENCLAW] Ignoring tool tracking restore error: %s", exc)
 
             # Find current step index (last executed step)
             current_step_index = len(step_results) - 1 if step_results else 0
 
             # Save checkpoint with detailed state
-            checkpoint_name = f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_name = f"paused_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
 
             checkpoint_result = checkpoint_service.save_checkpoint(
                 session_id=self.session_id,

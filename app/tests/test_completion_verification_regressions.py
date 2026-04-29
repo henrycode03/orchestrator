@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.services.orchestration.completion_flow import (
     _augment_completion_verification_command,
     _classify_completion_verification_failure,
+    _execute_completion_verification,
 )
 from app.services.orchestration.validator import ValidatorService
 
@@ -57,6 +58,29 @@ def test_vitest_completion_verification_excludes_openclaw_snapshots():
     )
 
     assert command == "pnpm test -- --exclude=.openclaw/**"
+
+
+def test_jest_completion_verification_excludes_openclaw_snapshots():
+    command = _augment_completion_verification_command(
+        "pnpm test",
+        "node --runInBand jest",
+    )
+
+    assert command == "pnpm test -- --testPathIgnorePatterns=.openclaw/"
+
+
+def test_completion_verification_rejects_shell_metacharacters(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    result = _execute_completion_verification(
+        project_dir=project_dir,
+        command="pytest; echo pwned",
+        timeout_seconds=1,
+    )
+
+    assert result["success"] is False
+    assert "unsafe shell metacharacters" in result["output"]
 
 
 def test_module_resolution_failure_is_treated_as_repairable_verification_issue():
@@ -152,3 +176,17 @@ def test_completion_validation_rejects_reported_files_that_never_materialized(tm
     assert verdict.repairable is True
     assert "none materialized in the canonical workspace" in verdict.reasons[0]
     assert verdict.details["reported_changed_files"] == ["README.md"]
+
+
+def test_detect_placeholder_content_flags_broken_python_main_guard(tmp_path):
+    entrypoint = tmp_path / "app.py"
+    entrypoint.write_text(
+        'if __name__ == __main__:\n    print("broken")\n',
+        encoding="utf-8",
+    )
+
+    reasons = ValidatorService._detect_placeholder_content(entrypoint)
+
+    assert any(
+        "broken Python __main__ entrypoint check" in reason for reason in reasons
+    )

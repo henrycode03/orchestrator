@@ -97,6 +97,7 @@ from app.services.orchestration.workspace_guard import verify_workspace_contract
 logger = logging.getLogger(__name__)
 
 _PROGRESS_NOTES_MAX_BYTES = 8000
+_STALE_QUEUE_CLAIM_SLA_SECONDS = 900
 
 
 def _parse_event_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
@@ -198,6 +199,45 @@ def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
     }
 
 
+def _should_reject_stale_dispatch_claim(
+    *,
+    dispatch_project_dir: Optional[Path],
+    session_id: int,
+    task_id: int,
+    queued_event: Optional[Dict[str, Any]],
+    queue_latency_seconds: Optional[float],
+) -> Optional[str]:
+    if not dispatch_project_dir or not queued_event:
+        return None
+    if (
+        queue_latency_seconds is None
+        or queue_latency_seconds <= _STALE_QUEUE_CLAIM_SLA_SECONDS
+    ):
+        return None
+
+    queued_at = _parse_event_timestamp((queued_event or {}).get("timestamp"))
+    if queued_at is None:
+        return "stale_queue_dispatch"
+
+    latest_post_queue_event = _find_latest_orchestration_event(
+        dispatch_project_dir,
+        session_id,
+        task_id,
+        event_types={
+            EventType.TASK_CLAIMED,
+            EventType.TASK_STARTED,
+            EventType.PHASE_STARTED,
+            EventType.PHASE_FINISHED,
+        },
+    )
+    latest_post_queue_at = _parse_event_timestamp(
+        (latest_post_queue_event or {}).get("timestamp")
+    )
+    if latest_post_queue_at is not None and latest_post_queue_at >= queued_at:
+        return "stale_queue_dispatch_already_progressed"
+    return "stale_queue_dispatch"
+
+
 def _claim_queued_task_for_worker(
     *,
     db: Session,
@@ -219,7 +259,7 @@ def _claim_queued_task_for_worker(
         db.rollback()
         return False, f"session_not_runnable:{session.status}", None, session_task_link
 
-    claim_started_at = datetime.utcnow()
+    claim_started_at = datetime.now(timezone.utc)
     updated_task_rows = (
         db.query(Task)
         .filter(Task.id == task.id, Task.status == TaskStatus.PENDING)
@@ -397,6 +437,40 @@ def execute_orchestration_task(
                 queue_latency_seconds = round(
                     (datetime.now(timezone.utc) - queued_at).total_seconds(), 3
                 )
+        stale_dispatch_reason = _should_reject_stale_dispatch_claim(
+            dispatch_project_dir=dispatch_project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            queued_event=queued_event,
+            queue_latency_seconds=queue_latency_seconds,
+        )
+        if stale_dispatch_reason:
+            reject_details = {
+                "reason": stale_dispatch_reason,
+                "session_instance_id": session.instance_id,
+                "expected_session_instance_id": expected_session_instance_id,
+                "project_dir": (
+                    str(dispatch_project_dir) if dispatch_project_dir else None
+                ),
+                "celery_task_id": getattr(getattr(self, "request", None), "id", None),
+                "queue_latency_seconds": queue_latency_seconds,
+                "queued_event_id": (queued_event or {}).get("event_id"),
+                **_runtime_selection_details(db),
+            }
+            if dispatch_project_dir:
+                _append_orchestration_event(
+                    project_dir=dispatch_project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.TASK_DISPATCH_REJECTED,
+                    details=reject_details,
+                )
+            emit_live(
+                "WARN",
+                f"[ORCHESTRATION] Rejected stale queued dispatch before claim: {stale_dispatch_reason}",
+                metadata=reject_details,
+            )
+            return {"status": "ignored", "reason": stale_dispatch_reason}
 
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         claim_ok = False
@@ -820,7 +894,7 @@ def execute_orchestration_task(
         # legitimate resume after several minutes gets rejected before we even
         # load the saved orchestration state.
         if task.started_at and not is_resume_execution:
-            time_since_start = datetime.utcnow() - task.started_at
+            time_since_start = datetime.now(timezone.utc) - task.started_at
             if time_since_start.total_seconds() > STALE_RUN_GUARD_SECONDS:
                 logger.warning(
                     f"[ORCHESTRATION] Task {task_id} already running for {time_since_start}, marking as failed"
@@ -838,7 +912,9 @@ def execute_orchestration_task(
 
         # Update task status
         task.status = TaskStatus.RUNNING
-        task.started_at = claim_started_at or task.started_at or datetime.utcnow()
+        task.started_at = (
+            claim_started_at or task.started_at or datetime.now(timezone.utc)
+        )
         task.completed_at = None
         task.error_message = None
         task.current_step = 0
@@ -865,8 +941,12 @@ def execute_orchestration_task(
                 event_type=EventType.TASK_STARTED,
                 details={"execution_profile": execution_profile},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "[ORCHESTRATION] Failed to record task-start event for task %s: %s",
+                task_id,
+                exc,
+            )
 
         # Initialize the active runtime service
         runtime_service = create_agent_runtime(db, session_id, task_id)
@@ -890,7 +970,7 @@ def execute_orchestration_task(
                     workspace_contract.get("reason") or "unknown mismatch"
                 )
                 task.status = TaskStatus.FAILED
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc)
                 task.error_message = contract_error
                 task.workspace_status = "blocked"
                 if session_task_link:
@@ -1400,7 +1480,7 @@ def execute_orchestration_task(
             task.error_message = gate_error
             if session_task_link:
                 session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = datetime.utcnow()
+                session_task_link.completed_at = datetime.now(timezone.utc)
             session.status = "paused"
             session.is_active = False
             _set_session_alert(session, "error", gate_error[:2000])
@@ -1728,7 +1808,7 @@ def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
 
         from datetime import datetime, timedelta
 
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         query = db.query(LogEntry).filter(LogEntry.created_at < cutoff_date)
         if session_id:

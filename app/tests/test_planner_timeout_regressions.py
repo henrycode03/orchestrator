@@ -1,5 +1,6 @@
 from app.services.orchestration.planner import PlannerService
 from app.services.orchestration.planning_flow import (
+    _compress_project_context_for_planning,
     _should_repair_truncated_single_step_plan,
 )
 from app.services.orchestration.policy import (
@@ -77,6 +78,44 @@ def test_minimal_planning_prompt_keeps_workflow_rules_for_existing_fullstack_wor
     assert "Never use parent-directory traversal like `../backend`" in prompt
     assert "`verification` must be a single shell string or null" in prompt
     assert "Do not use background processes" in prompt
+
+
+def test_large_planning_context_is_compressed_before_first_attempt():
+    state = type("State", (), {})()
+    state.project_context = "Very long planning context " * 600
+    state.plan = []
+    state.current_step_index = 0
+    state.completed_steps = []
+    state.failed_steps = []
+    state.debug_attempts = []
+    state.changed_files = []
+
+    compressed = _compress_project_context_for_planning(state)
+
+    assert len(compressed) < len(state.project_context)
+    assert "Very long planning context" in compressed
+
+
+def test_planner_flags_immediate_repair_issues_for_write_and_background_commands():
+    issues = PlannerService.find_immediate_repair_step_issues(
+        [
+            {
+                "step_number": 1,
+                "description": "Write file",
+                "commands": ["write frontend/src/App.tsx: render root shell"],
+            },
+            {
+                "step_number": 2,
+                "description": "Start backend",
+                "commands": ["cd backend && npx tsx src/index.ts &"],
+            },
+        ]
+    )
+
+    assert issues == {
+        "non_runnable_steps": [1],
+        "background_process_steps": [2],
+    }
 
 
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():

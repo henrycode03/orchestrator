@@ -54,6 +54,20 @@ def should_force_review_execution_profile(
     if execution_profile in {"review_only", "test_only", "debug_only"}:
         return False
     combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
+    review_markers = (
+        "inspect",
+        "inspection",
+        "analysis",
+        "analyze",
+        "inventory",
+        "extension points",
+        "current project structure",
+        "current project architecture",
+        "codebase walkthrough",
+    )
+    if any(marker in combined for marker in review_markers):
+        return True
+
     implementation_markers = (
         "set up",
         "setup",
@@ -70,16 +84,7 @@ def should_force_review_execution_profile(
     )
     if any(marker in combined for marker in implementation_markers):
         return False
-    review_markers = (
-        "inspect",
-        "analysis",
-        "analyze",
-        "inventory",
-        "current project structure",
-        "current project architecture",
-        "codebase walkthrough",
-    )
-    return any(marker in combined for marker in review_markers)
+    return False
 
 
 def get_workflow_profile(

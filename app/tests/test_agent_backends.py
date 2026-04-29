@@ -3,6 +3,7 @@ from app.services.agents.agent_backends import (
     get_backend_descriptor,
     list_supported_backends,
 )
+from app.services.model_adaptation import resolve_adaptation_profile
 
 
 def test_default_backend_descriptor_is_local_openclaw():
@@ -38,4 +39,18 @@ def test_supported_backends_contains_registered_future_metadata():
     assert backend.implemented is True
     assert backend.config.transport_mode == "api"
     assert backend.config.supported_prompt_format == "structured_prompt_envelope"
+    assert backend.config.prompt_dialect == "responses_json"
+    assert backend.config.tool_call_shape == "responses_tools"
     assert backend.health.status in {"ready", "degraded"}
+
+
+def test_resolve_adaptation_profile_prefers_matching_backend_and_model_family():
+    profile = resolve_adaptation_profile(
+        backend="openai_responses_api",
+        model_family="gpt-5.5",
+        preferred_name="openai_responses_structured",
+    )
+
+    assert profile.backend == "openai_responses_api"
+    assert profile.name == "openai_responses_structured"
+    assert profile.prompt_dialect == "responses_json"

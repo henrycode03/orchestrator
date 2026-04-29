@@ -186,6 +186,73 @@ def _repair_workspace_relative_cd_target(path_text: str, project_dir: Path) -> s
     return path_text
 
 
+def _normalize_cd_target_for_cwd(
+    path_text: str, current_dir: Path, project_dir: Path
+) -> str:
+    raw = (path_text or "").strip().strip("\"'")
+    if not raw:
+        raise TaskWorkspaceViolationError("Empty cd target is not allowed")
+    if "~" in raw:
+        raise TaskWorkspaceViolationError(
+            f"Home-directory path is not allowed in task workspace: {raw}"
+        )
+
+    repaired = _repair_workspace_relative_cd_target(raw, current_dir)
+    candidate = Path(repaired)
+    resolved = (
+        candidate.resolve()
+        if candidate.is_absolute()
+        else (current_dir / candidate).resolve()
+    )
+
+    if not resolved.is_relative_to(project_dir):
+        raise TaskWorkspaceViolationError(
+            f"Path escapes task workspace: {raw} -> {resolved}"
+        )
+
+    relative = os.path.relpath(resolved, project_dir)
+    return "." if relative == "." else relative
+
+
+def _rewrite_safe_cd_chain(command: str, project_dir: Path) -> str:
+    """Rewrite chained `cd` segments into root-relative workspace-safe hops."""
+
+    if "&&" not in command:
+        return command
+
+    segments = [segment.strip() for segment in command.split("&&")]
+    if len(segments) <= 1:
+        return command
+
+    current_dir = project_dir
+    rewritten_segments: List[str] = []
+    changed = False
+    cd_only_pattern = re.compile(r"^cd\s+(.+?)\s*$")
+
+    for raw_segment in segments:
+        if not raw_segment:
+            continue
+        match = cd_only_pattern.match(raw_segment)
+        if not match:
+            rewritten_segments.append(raw_segment)
+            continue
+        normalized_target = _normalize_cd_target_for_cwd(
+            match.group(1), current_dir, project_dir
+        )
+        current_dir = (project_dir / normalized_target).resolve()
+        if normalized_target == ".":
+            changed = True
+            continue
+        rewritten_segment = f"cd {shlex.quote(normalized_target)}"
+        rewritten_segments.append(rewritten_segment)
+        if rewritten_segment != raw_segment:
+            changed = True
+
+    if not changed:
+        return command
+    return " && ".join(rewritten_segments)
+
+
 def _normalize_write_pseudo_command(command: str, project_dir: Path) -> Optional[str]:
     """Normalize `write path: description` pseudo-commands without parsing prose as shell."""
 
@@ -225,7 +292,7 @@ def normalize_command(command: str, project_dir: Path) -> str:
             f"Home-directory paths are not allowed: {normalized}"
         )
 
-    current = normalized
+    current = _rewrite_safe_cd_chain(normalized, project_dir)
     cd_pattern = re.compile(r"^\s*cd\s+([^;&|]+?)\s*&&\s*(.+)$")
     while True:
         match = cd_pattern.match(current)
@@ -245,7 +312,12 @@ def normalize_command(command: str, project_dir: Path) -> str:
     abs_path_matches = []
     path_scan_target = strip_heredoc_bodies(current)
     segment_command: Optional[str] = None
-    split_tokens = shlex.split(path_scan_target, posix=True)
+    try:
+        split_tokens = shlex.split(path_scan_target, posix=True)
+    except ValueError as exc:
+        raise TaskWorkspaceViolationError(
+            f"Command contains malformed shell quoting: {normalized}"
+        ) from exc
     for token in split_tokens:
         if token in {"&&", "||", "|", ";"}:
             segment_command = None
@@ -276,7 +348,12 @@ def normalize_command(command: str, project_dir: Path) -> str:
         current = current.replace(abs_path, replacement)
 
     current_traversal_target = strip_heredoc_bodies(current)
-    current_tokens = shlex.split(current_traversal_target, posix=True)
+    try:
+        current_tokens = shlex.split(current_traversal_target, posix=True)
+    except ValueError as exc:
+        raise TaskWorkspaceViolationError(
+            f"Command contains malformed shell quoting after normalization: {current}"
+        ) from exc
     if "~" in current_traversal_target or any(
         _looks_like_path_traversal_token(token) for token in current_tokens
     ):
@@ -341,6 +418,7 @@ def _normalize_optional_command_field(
 
     if isinstance(value, list):
         normalized_parts: List[str] = []
+        preserve_root_per_item = field_name == "rollback"
         for item_index, item in enumerate(value, start=1):
             raw_item = str(item).strip()
             if not raw_item:
@@ -352,13 +430,14 @@ def _normalize_optional_command_field(
                     f"{step_label} {field_name} item {item_index} blocked: {exc}. "
                     f"Offending command: {raw_item}"
                 ) from exc
-            # Preserve root-relative semantics for each item in the original list.
-            normalized_parts.append(f"( {normalized_item} )")
+            if raw_item.startswith("cd ") or normalized_item.startswith("cd "):
+                preserve_root_per_item = True
+            normalized_parts.append(normalized_item)
 
         if not normalized_parts:
             return None
-        if len(normalized_parts) == 1:
-            return normalized_parts[0][2:-2]
+        if preserve_root_per_item:
+            return " && ".join(f"( {item} )" for item in normalized_parts)
         return " && ".join(normalized_parts)
 
     rendered = str(value).strip()

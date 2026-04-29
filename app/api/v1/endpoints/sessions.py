@@ -43,9 +43,13 @@ from app.services import (
     delete_session_checkpoint_payload as _delete_session_checkpoint_payload,
     ensure_unique_session_name as _ensure_unique_session_name,
     get_session_logs_payload as _get_session_logs_payload,
+    get_session_execution_dag_payload as _get_session_execution_dag_payload,
     get_session_divergence_compare_payload as _get_session_divergence_compare_payload,
     get_session_dispatch_watchdog_payload as _get_session_dispatch_watchdog_payload,
+    get_session_focus_mode_payload as _get_session_focus_mode_payload,
+    get_session_mobile_interruptions_payload as _get_session_mobile_interruptions_payload,
     get_session_state_diff_payload as _get_session_state_diff_payload,
+    get_session_trace_export_payload as _get_session_trace_export_payload,
     get_session_workspace_info_payload as _get_session_workspace_info_payload,
     get_session_statistics_payload as _get_session_statistics_payload,
     get_sorted_logs_payload as _get_sorted_logs_payload,
@@ -868,6 +872,50 @@ def get_session_divergence_compare(
         session_id,
         limit=limit,
     )
+
+
+@router.get("/sessions/{session_id}/trace-export")
+def get_session_trace_export(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return derived trace spans for the latest session task."""
+
+    return _get_session_trace_export_payload(db, session_id)
+
+
+@router.get("/sessions/{session_id}/execution-dag")
+def get_session_execution_dag(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return a DAG view derived from events and checkpoint lineage."""
+
+    return _get_session_execution_dag_payload(db, session_id)
+
+
+@router.get("/sessions/{session_id}/focus")
+def get_session_focus_mode(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return operator focus-mode payload with low-signal noise suppressed."""
+
+    return _get_session_focus_mode_payload(db, session_id)
+
+
+@router.get("/sessions/{session_id}/mobile-interruptions")
+def get_session_mobile_interruptions(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return interruption-first mobile cards for approvals, retry, and stop."""
+
+    return _get_session_mobile_interruptions_payload(db, session_id)
 
 
 @router.get("/sessions/{session_id}/dispatch-watchdog")

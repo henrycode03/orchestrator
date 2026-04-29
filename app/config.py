@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     MOBILE_GATEWAY_API_KEY: str = ""
     ORCHESTRATOR_AGENT_BACKEND: str = "local_openclaw"
     ORCHESTRATOR_AGENT_MODEL_FAMILY: str = "local"
+    ORCHESTRATOR_ENABLE_JUDGE_AGENT: bool = False
+    ORCHESTRATOR_TRACE_EXPORTER_BACKEND: str = "local_json"
+    ORCHESTRATOR_LANGFUSE_ENABLED: bool = False
     ORCHESTRATOR_ADMIN_EMAILS: str = ""
 
     # Mobile app configuration

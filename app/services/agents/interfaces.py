@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Protocol
 
 
@@ -11,6 +12,63 @@ class AgentRuntimeError(Exception):
 
 class UnsupportedCapabilityError(AgentRuntimeError):
     """Raised when the active backend does not support a requested capability."""
+
+
+@dataclass(frozen=True)
+class ContextWindowPolicy:
+    """Declarative context budget policy exposed by a runtime adapter."""
+
+    max_input_tokens: Optional[int]
+    overflow_strategy: str
+    compaction_strategy: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RetryStrategy:
+    """Preferred retry behavior for one backend/model family."""
+
+    planning: str
+    execution: str
+    completion: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AgentInterfaceDescriptor:
+    """Backend/model-specific contract used by orchestration flows."""
+
+    backend: str
+    model_family: str
+    planning_prompt_template: str
+    execution_prompt_template: str
+    prompt_dialect: str
+    tool_capability_map: dict[str, bool] = field(default_factory=dict)
+    tool_shape: str = "shell_text"
+    preferred_retry_strategy: RetryStrategy = field(
+        default_factory=lambda: RetryStrategy(
+            planning="single_retry_minimal_prompt",
+            execution="single_retry_compact_prompt",
+            completion="single_retry_repair_step",
+        )
+    )
+    context_window_policy: ContextWindowPolicy = field(
+        default_factory=lambda: ContextWindowPolicy(
+            max_input_tokens=None,
+            overflow_strategy="retry_compact",
+            compaction_strategy="context_summary",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["preferred_retry_strategy"] = self.preferred_retry_strategy.to_dict()
+        payload["context_window_policy"] = self.context_window_policy.to_dict()
+        return payload
 
 
 class AgentRuntime(Protocol):
@@ -48,5 +106,7 @@ class AgentRuntime(Protocol):
     ) -> dict[str, Any]: ...
 
     def get_backend_metadata(self) -> dict[str, Any]: ...
+
+    def describe_interface(self) -> AgentInterfaceDescriptor: ...
 
     def reports_context_overflow(self, result: Optional[dict[str, Any]]) -> bool: ...

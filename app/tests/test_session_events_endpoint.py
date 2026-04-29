@@ -397,3 +397,171 @@ def test_compare_divergence_endpoint_returns_similar_sessions(
         assert body["current"]["session_id"] == session_a.id
         assert len(body["matches"]) >= 1
         assert body["matches"][0]["session_id"] == session_b.id
+
+
+def test_session_trace_export_and_dag_endpoints(authenticated_client, db_session):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project, status="running")
+
+        from app.models import SessionTask, Task, TaskStatus
+        from app.services.orchestration.persistence import (
+            append_orchestration_event,
+            write_orchestration_state_snapshot,
+        )
+        from app.services.prompt_templates import OrchestrationState
+
+        task = Task(
+            project_id=project.id,
+            title="Trace Task",
+            status=TaskStatus.RUNNING,
+            task_subfolder="trace-task",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+        db_session.add(
+            SessionTask(
+                session_id=session.id,
+                task_id=task.id,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        db_session.commit()
+
+        state = OrchestrationState(
+            session_id=str(session.id),
+            task_description="trace me",
+            project_name=project.name,
+            task_id=task.id,
+        )
+        state._project_dir_override = tmpdir
+        state.plan = [{"description": "phase 1"}]
+        phase_event = append_orchestration_event(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            event_type="phase_started",
+            details={"phase": "planning"},
+        )
+        append_orchestration_event(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            event_type="phase_finished",
+            parent_event_id=phase_event["event_id"],
+            details={"phase": "planning", "status": "completed"},
+        )
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="autosave_latest",
+            trigger="phase_finished",
+            related_event_id=phase_event["event_id"],
+        )
+
+        trace_resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/trace-export"
+        )
+        assert trace_resp.status_code == 200
+        trace_body = trace_resp.json()
+        assert trace_body["task_id"] == task.id
+        assert trace_body["span_count"] >= 1
+
+        dag_resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/execution-dag"
+        )
+        assert dag_resp.status_code == 200
+        dag_body = dag_resp.json()
+        assert dag_body["task_id"] == task.id
+        assert dag_body["node_count"] >= 2
+        assert dag_body["edge_count"] >= 1
+
+
+def test_session_focus_and_mobile_interruption_endpoints(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project, status="waiting_for_human")
+        session.is_active = True
+        db_session.commit()
+
+        from app.models import InterventionRequest, SessionTask, Task, TaskStatus
+        from app.services.orchestration.persistence import (
+            write_orchestration_state_snapshot,
+        )
+        from app.services.prompt_templates import OrchestrationState
+
+        task = Task(
+            project_id=project.id,
+            title="Focus Task",
+            status=TaskStatus.RUNNING,
+            task_subfolder="focus-task",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+        db_session.add(
+            SessionTask(
+                session_id=session.id,
+                task_id=task.id,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        db_session.add(
+            InterventionRequest(
+                session_id=session.id,
+                task_id=task.id,
+                project_id=project.id,
+                intervention_type="approval",
+                initiated_by="ai",
+                prompt="Need approval to deploy",
+                status="pending",
+            )
+        )
+        db_session.commit()
+
+        state = OrchestrationState(
+            session_id=str(session.id),
+            task_description="focus me",
+            project_name=project.name,
+            task_id=task.id,
+        )
+        state._project_dir_override = tmpdir
+        state.plan = [{"description": "inspect"}, {"description": "deploy"}]
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-0",
+            trigger="phase_started",
+        )
+        state.current_step_index = 1
+        state.changed_files = ["src/app.py"]
+        write_orchestration_state_snapshot(
+            project_dir=tmpdir,
+            session_id=session.id,
+            task_id=task.id,
+            orchestration_state=state,
+            checkpoint_name="snap-1",
+            trigger="phase_finished",
+        )
+
+        focus_resp = authenticated_client.get(f"/api/v1/sessions/{session.id}/focus")
+        assert focus_resp.status_code == 200
+        focus_body = focus_resp.json()
+        assert focus_body["current_task"]["task_id"] == task.id
+        assert len(focus_body["active_approvals"]) == 1
+
+        mobile_resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/mobile-interruptions"
+        )
+        assert mobile_resp.status_code == 200
+        mobile_body = mobile_resp.json()
+        kinds = [card["kind"] for card in mobile_body["cards"]]
+        assert "approval_needed" in kinds
+        assert "emergency_stop" in kinds

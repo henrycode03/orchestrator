@@ -39,8 +39,12 @@ class BackendConfigMetadata:
     transport_mode: str
     required_env_vars: List[str]
     supported_prompt_format: str
+    prompt_dialect: str
+    tool_call_shape: str
     streaming_mode: str
     adaptation_profiles: List[str]
+    preferred_retry_strategy: str = "balanced"
+    context_window_policy: str = "context_summary"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -244,8 +248,12 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 transport_mode="cli",
                 required_env_vars=[],
                 supported_prompt_format="rendered_text_sections",
+                prompt_dialect="openclaw_text_sections",
+                tool_call_shape="native_cli_tools",
                 streaming_mode="subprocess_jsonl",
-                adaptation_profiles=["openclaw_default"],
+                adaptation_profiles=["openclaw_default", "qwen_compact_json"],
+                preferred_retry_strategy="compact_then_repair",
+                context_window_policy="compress_then_retry",
             ),
         ),
         health_check=_check_local_openclaw_health,
@@ -275,8 +283,12 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 transport_mode="api",
                 required_env_vars=["OPENCLAW_GATEWAY_URL", "OPENCLAW_API_KEY"],
                 supported_prompt_format="rendered_text_sections",
+                prompt_dialect="openclaw_text_sections",
+                tool_call_shape="gateway_tool_schema",
                 streaming_mode="http_stream",
-                adaptation_profiles=["openclaw_default"],
+                adaptation_profiles=["openclaw_default", "claude_strict_tools"],
+                preferred_retry_strategy="schema_first",
+                context_window_policy="truncate_context",
             ),
         ),
         health_check=_check_planned_backend_health,
@@ -306,8 +318,15 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 transport_mode="api",
                 required_env_vars=["OPENAI_API_KEY"],
                 supported_prompt_format="structured_prompt_envelope",
+                prompt_dialect="responses_json",
+                tool_call_shape="responses_tools",
                 streaming_mode="responses_stream",
-                adaptation_profiles=["openai_responses_default"],
+                adaptation_profiles=[
+                    "openai_responses_default",
+                    "openai_responses_structured",
+                ],
+                preferred_retry_strategy="structured_retry",
+                context_window_policy="summarize_context",
             ),
         ),
         health_check=_check_openai_backend_health,

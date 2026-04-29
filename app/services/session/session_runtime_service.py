@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,7 +34,7 @@ MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS = 1
 
 
 def _utc_now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def slugify_task_name(name: str) -> str:
@@ -263,7 +263,7 @@ def set_session_alert(
 ) -> None:
     session.last_alert_level = level
     session.last_alert_message = message
-    session.last_alert_at = datetime.utcnow() if message else None
+    session.last_alert_at = datetime.now(UTC) if message else None
     db.flush()
 
 
@@ -350,7 +350,7 @@ def queue_task_for_session(
     session.status = "running"
     session.is_active = True
     if not session.started_at:
-        session.started_at = datetime.utcnow()
+        session.started_at = datetime.now(UTC)
     set_session_alert(db, session, None, None)
 
     result = execute_orchestration_task.delay(
@@ -382,8 +382,11 @@ def queue_task_for_session(
     db.commit()
 
     queued_at = _utc_now_iso()
+    event_project_dir = Path(task_workspace["workspace_path"])
+    if task_workspace.get("task_subfolder"):
+        event_project_dir = event_project_dir / str(task_workspace["task_subfolder"])
     append_orchestration_event(
-        project_dir=task_workspace["workspace_path"],
+        project_dir=event_project_dir,
         session_id=session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
@@ -407,7 +410,7 @@ def queue_task_for_session(
 
 
 def reopen_failed_ordered_task_if_needed(
-    db: Session, session: SessionModel
+    db: Session, session: SessionModel, *, ignore_recovery_budget: bool = False
 ) -> Optional[Dict[str, Any]]:
     """Reopen the earliest failed/cancelled ordered task when automatic flow is blocked."""
     if session.execution_mode != "automatic" or not session.project_id:
@@ -451,7 +454,10 @@ def reopen_failed_ordered_task_if_needed(
     prior_recovery_attempts = _count_automatic_recovery_attempts(
         db, session.id, retryable_task.id
     )
-    if prior_recovery_attempts >= MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS:
+    if (
+        prior_recovery_attempts >= MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS
+        and not ignore_recovery_budget
+    ):
         set_session_alert(
             db,
             session,
@@ -505,8 +511,13 @@ def reopen_failed_ordered_task_if_needed(
             task_id=retryable_task.id,
             level="INFO",
             message=(
-                "Recovered earliest failed/cancelled ordered task for automatic retry: "
-                f"#{getattr(retryable_task, 'plan_position', None)} {retryable_task.title}"
+                "Recovered earliest failed/cancelled ordered task for "
+                + (
+                    "explicit session start retry: "
+                    if ignore_recovery_budget
+                    else "automatic retry: "
+                )
+                + f"#{getattr(retryable_task, 'plan_position', None)} {retryable_task.title}"
             ),
         )
     )

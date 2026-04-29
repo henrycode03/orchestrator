@@ -35,6 +35,8 @@ def render_workspace_path_for_prompt(
     try:
         relative = resolved.relative_to(workspace_root)
     except ValueError:
+        if str(resolved).startswith("/tmp/"):
+            return str(resolved).replace("\\", "/")
         return resolved.name or str(resolved)
 
     rendered = workspace_root / relative

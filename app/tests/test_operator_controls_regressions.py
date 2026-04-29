@@ -297,6 +297,39 @@ def test_validator_flags_fullstack_workflow_phase_order_drift():
     assert verdict.details["workflow_phase_violations"] == [2]
 
 
+def test_validator_flags_write_pseudo_commands_and_background_processes():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Wire API config",
+                "commands": ["write frontend/vite.config.ts: configure proxy"],
+                "verification": "test -f frontend/vite.config.ts",
+                "rollback": "rm -f frontend/vite.config.ts",
+                "expected_files": ["frontend/vite.config.ts"],
+            },
+            {
+                "step_number": 2,
+                "description": "Verify backend startup",
+                "commands": ["cd backend && npx tsx src/index.ts &"],
+                "verification": "curl -s http://localhost:3001/health",
+                "rollback": 'pkill -f "tsx src/index.ts"',
+                "expected_files": [],
+            },
+        ],
+        output_text="[]",
+        task_prompt="Set up frontend and backend with clean architecture",
+        execution_profile="full_lifecycle",
+    )
+
+    assert verdict.repairable is True
+    joined = " ".join(verdict.reasons)
+    assert "non-runnable pseudo-commands" in joined
+    assert "background processes or long-running dev servers" in joined
+    assert verdict.details["non_runnable_steps"] == [1]
+    assert verdict.details["background_process_steps"] == [2]
+
+
 def test_policy_profile_lookup_falls_back_to_balanced():
     profile = get_policy_profile("does-not-exist")
 

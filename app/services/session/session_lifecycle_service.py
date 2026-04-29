@@ -596,7 +596,11 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 db.commit()
 
             pending_tasks = task_service.get_project_tasks(session.project_id)
-            reopen_failed_ordered_task_if_needed(db, session)
+            reopen_failed_ordered_task_if_needed(
+                db,
+                session,
+                ignore_recovery_budget=(session.execution_mode == "automatic"),
+            )
             pending_tasks = task_service.get_project_tasks(session.project_id)
 
             queued_tasks = []
@@ -872,7 +876,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 raise CheckpointError(
                     f"No replayable checkpoint state found for session {session_id}"
                 )
-            checkpoint_name = f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_name = f"paused_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
             checkpoint_service.save_checkpoint(
                 session_id=session_id,
                 checkpoint_name=checkpoint_name,
@@ -1014,11 +1018,26 @@ async def resume_session_lifecycle(
             .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
             .first()
         )
-        checkpoint_data = _load_replayable_resume_checkpoint(
-            checkpoint_service,
-            session_id,
-            checkpoint_name=checkpoint_name,
-        )
+        probed_checkpoints: list[Dict[str, Any]] = []
+        if checkpoint_name:
+            checkpoint_data = _load_replayable_resume_checkpoint(
+                checkpoint_service,
+                session_id,
+                checkpoint_name=checkpoint_name,
+            )
+        else:
+            checkpoint_data = None
+            for candidate_name in ("autosave_latest", "autosave_error", None):
+                try:
+                    payload = checkpoint_service.load_resume_checkpoint(
+                        session_id, checkpoint_name=candidate_name
+                    )
+                except CheckpointError:
+                    continue
+                probed_checkpoints.append(payload)
+                if _checkpoint_has_execution_progress(payload):
+                    checkpoint_data = payload
+                    break
         requested_checkpoint_name = None
         resolved_checkpoint_name = None
         restore_fidelity: Dict[str, Any] = {
@@ -1053,29 +1072,41 @@ async def resume_session_lifecycle(
             )
 
         if not task_id:
-            try:
-                fallback_checkpoint = checkpoint_service.load_resume_checkpoint(
-                    session_id, checkpoint_name=checkpoint_name
+            if checkpoint_name:
+                try:
+                    fallback_checkpoint = checkpoint_service.load_resume_checkpoint(
+                        session_id, checkpoint_name=checkpoint_name
+                    )
+                except CheckpointError as checkpoint_error:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(
+                            f"No usable checkpoint found for session {session_id}: "
+                            f"{checkpoint_error}"
+                        ),
+                    ) from checkpoint_error
+                requested_checkpoint_name = fallback_checkpoint.get(
+                    "_requested_checkpoint_name"
                 )
-            except CheckpointError as checkpoint_error:
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"No usable checkpoint found for session {session_id}: "
-                        f"{checkpoint_error}"
-                    ),
-                ) from checkpoint_error
-            requested_checkpoint_name = fallback_checkpoint.get(
-                "_requested_checkpoint_name"
-            )
-            resolved_checkpoint_name = fallback_checkpoint.get(
-                "_resolved_checkpoint_name"
-            ) or fallback_checkpoint.get("checkpoint_name")
-            restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(
-                fallback_checkpoint
-            )
-            context_data = fallback_checkpoint.get("context", {})
-            task_id = context_data.get("task_id")
+                resolved_checkpoint_name = fallback_checkpoint.get(
+                    "_resolved_checkpoint_name"
+                ) or fallback_checkpoint.get("checkpoint_name")
+                restore_fidelity = checkpoint_service._checkpoint_restore_fidelity(
+                    fallback_checkpoint
+                )
+                context_data = fallback_checkpoint.get("context", {})
+                task_id = context_data.get("task_id")
+            else:
+                for fallback_checkpoint in probed_checkpoints:
+                    context_data = fallback_checkpoint.get("context", {}) or {}
+                    task_id = context_data.get("task_id")
+                    if task_id:
+                        restore_fidelity = (
+                            checkpoint_service._checkpoint_restore_fidelity(
+                                fallback_checkpoint
+                            )
+                        )
+                        break
 
         task = db.query(Task).filter(Task.id == task_id).first() if task_id else None
         if not task:
@@ -1181,7 +1212,7 @@ async def resume_session_lifecycle(
                 if resume_has_progress
                 else (
                     f"Session '{session.name}' resumed by queueing a fresh run from the current workspace because "
-                    f"no replayable checkpoint state was available"
+                    f"no execution progress to replay was available"
                 )
             ),
         }

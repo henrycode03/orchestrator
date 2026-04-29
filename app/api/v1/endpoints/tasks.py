@@ -423,7 +423,7 @@ async def execute_task_with_runtime(
 
         new_session.status = "running"
         new_session.is_active = True
-        new_session.started_at = datetime.utcnow()
+        new_session.started_at = datetime.now(UTC)
         db.commit()
         db.refresh(new_session)
 

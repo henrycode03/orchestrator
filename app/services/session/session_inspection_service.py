@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.models import (
+    InterventionRequest,
+    LogEntry,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskStatus,
+)
 from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
@@ -21,8 +29,15 @@ from app.services.orchestration.persistence import diff_orchestration_state_snap
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     read_orchestration_events,
+    read_orchestration_state_snapshots,
 )
 from app.services.orchestration.event_types import EventType
+from app.services.orchestration.observability import (
+    build_execution_dag,
+    build_focus_mode_payload,
+    build_mobile_interruption_cards,
+    build_trace_export,
+)
 from app.services.orchestration.persistence import (
     read_session_fingerprint_index,
     write_session_fingerprint_index,
@@ -66,7 +81,6 @@ def _session_task_event_roots(
     if not project:
         return []
 
-    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
     links = (
         db.query(SessionTask)
         .filter(SessionTask.session_id == session.id)
@@ -82,14 +96,67 @@ def _session_task_event_roots(
         task = db.query(Task).filter(Task.id == link.task_id).first()
         if not task:
             continue
+        project_dir = _pick_event_project_dir(
+            session_id=session.id,
+            task_id=task.id,
+            candidates=_event_project_dir_candidates(
+                session,
+                project,
+                task_subfolder=getattr(task, "task_subfolder", None),
+            ),
+        )
         roots.append(
             {
                 "task_id": task.id,
                 "task_title": task.title,
-                "project_dir": project_root,
+                "project_dir": project_dir,
             }
         )
     return roots
+
+
+def _event_project_dir_candidates(
+    session: SessionModel, project: Any, *, task_subfolder: Optional[str] = None
+) -> List[Path]:
+    candidates: List[Path] = []
+    resolved = resolve_project_workspace_path(project.workspace_path, project.name)
+    candidates.append(resolved)
+    raw_workspace = str(project.workspace_path or "").strip()
+    if raw_workspace:
+        raw_path = Path(raw_workspace).expanduser().resolve()
+        if raw_path not in candidates:
+            candidates.append(raw_path)
+    if task_subfolder:
+        extra: List[Path] = []
+        for candidate in candidates:
+            nested = (candidate / task_subfolder).resolve()
+            if nested not in candidates and nested not in extra:
+                extra.append(nested)
+        candidates.extend(extra)
+    return candidates
+
+
+def _pick_event_project_dir(
+    *,
+    session_id: int,
+    task_id: int,
+    candidates: List[Path],
+    prefer_snapshots: bool = False,
+) -> Path:
+    if not candidates:
+        raise ValueError("No project-dir candidates provided")
+    for candidate in candidates:
+        if prefer_snapshots:
+            snapshots = read_orchestration_state_snapshots(
+                candidate, session_id, task_id
+            )
+            if snapshots:
+                return candidate
+        else:
+            events = read_orchestration_events(candidate, session_id, task_id)
+            if events:
+                return candidate
+    return candidates[0]
 
 
 def _parse_timestamp(raw_value: Any) -> Optional[datetime]:
@@ -836,6 +903,124 @@ def inspect_session_checkpoint_payload(
     }
 
 
+def _latest_session_task_context(
+    db: Session, session: SessionModel
+) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    roots = _session_task_event_roots(db, session)
+    if not roots:
+        return None, [], []
+    root = roots[-1]
+    events = read_orchestration_events(root["project_dir"], session.id, root["task_id"])
+    snapshots = read_orchestration_state_snapshots(
+        root["project_dir"], session.id, root["task_id"]
+    )
+    return root, events, snapshots
+
+
+def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    root, events, snapshots = _latest_session_task_context(db, session)
+    if root is None:
+        return {
+            "schema_version": 1,
+            "session_id": session_id,
+            "task_id": None,
+            "exporter_backend": settings.ORCHESTRATOR_TRACE_EXPORTER_BACKEND,
+            "langfuse_handoff_ready": bool(settings.ORCHESTRATOR_LANGFUSE_ENABLED),
+            "span_count": 0,
+            "snapshot_count": 0,
+            "spans": [],
+        }
+    return build_trace_export(
+        session_id=session.id,
+        task_id=root["task_id"],
+        events=events,
+        snapshots=snapshots,
+        exporter_backend=settings.ORCHESTRATOR_TRACE_EXPORTER_BACKEND,
+        include_langfuse_handoff=bool(settings.ORCHESTRATOR_LANGFUSE_ENABLED),
+    )
+
+
+def get_session_execution_dag_payload(db: Session, session_id: int) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    root, events, snapshots = _latest_session_task_context(db, session)
+    if root is None:
+        return {
+            "session_id": session_id,
+            "task_id": None,
+            "node_count": 0,
+            "edge_count": 0,
+            "nodes": [],
+            "edges": [],
+        }
+    return build_execution_dag(
+        session_id=session.id,
+        task_id=root["task_id"],
+        events=events,
+        snapshots=snapshots,
+    )
+
+
+def get_session_focus_mode_payload(db: Session, session_id: int) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    root, events, snapshots = _latest_session_task_context(db, session)
+    pending_interventions = [
+        {
+            "id": item.id,
+            "task_id": item.task_id,
+            "prompt": item.prompt,
+            "intervention_type": item.intervention_type,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        }
+        for item in (
+            db.query(InterventionRequest)
+            .filter(
+                InterventionRequest.session_id == session_id,
+                InterventionRequest.status == "pending",
+            )
+            .order_by(InterventionRequest.created_at.desc())
+            .all()
+        )
+    ]
+    current_task = root if root else None
+    return build_focus_mode_payload(
+        session=session,
+        current_task=current_task,
+        events=events,
+        snapshots=snapshots,
+        pending_interventions=pending_interventions,
+        dispatch_watchdog=get_session_dispatch_watchdog_payload(db, session_id),
+    )
+
+
+def get_session_mobile_interruptions_payload(
+    db: Session, session_id: int
+) -> Dict[str, Any]:
+    session = _get_session_or_404(db, session_id)
+    pending_interventions = [
+        {
+            "id": item.id,
+            "task_id": item.task_id,
+            "prompt": item.prompt,
+            "status": item.status,
+        }
+        for item in (
+            db.query(InterventionRequest)
+            .filter(
+                InterventionRequest.session_id == session_id,
+                InterventionRequest.status == "pending",
+            )
+            .order_by(InterventionRequest.created_at.desc())
+            .all()
+        )
+    ]
+    return build_mobile_interruption_cards(
+        session=session,
+        dispatch_watchdog=get_session_dispatch_watchdog_payload(db, session_id),
+        pending_interventions=pending_interventions,
+    )
+
+
 async def load_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
@@ -1010,7 +1195,14 @@ def get_session_state_diff_payload(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    project_dir = resolve_project_workspace_path(project.workspace_path, project.name)
+    project_dir = _pick_event_project_dir(
+        session_id=session_id,
+        task_id=task_id,
+        candidates=_event_project_dir_candidates(
+            session, project, task_subfolder=getattr(task, "task_subfolder", None)
+        ),
+        prefer_snapshots=True,
+    )
     try:
         return diff_orchestration_state_snapshots(
             project_dir,

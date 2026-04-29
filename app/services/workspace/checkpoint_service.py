@@ -183,7 +183,7 @@ class CheckpointService:
         return {
             "resumable": False,
             "resume_reason": (
-                "Checkpoint is missing meaningful replay state: no saved plan, step results, or execution progress was recorded"
+                "Checkpoint is missing replay state: no saved plan, step results, or execution progress was recorded"
             ),
         }
 

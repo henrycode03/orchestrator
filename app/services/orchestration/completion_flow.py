@@ -5,12 +5,14 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
 
-from app.models import SessionTask, Task, TaskStatus
+from app.models import LogEntry, SessionTask, Task, TaskStatus
+from app.config import settings
 from app.services.error_handler import error_handler
 from app.services.orchestration.context_assembly import (
     assemble_completion_repair_inputs,
@@ -70,9 +72,7 @@ def _build_completion_repair_workspace_summary(
     )
     existing_files = [
         path
-        for path in collect_workspace_inventory_paths(
-            project_dir, max_files=max_files * 2
-        )
+        for path in collect_workspace_inventory_paths(project_dir, max_files=max_files)
         if Path(path).suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".json", ".sh"}
     ][:max_files]
 
@@ -272,7 +272,7 @@ def _augment_completion_verification_command(command: str, test_script: str) -> 
     if "vitest" in normalized_script and "--exclude" not in normalized_script:
         return f"{normalized_command} -- --exclude=.openclaw/**"
 
-    if re.search(r"(^|\\s)jest(\\s|$)", normalized_script) and (
+    if re.search(r"(^|\s)jest(\s|$)", normalized_script) and (
         "--testpathignorepatterns" not in normalized_script
     ):
         return f"{normalized_command} -- --testPathIgnorePatterns=.openclaw/"
@@ -287,10 +287,26 @@ def _execute_completion_verification(
     timeout_seconds: int = COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     try:
+        if any(token in command for token in (";", "&&", "||", "|", "$(", "`")):
+            return {
+                "success": False,
+                "returncode": None,
+                "output": (
+                    "Completion verification command was rejected because it contains "
+                    "unsafe shell metacharacters"
+                ),
+            }
+        argv = shlex.split(command, posix=True)
+        if not argv:
+            return {
+                "success": False,
+                "returncode": None,
+                "output": "Completion verification command was empty after parsing",
+            }
         completed = subprocess.run(
-            command,
+            argv,
             cwd=str(project_dir),
-            shell=True,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -310,6 +326,12 @@ def _execute_completion_verification(
             "success": False,
             "returncode": None,
             "output": f"Completion verification timed out after {timeout_seconds}s",
+        }
+    except ValueError as exc:
+        return {
+            "success": False,
+            "returncode": None,
+            "output": f"Completion verification command could not be parsed: {exc}",
         }
 
 
@@ -590,7 +612,8 @@ def _attempt_completion_repair(
         root_cause="validation_failure",
     )
 
-    if orchestration_state.completion_repair_attempts >= ctx.completion_repair_budget:
+    next_attempt = orchestration_state.completion_repair_attempts + 1
+    if next_attempt > ctx.completion_repair_budget:
         return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
     if (
         orchestration_state.completion_repair_attempts > 0
@@ -627,7 +650,7 @@ def _attempt_completion_repair(
             "reason": "repeat_completion_failure_signature",
         }
 
-    orchestration_state.completion_repair_attempts += 1
+    orchestration_state.completion_repair_attempts = next_attempt
     next_step_number = len(orchestration_state.plan) + 1
 
     emit_live(
@@ -833,7 +856,7 @@ def _attempt_completion_repair(
         step_description=repair_step["description"],
         task_prompt=ctx.prompt,
     )
-    step_started_at = datetime.utcnow()
+    step_started_at = datetime.now(UTC)
     repair_exec_result = asyncio.run(
         ctx.runtime_service.execute_task(
             execution_prompt,
@@ -979,6 +1002,22 @@ def _run_evaluator(
     the live log and stored in the orchestration events for later review.
     """
     try:
+        reasoning_artifact = (
+            getattr(orchestration_state, "reasoning_artifact", None) or {}
+        )
+        reasoning_summary = json.dumps(
+            {
+                "intent": reasoning_artifact.get("intent"),
+                "planned_actions": list(
+                    reasoning_artifact.get("planned_actions") or []
+                )[:6],
+                "verification_plan": list(
+                    reasoning_artifact.get("verification_plan") or []
+                )[:6],
+            },
+            ensure_ascii=True,
+            indent=2,
+        )
         steps_text = "\n".join(
             (
                 f"- {r.get('step_title', r.get('step', ''))}: {r.get('status', '')}"
@@ -994,11 +1033,13 @@ def _run_evaluator(
         evaluator_prompt = (
             "You are an independent QA evaluator. Grade the following completed task.\n\n"
             f"## Task goal\n{prompt}\n\n"
+            f"## Control-plane reasoning artifact\n{reasoning_summary}\n\n"
             f"## Steps executed\n{steps_text or '(none recorded)'}\n\n"
             f"## Files changed\n{changed_files_text or '(none recorded)'}\n\n"
             f"## Agent summary\n{summary[:600] or '(no summary)'}\n\n"
             "## Evaluation criteria\n"
             "1. **Goal coverage** – Does the work address the full task goal? (0–3)\n"
+            "   Check alignment with the reasoning artifact intent and planned actions.\n"
             "2. **No regressions** – Are there signs of broken functionality? (0–2)\n"
             "3. **Code quality** – Is the implementation complete, not stubbed? (0–2)\n"
             "4. **File correctness** – Do the changed files match what the task requires? (0–3)\n\n"
@@ -1019,6 +1060,31 @@ def _run_evaluator(
         verdict = "PASS"
         if "VERDICT: NEEDS_REVIEW" in eval_output.upper():
             verdict = "NEEDS_REVIEW"
+        judge_verdict = None
+        if settings.ORCHESTRATOR_ENABLE_JUDGE_AGENT:
+            judge_prompt = (
+                "You are a control-plane judge. Review whether the finished task still "
+                "matches the accepted reasoning artifact.\n\n"
+                f"## Reasoning artifact\n{reasoning_summary}\n\n"
+                f"## Evaluator output\n{eval_output[:1200]}\n\n"
+                "Respond exactly with:\n"
+                "JUDGE: ACCEPT or WARN or REJECT\n"
+                "RATIONALE: one sentence\n"
+            )
+            judge_result = asyncio.run(
+                runtime_service.execute_task(judge_prompt, timeout_seconds=90)
+            )
+            judge_output = (
+                judge_result.get("output", "")
+                if isinstance(judge_result, dict)
+                else str(judge_result)
+            )
+            if "JUDGE: REJECT" in judge_output.upper():
+                judge_verdict = "REJECT"
+            elif "JUDGE: WARN" in judge_output.upper():
+                judge_verdict = "WARN"
+            else:
+                judge_verdict = "ACCEPT"
         log_level = "INFO" if verdict == "PASS" else "WARN"
         emit_live(
             log_level,
@@ -1026,6 +1092,7 @@ def _run_evaluator(
             metadata={
                 "phase": "evaluation",
                 "verdict": verdict,
+                "judge_verdict": judge_verdict,
                 "eval_output": eval_output[:800],
             },
         )
@@ -1034,7 +1101,14 @@ def _run_evaluator(
             session_id=getattr(orchestration_state, "session_id", None),
             task_id=getattr(orchestration_state, "task_id", None),
             event_type=EventType.EVALUATOR_RESULT,
-            details={"verdict": verdict, "output": eval_output[:800]},
+            details={
+                "verdict": verdict,
+                "judge_verdict": judge_verdict,
+                "judge_enabled": bool(settings.ORCHESTRATOR_ENABLE_JUDGE_AGENT),
+                "reasoning_artifact_used": bool(reasoning_artifact),
+                "reasoning_intent": reasoning_artifact.get("intent"),
+                "output": eval_output[:800],
+            },
         )
     except Exception as e:
         logger.warning("[EVALUATOR] QA evaluation failed (non-blocking): %s", e)
@@ -1070,7 +1144,7 @@ def _write_progress_notes(
         task_title = getattr(task, "title", "") or prompt[:80]
 
         entry_lines = [
-            f"\n## {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} — {task_title}",
+            f"\n## {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} — {task_title}",
             "",
             f"**Steps completed ({len(completed_steps)}):**",
         ]
@@ -1227,7 +1301,7 @@ def finalize_successful_task(
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = completion_error
             task.status = TaskStatus.FAILED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(UTC)
             task.error_message = completion_error
             task.current_step = len(orchestration_state.plan)
             task.workspace_status = "blocked"
@@ -1297,7 +1371,7 @@ def finalize_successful_task(
         orchestration_state.status = OrchestrationStatus.ABORTED
         orchestration_state.abort_reason = completion_error
         task.status = TaskStatus.FAILED
-        task.completed_at = datetime.utcnow()
+        task.completed_at = datetime.now(UTC)
         task.error_message = completion_error
         task.current_step = len(orchestration_state.plan)
         task.workspace_status = "blocked"
@@ -1386,7 +1460,7 @@ def finalize_successful_task(
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = completion_error
                     task.status = TaskStatus.FAILED
-                    task.completed_at = datetime.utcnow()
+                    task.completed_at = datetime.now(UTC)
                     task.error_message = completion_error
                     task.current_step = len(orchestration_state.plan)
                     task.workspace_status = "blocked"
@@ -1429,7 +1503,7 @@ def finalize_successful_task(
                 f"({completion_verification_source or 'auto-detected'})"
             )
             task.status = TaskStatus.FAILED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(UTC)
             task.error_message = (
                 verification_error
                 + ": "
@@ -1528,7 +1602,7 @@ def finalize_successful_task(
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = baseline_error
             task.status = TaskStatus.FAILED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(UTC)
             task.error_message = baseline_error
             task.current_step = len(orchestration_state.plan)
             task.workspace_status = "blocked"
@@ -1568,7 +1642,7 @@ def finalize_successful_task(
         )
 
     task.status = TaskStatus.DONE
-    task.completed_at = datetime.utcnow()
+    task.completed_at = datetime.now(UTC)
     task.error_message = None
     task.summary = summary_result.get("output", "")[:2000]
     task.current_step = len(orchestration_state.plan)
@@ -1696,16 +1770,16 @@ def finalize_successful_task(
                 session_id=session_id,
                 task_id=next_task.id,
                 status=TaskStatus.RUNNING,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(UTC),
             )
             db.add(next_session_task_link)
         else:
             next_session_task_link.status = TaskStatus.RUNNING
-            next_session_task_link.started_at = datetime.utcnow()
+            next_session_task_link.started_at = datetime.now(UTC)
             next_session_task_link.completed_at = None
 
         next_task.status = TaskStatus.RUNNING
-        next_task.started_at = datetime.utcnow()
+        next_task.started_at = datetime.now(UTC)
         next_task.completed_at = None
         next_task.error_message = None
         next_task.current_step = 0
