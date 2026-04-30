@@ -289,7 +289,9 @@ def execute_planning_phase(
     else:
         planning_result = asyncio.run(
             ctx.runtime_service.execute_task(
-                planning_prompt, timeout_seconds=planning_timeout_seconds
+                planning_prompt,
+                timeout_seconds=planning_timeout_seconds,
+                reuse_task_session=False,
             )
         )
 
@@ -311,6 +313,10 @@ def execute_planning_phase(
     if PlannerService.should_retry_with_minimal_prompt(
         planning_result, initial_output_text
     ) and not PlannerService.looks_salvageable_planning_output(initial_output_text):
+        if used_minimal_planning_prompt:
+            raise TimeoutError(
+                f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
+            )
         ctx.logger.warning(
             "[ORCHESTRATION] Planning failed on the first pass; retrying with minimal prompt"
         )

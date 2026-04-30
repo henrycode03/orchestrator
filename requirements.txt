@@ -18,3 +18,4 @@ email-validator>=2.3.0
 # Celery Task Queue
 celery[redis]>=5.3.0
 redis>=4.5.0
+langfuse>=4.3.1

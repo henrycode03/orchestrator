@@ -95,6 +95,13 @@ from app.config import settings
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
+from app.services.observability import (
+    build_text_trace_payload,
+    flush_langfuse,
+    langfuse_tracing_enabled,
+    start_langfuse_observation,
+    update_langfuse_observation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +371,8 @@ def execute_orchestration_task(
     task: Optional[Task] = None
     orchestration_state: Optional[OrchestrationState] = None
     session_task_link: Optional[SessionTask] = None
+    trace_context_manager = None
+    trace_observation = None
 
     try:
         # Get session and task
@@ -965,6 +974,41 @@ def execute_orchestration_task(
 
         # Initialize the active runtime service
         runtime_service = create_agent_runtime(db, session_id, task_id)
+        runtime_metadata = (
+            runtime_service.get_backend_metadata()
+            if hasattr(runtime_service, "get_backend_metadata")
+            else {}
+        )
+        trace_context_manager = start_langfuse_observation(
+            name="orchestrator-task-run",
+            as_type="agent",
+            input=build_text_trace_payload(prompt),
+            metadata={
+                "project_id": project.id if project else None,
+                "project_name": project.name if project else None,
+                "session_id": session_id,
+                "task_id": task_id,
+                "execution_profile": execution_profile,
+                "resume_checkpoint_name": resume_checkpoint_name,
+                "backend": runtime_metadata.get("backend"),
+                "model_family": runtime_metadata.get("model_family"),
+                "adaptation_profile": runtime_metadata.get("adaptation_profile"),
+            },
+        )
+        trace_observation = trace_context_manager.__enter__()
+        if trace_observation is not None:
+            logger.info(
+                "[LANGFUSE] Started orchestration trace for session=%s task=%s backend=%s",
+                session_id,
+                task_id,
+                runtime_metadata.get("backend") or "unknown",
+            )
+        elif langfuse_tracing_enabled():
+            logger.warning(
+                "[LANGFUSE] Tracing enabled but orchestration trace did not start for session=%s task=%s",
+                session_id,
+                task_id,
+            )
 
         # Get session context
         session_context = asyncio.run(runtime_service.get_session_context())
@@ -1587,38 +1631,121 @@ def execute_orchestration_task(
                 orchestration_state=orchestration_state,
                 logger=logger,
             )
-            planning_phase_result = execute_planning_phase(
-                ctx=run_ctx,
-                workspace_review=workspace_review,
-                extract_structured_text=_extract_structured_text,
-                extract_plan_steps=_extract_plan_steps,
-                looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
-                normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-                workspace_violation_error_cls=TaskWorkspaceViolationError,
-            )
+            with start_langfuse_observation(
+                name="planning-phase",
+                as_type="span",
+                input={
+                    "prompt_chars": len(prompt or ""),
+                    "project_context_chars": len(
+                        orchestration_state.project_context or ""
+                    ),
+                },
+                metadata={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "execution_profile": execution_profile,
+                    "phase": "planning",
+                },
+            ) as planning_phase_observation:
+                planning_phase_result = execute_planning_phase(
+                    ctx=run_ctx,
+                    workspace_review=workspace_review,
+                    extract_structured_text=_extract_structured_text,
+                    extract_plan_steps=_extract_plan_steps,
+                    looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
+                    normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
+                    workspace_violation_error_cls=TaskWorkspaceViolationError,
+                )
+                update_langfuse_observation(
+                    planning_phase_observation,
+                    output=planning_phase_result,
+                    metadata={
+                        "phase": "planning",
+                        "plan_steps": len(orchestration_state.plan or []),
+                    },
+                    level=(
+                        "ERROR"
+                        if planning_phase_result.get("status") == "failed"
+                        else None
+                    ),
+                    status_message=(
+                        str(planning_phase_result.get("reason") or "")[:500] or None
+                    ),
+                )
             if planning_phase_result.get("status") != "completed":
+                update_langfuse_observation(
+                    trace_observation,
+                    output=planning_phase_result,
+                    level=(
+                        "ERROR"
+                        if planning_phase_result.get("status") == "failed"
+                        else None
+                    ),
+                    status_message=str(planning_phase_result.get("reason") or "")[:500]
+                    or None,
+                )
                 return planning_phase_result
 
         _save_orchestration_checkpoint(
             db, session_id, task_id, prompt, orchestration_state
         )
 
-        return execute_step_loop(
-            ctx=run_ctx,
-            extract_structured_text=_extract_structured_text,
-            normalize_step=_normalize_step,
-            normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-            workspace_violation_error_cls=TaskWorkspaceViolationError,
-            write_project_state_snapshot_fn=_write_project_state_snapshot,
-            get_next_pending_project_task_fn=_get_next_pending_project_task,
-            get_latest_session_task_link_fn=_get_latest_session_task_link,
-            execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
-            build_task_report_payload_fn=_build_task_report_payload,
-            render_task_report_fn=_render_task_report,
-            record_live_log_fn=_record_live_log,
+        with start_langfuse_observation(
+            name="execution-phase",
+            as_type="span",
+            input={
+                "planned_steps": len(orchestration_state.plan or []),
+                "current_step_index": orchestration_state.current_step_index,
+            },
+            metadata={
+                "session_id": session_id,
+                "task_id": task_id,
+                "execution_profile": execution_profile,
+                "phase": "executing",
+            },
+        ) as execution_phase_observation:
+            step_loop_result = execute_step_loop(
+                ctx=run_ctx,
+                extract_structured_text=_extract_structured_text,
+                normalize_step=_normalize_step,
+                normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
+                workspace_violation_error_cls=TaskWorkspaceViolationError,
+                write_project_state_snapshot_fn=_write_project_state_snapshot,
+                get_next_pending_project_task_fn=_get_next_pending_project_task,
+                get_latest_session_task_link_fn=_get_latest_session_task_link,
+                execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
+                build_task_report_payload_fn=_build_task_report_payload,
+                render_task_report_fn=_render_task_report,
+                record_live_log_fn=_record_live_log,
+            )
+            update_langfuse_observation(
+                execution_phase_observation,
+                output=step_loop_result,
+                metadata={
+                    "phase": "executing",
+                    "completed_steps": len(
+                        getattr(orchestration_state, "completed_steps", []) or []
+                    ),
+                },
+                level=("ERROR" if step_loop_result.get("status") == "failed" else None),
+                status_message=str(step_loop_result.get("reason") or "")[:500] or None,
+            )
+        update_langfuse_observation(
+            trace_observation,
+            output=step_loop_result,
+            level="ERROR" if step_loop_result.get("status") == "failed" else None,
+            status_message=str(step_loop_result.get("reason") or "")[:500] or None,
         )
+        return step_loop_result
 
     except Exception as exc:
+        update_langfuse_observation(
+            trace_observation,
+            output={"status": "failed", "reason": "exception"},
+            metadata={"exception_type": exc.__class__.__name__},
+            level="ERROR",
+            status_message=str(exc)[:500],
+        )
         handle_task_failure(
             self_task=self,
             ctx=(
@@ -1687,6 +1814,9 @@ def execute_orchestration_task(
         )
 
     finally:
+        if trace_context_manager is not None:
+            trace_context_manager.__exit__(None, None, None)
+        flush_langfuse()
         db.close()
 
 

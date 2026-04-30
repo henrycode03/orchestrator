@@ -9,6 +9,11 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.observability import (
+    build_text_trace_payload,
+    start_langfuse_observation,
+    update_langfuse_observation,
+)
 from app.services.agents.agent_backends import get_backend_descriptor
 from app.services.agents.interfaces import (
     AgentInterfaceDescriptor,
@@ -91,39 +96,93 @@ class OpenAIResponsesRuntime:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        trace_input = build_text_trace_payload(prompt)
 
-        try:
-            async with httpx.AsyncClient(timeout=timeout_seconds + 30) as client:
-                response = await client.post(
-                    f"{base_url}/responses",
-                    headers=headers,
-                    json=payload,
+        with start_langfuse_observation(
+            name="openai-responses-request",
+            as_type="generation",
+            input=trace_input,
+            metadata={
+                "backend": self.backend_descriptor.name,
+                "source_brain": source_brain,
+                "session_prefix": session_prefix,
+                "session_id": self.session_id,
+                "task_id": self.task_id,
+            },
+            model=model_name,
+        ) as observation:
+            try:
+                async with httpx.AsyncClient(timeout=timeout_seconds + 30) as client:
+                    response = await client.post(
+                        f"{base_url}/responses",
+                        headers=headers,
+                        json=payload,
+                    )
+            except httpx.TimeoutException as exc:
+                update_langfuse_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=f"timed out after {timeout_seconds}s",
+                    output={"status": "failed", "reason": "timeout"},
                 )
-        except httpx.TimeoutException as exc:
-            raise AgentRuntimeError(
-                f"OpenAI Responses request timed out after {timeout_seconds}s."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise AgentRuntimeError(f"OpenAI Responses request failed: {exc}") from exc
+                raise AgentRuntimeError(
+                    f"OpenAI Responses request timed out after {timeout_seconds}s."
+                ) from exc
+            except httpx.HTTPError as exc:
+                update_langfuse_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=str(exc)[:500],
+                    output={"status": "failed", "reason": "http_error"},
+                )
+                raise AgentRuntimeError(
+                    f"OpenAI Responses request failed: {exc}"
+                ) from exc
 
-        body = response.json()
-        if response.status_code >= 400:
-            error = body.get("error") if isinstance(body, dict) else None
-            message = (
-                error.get("message")
-                if isinstance(error, dict)
-                else f"OpenAI Responses returned HTTP {response.status_code}"
+            body = response.json()
+            if response.status_code >= 400:
+                error = body.get("error") if isinstance(body, dict) else None
+                message = (
+                    error.get("message")
+                    if isinstance(error, dict)
+                    else f"OpenAI Responses returned HTTP {response.status_code}"
+                )
+                update_langfuse_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=message[:500],
+                    output={"status": "failed", "http_status": response.status_code},
+                )
+                raise AgentRuntimeError(message)
+
+            output_text = _extract_output_text(body)
+            usage = body.get("usage") if isinstance(body, dict) else None
+            usage_details = None
+            if isinstance(usage, dict):
+                usage_details = {
+                    key: int(value)
+                    for key, value in (
+                        ("input", usage.get("input_tokens")),
+                        ("output", usage.get("output_tokens")),
+                    )
+                    if isinstance(value, int)
+                }
+            update_langfuse_observation(
+                observation,
+                output=build_text_trace_payload(output_text),
+                metadata={
+                    "response_id": body.get("id"),
+                    "backend": self.backend_descriptor.name,
+                },
+                usage_details=usage_details,
             )
-            raise AgentRuntimeError(message)
-
-        output_text = _extract_output_text(body)
-        return {
-            "status": "completed",
-            "output": output_text,
-            "response_id": body.get("id"),
-            "backend": self.backend_descriptor.name,
-            "model_family": model_name,
-        }
+            return {
+                "status": "completed",
+                "output": output_text,
+                "response_id": body.get("id"),
+                "backend": self.backend_descriptor.name,
+                "model_family": model_name,
+            }
 
     async def execute_task_with_orchestration(
         self, prompt: str, timeout_seconds: int = 300, orchestration_state: Any = None

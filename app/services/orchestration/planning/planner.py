@@ -118,6 +118,8 @@ class PlannerService:
         if not text:
             return False
         lowered = text.lower()
+        if '"aborted": true' in lowered and "finalassistantvisibletext" not in lowered:
+            return False
         planning_markers = (
             '"step_number"',
             '"commands"',
@@ -125,10 +127,11 @@ class PlannerService:
             '"description"',
             "finalassistantvisibletext",
             "```json",
-            "[",
-            "{",
+            "| # | step |",
         )
-        return any(marker in lowered for marker in planning_markers)
+        return any(
+            marker in lowered for marker in planning_markers
+        ) or lowered.startswith("[")
 
     @staticmethod
     def should_retry_with_minimal_prompt(
@@ -624,6 +627,7 @@ Rules:
                         workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=minimal_timeout,
+                    reuse_task_session=False,
                 )
             )
         except Exception as exc:
@@ -672,6 +676,7 @@ Rules:
                         workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
+                    reuse_task_session=False,
                 )
             )
 
@@ -737,6 +742,7 @@ Rules:
                         workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=repair_timeout,
+                    reuse_task_session=False,
                 )
             )
         except Exception as exc:
@@ -785,5 +791,6 @@ Rules:
                         workspace_has_existing_files=workspace_has_existing_files,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
+                    reuse_task_session=False,
                 )
             )

@@ -52,6 +52,11 @@ from app.services.orchestration.task_rules import (
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.persistence import append_orchestration_event
+from app.services.observability import (
+    build_text_trace_payload,
+    start_langfuse_observation,
+    update_langfuse_observation,
+)
 from app.services.permission_service import PermissionApprovalService
 from app.services.task_service import TaskService
 from app.services.performance_optimizations import (
@@ -471,6 +476,8 @@ class OpenClawSessionService:
         prompt: str,
         timeout_seconds: int = 300,
         log_callback: Optional[Callable[..., None]] = None,
+        *,
+        reuse_task_session: bool = True,
     ) -> Dict[str, Any]:
         """
         Execute a task via OpenClaw session (legacy single-mode)
@@ -491,79 +498,124 @@ class OpenClawSessionService:
         Raises:
             OpenClawSessionError: If execution fails
         """
-        try:
-            # OPTIMIZATION: Track start time
-            perf_tracker.start("execute_task")
-            start_time = time.time()
+        with start_langfuse_observation(
+            name="openclaw-agent-request",
+            as_type="generation",
+            input=build_text_trace_payload(prompt),
+            metadata={
+                "backend": self.backend_descriptor.name,
+                "session_id": self.session_id,
+                "task_id": self.task_id,
+                "reuse_task_session": reuse_task_session,
+                "demo_mode": self.use_demo_mode,
+            },
+            model=get_effective_agent_model_family(
+                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+            ),
+        ) as observation:
+            try:
+                # OPTIMIZATION: Track start time
+                perf_tracker.start("execute_task")
+                start_time = time.time()
 
-            # OPTIMIZATION: Optimize prompt to reduce planning time
-            optimized_prompt = optimize_prompt(prompt, max_tokens=25000)
+                # OPTIMIZATION: Optimize prompt to reduce planning time
+                optimized_prompt = optimize_prompt(prompt, max_tokens=25000)
 
-            # Check if we should use demo mode or real execution
-            if self.use_demo_mode:
-                # DEMO MODE: Return mock logs (for UI testing)
-                result = await self._execute_demo_mode(optimized_prompt)
-                # Demo mode always completes successfully (by design)
-                result["status"] = "completed"
-            else:
-                # REAL MODE: Execute task via OpenClaw HTTP API
-                result = await self.execute_task_with_streaming(
-                    optimized_prompt, timeout_seconds, log_callback
-                )
-                if self._is_context_overflow_result(result):
-                    retry_prompt = optimize_prompt(
-                        prompt,
-                        max_tokens=700,
-                        hard_char_limit=1800,
+                # Check if we should use demo mode or real execution
+                if self.use_demo_mode:
+                    # DEMO MODE: Return mock logs (for UI testing)
+                    result = await self._execute_demo_mode(optimized_prompt)
+                    # Demo mode always completes successfully (by design)
+                    result["status"] = "completed"
+                else:
+                    # REAL MODE: Execute task via OpenClaw HTTP API
+                    result = await self.execute_task_with_streaming(
+                        optimized_prompt,
+                        timeout_seconds,
+                        log_callback,
+                        reuse_task_session=reuse_task_session,
                     )
-                    if retry_prompt != optimized_prompt:
-                        self._log_entry(
-                            "WARN",
-                            "[OPENCLAW] Context overflow detected; retrying once with a compact prompt",
+                    if self._is_context_overflow_result(result):
+                        retry_prompt = optimize_prompt(
+                            prompt,
+                            max_tokens=700,
+                            hard_char_limit=1800,
                         )
-                        result = await self.execute_task_with_streaming(
-                            retry_prompt, timeout_seconds, log_callback
-                        )
+                        if retry_prompt != optimized_prompt:
+                            self._log_entry(
+                                "WARN",
+                                "[OPENCLAW] Context overflow detected; retrying once with a compact prompt",
+                            )
+                            result = await self.execute_task_with_streaming(
+                                retry_prompt,
+                                timeout_seconds,
+                                log_callback,
+                                reuse_task_session=reuse_task_session,
+                            )
 
-            # OPTIMIZATION: Log performance metrics
-            duration = time.time() - start_time
-            self._log_entry(
-                "INFO",
-                f"[PERFORMANCE] Task executed in {duration:.2f}s (optimized prompt)",
-            )
-
-            result_status = result.get("status")
-            if result_status == "completed":
+                # OPTIMIZATION: Log performance metrics
+                duration = time.time() - start_time
                 self._log_entry(
                     "INFO",
-                    "[OPENCLAW] Request returned output; awaiting orchestration validation",
-                )
-            elif result_status == "failed":
-                self._log_entry(
-                    "ERROR",
-                    f"[OPENCLAW] Request failed before orchestration validation: "
-                    f"{result.get('error', 'Execution failed')}",
-                )
-            else:
-                self._log_entry(
-                    "WARNING",
-                    f"[OPENCLAW] Request returned unexpected status before orchestration validation: "
-                    f"{result_status or 'unknown'}",
+                    f"[PERFORMANCE] Task executed in {duration:.2f}s (optimized prompt)",
                 )
 
-            result.setdefault("backend", self.backend_descriptor.name)
-            result.setdefault("model_family", settings.ORCHESTRATOR_AGENT_MODEL_FAMILY)
-            result.setdefault(
-                "backend_capabilities",
-                self.backend_descriptor.capabilities.to_dict(),
-            )
-            return result
+                result_status = result.get("status")
+                if result_status == "completed":
+                    self._log_entry(
+                        "INFO",
+                        "[OPENCLAW] Request returned output; awaiting orchestration validation",
+                    )
+                elif result_status == "failed":
+                    self._log_entry(
+                        "ERROR",
+                        f"[OPENCLAW] Request failed before orchestration validation: "
+                        f"{result.get('error', 'Execution failed')}",
+                    )
+                else:
+                    self._log_entry(
+                        "WARNING",
+                        f"[OPENCLAW] Request returned unexpected status before orchestration validation: "
+                        f"{result_status or 'unknown'}",
+                    )
 
-        except Exception as e:
-            error_msg = f"Task execution failed: {str(e)}"
-            self._log_entry("ERROR", error_msg)
+                result.setdefault("backend", self.backend_descriptor.name)
+                result.setdefault(
+                    "model_family", settings.ORCHESTRATOR_AGENT_MODEL_FAMILY
+                )
+                result.setdefault(
+                    "backend_capabilities",
+                    self.backend_descriptor.capabilities.to_dict(),
+                )
+                update_langfuse_observation(
+                    observation,
+                    output=build_text_trace_payload(
+                        result.get("output") or result.get("error") or result_status
+                    ),
+                    metadata={
+                        "status": result_status,
+                        "backend": self.backend_descriptor.name,
+                    },
+                    level="ERROR" if result_status == "failed" else None,
+                    status_message=(
+                        str(result.get("error") or "")[:500]
+                        if result_status == "failed"
+                        else None
+                    ),
+                )
+                return result
 
-            raise OpenClawSessionError(error_msg)
+            except Exception as e:
+                error_msg = f"Task execution failed: {str(e)}"
+                self._log_entry("ERROR", error_msg)
+                update_langfuse_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=error_msg[:500],
+                    output={"status": "failed", "reason": "exception"},
+                )
+
+                raise OpenClawSessionError(error_msg)
 
     @staticmethod
     def _is_context_overflow_result(result: Optional[Dict[str, Any]]) -> bool:
@@ -1413,6 +1465,27 @@ class OpenClawSessionService:
                     output_data
                 )
 
+            if isinstance(output_data, dict) and output_data.get("aborted") is True:
+                timeout_error = cli_error_message or "OpenClaw run was aborted"
+                lowered_output_text = str(output_text or "").lower()
+                if "timeout" in lowered_output_text:
+                    timeout_error = (
+                        "Task timed out before a valid response was generated"
+                    )
+                elif "timeout" in cli_error_lower or "timed out" in cli_error_lower:
+                    timeout_error = cli_error_message or "Task timed out"
+                self._log_entry(
+                    "ERROR",
+                    f"[OPENCLAW] Aborted structured response surfaced as failure: {timeout_error}",
+                )
+                return {
+                    "status": "failed",
+                    "mode": "real",
+                    "output": output_text,
+                    "error": timeout_error,
+                    "logs": [],
+                }
+
             return {
                 "status": "completed" if return_code == 0 else "failed",
                 "mode": "real",
@@ -1601,16 +1674,23 @@ class OpenClawSessionService:
         prompt: str,
         timeout_seconds: int = 300,
         log_callback: Optional[Callable] = None,
+        *,
+        reuse_task_session: bool = True,
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI with real-time log streaming (optimized)"""
 
         # Reuse the stable per-task session ID set in create_openclaw_session so
         # all steps in this task share one AI context window.
         task_id_str = str(self.task_id or self.session_id)
-        new_session_id = (
-            self._task_session_id
-            or f"orchestrator-task-{task_id_str}-{int(time.time())}"
-        )
+        if reuse_task_session:
+            new_session_id = (
+                self._task_session_id
+                or f"orchestrator-task-{task_id_str}-{int(time.time())}"
+            )
+        else:
+            new_session_id = (
+                f"orchestrator-task-{task_id_str}-fresh-{int(time.time() * 1000)}"
+            )
 
         try:
             openclaw_command = self._resolve_openclaw_command()

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from app.config import settings, validate_runtime_secrets
 from app.api.v1.router import api_router
 from app.database import engine, init_db, get_db_session
+from app.services.observability import flush_langfuse
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.planning.planning_session_service import PlanningSessionService
 
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
     logger.info("🛑 Orchestrator API shutting down...")
     logger.info("Cleaning up WebSocket connections and resources...")
+    flush_langfuse()
     logger.info("=" * 50)
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -645,12 +646,21 @@ class ValidatorService:
     def _plan_contains_unsafe_command_paths(
         plan: List[Dict[str, Any]]
     ) -> Dict[int, List[str]]:
-        """Detect parent-directory traversal in commands and step control fields."""
+        """Detect command paths that violate the task-workspace contract."""
 
         findings: Dict[int, List[str]] = {}
         traversal_pattern = re.compile(
             r"(?<![\w./-])\.\.(?:/[A-Za-z0-9._@:+-]+)+(?:/)?"
         )
+        absolute_path_pattern = re.compile(
+            r"^/[A-Za-z0-9._@:+-]+(?:/[A-Za-z0-9._@:+-]+)*/*$"
+        )
+        allowed_absolute_tokens = {
+            "/dev/null",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/stdin",
+        }
 
         for index, step in enumerate(plan, start=1):
             step_number = step.get("step_number", index)
@@ -668,6 +678,16 @@ class ValidatorService:
                     fragment = match.group(0)
                     if fragment not in fragments:
                         fragments.append(fragment)
+                try:
+                    tokens = shlex.split(text, posix=True)
+                except ValueError:
+                    tokens = []
+                for token in tokens:
+                    if token in allowed_absolute_tokens:
+                        continue
+                    if absolute_path_pattern.fullmatch(token):
+                        if token not in fragments:
+                            fragments.append(token)
 
             if fragments:
                 findings[int(step_number)] = fragments[:6]

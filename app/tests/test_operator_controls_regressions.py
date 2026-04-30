@@ -255,6 +255,30 @@ def test_validator_rejects_parent_directory_traversal_in_plan_commands():
     assert verdict.details["unsafe_command_paths"] == {1: ["../backend"]}
 
 
+def test_validator_rejects_absolute_helper_script_paths_in_plan_commands():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Browse Langfuse docs",
+                "commands": ["python3 /root/browse.py https://langfuse.com"],
+                "verification": "echo docs reviewed",
+                "rollback": None,
+                "expected_files": [],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Review Langfuse docs before implementation",
+        execution_profile="full_lifecycle",
+    )
+
+    assert verdict.rejected is True
+    assert "parent-directory paths outside the task workspace" in " ".join(
+        verdict.reasons
+    )
+    assert verdict.details["unsafe_command_paths"] == {1: ["/root/browse.py"]}
+
+
 def test_validator_flags_fullstack_workflow_phase_order_drift():
     verdict = ValidatorService.validate_plan(
         [

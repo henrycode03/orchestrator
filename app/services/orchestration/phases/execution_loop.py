@@ -53,6 +53,10 @@ from app.services.orchestration.validation.workspace_guard import (
     detect_scope_violations,
     summarize_step_changes,
 )
+from app.services.observability import (
+    start_langfuse_observation,
+    update_langfuse_observation,
+)
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 
@@ -1470,12 +1474,36 @@ def execute_step_loop(
     except Exception:
         pass
 
-    return finalize_successful_task(
-        ctx=ctx,
-        write_project_state_snapshot_fn=write_project_state_snapshot_fn,
-        get_next_pending_project_task_fn=get_next_pending_project_task_fn,
-        get_latest_session_task_link_fn=get_latest_session_task_link_fn,
-        execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
-        build_task_report_payload_fn=build_task_report_payload_fn,
-        render_task_report_fn=render_task_report_fn,
-    )
+    with start_langfuse_observation(
+        name="task-summary-phase",
+        as_type="span",
+        input={
+            "completed_steps": len(
+                getattr(orchestration_state, "completed_steps", []) or []
+            ),
+            "execution_results": len(orchestration_state.execution_results or []),
+        },
+        metadata={
+            "session_id": session_id,
+            "task_id": task_id,
+            "phase": "task_summary",
+            "execution_profile": execution_profile,
+        },
+    ) as task_summary_observation:
+        completion_result = finalize_successful_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=write_project_state_snapshot_fn,
+            get_next_pending_project_task_fn=get_next_pending_project_task_fn,
+            get_latest_session_task_link_fn=get_latest_session_task_link_fn,
+            execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
+            build_task_report_payload_fn=build_task_report_payload_fn,
+            render_task_report_fn=render_task_report_fn,
+        )
+        update_langfuse_observation(
+            task_summary_observation,
+            output=completion_result,
+            metadata={"phase": "task_summary"},
+            level="ERROR" if completion_result.get("status") == "failed" else None,
+            status_message=str(completion_result.get("reason") or "")[:500] or None,
+        )
+        return completion_result

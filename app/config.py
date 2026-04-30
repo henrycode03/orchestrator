@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     ORCHESTRATOR_ENABLE_JUDGE_AGENT: bool = False
     ORCHESTRATOR_TRACE_EXPORTER_BACKEND: str = "local_json"
     ORCHESTRATOR_LANGFUSE_ENABLED: bool = False
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_BASE_URL: str = ""
+    LANGFUSE_ENVIRONMENT: str = "development"
     ORCHESTRATOR_ADMIN_EMAILS: str = ""
 
     # Mobile app configuration

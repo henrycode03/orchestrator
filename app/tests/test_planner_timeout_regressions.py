@@ -310,3 +310,32 @@ def test_non_qwen_or_non_full_lifecycle_single_step_plan_still_uses_retry_guard(
         )
         is False
     )
+
+
+def test_aborted_timeout_metadata_is_not_treated_as_salvageable_plan_output():
+    output_text = (
+        '{"total":0,"aborted":true,"source":"run","generatedAt":1777555426260}'
+    )
+
+    assert PlannerService.looks_salvageable_planning_output(output_text) is False
+
+
+def test_minimal_prompt_retry_uses_fresh_session_instead_of_task_session():
+    captured = {}
+
+    class RuntimeService:
+        async def execute_task(self, prompt, timeout_seconds=300, **kwargs):
+            captured["reuse_task_session"] = kwargs.get("reuse_task_session")
+            return {"status": "failed", "output": "", "error": "Task timed out"}
+
+    PlannerService.retry_with_minimal_prompt(
+        runtime_service=RuntimeService(),
+        task_description="Build a one-page site",
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=60,
+        logger=__import__("logging").getLogger("test"),
+        emit_live=lambda *args, **kwargs: None,
+        reason="timeout",
+    )
+
+    assert captured["reuse_task_session"] is False

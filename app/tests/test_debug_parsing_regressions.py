@@ -118,6 +118,24 @@ def test_openclaw_response_parser_recovers_final_assistant_visible_text():
     assert "step_number" in result["output"]
 
 
+def test_openclaw_response_parser_surfaces_aborted_payload_as_failure():
+    service = OpenClawSessionService.__new__(OpenClawSessionService)
+    service.session_model = None
+    service._log_entry = lambda *args, **kwargs: None
+    payload = '{"total":0,"aborted":true,"source":"run","generatedAt":1777555426260}'
+    completed = __import__("subprocess").CompletedProcess(
+        args=["openclaw", "agent"],
+        returncode=0,
+        stdout=payload,
+        stderr="",
+    )
+
+    result = OpenClawSessionService._parse_openclaw_response(service, completed)
+
+    assert result["status"] == "failed"
+    assert result["error"]
+
+
 def test_extract_plan_steps_can_unwrap_final_assistant_visible_text_string():
     payload = {
         "finalAssistantVisibleText": '```json\n[{"step_number":1,"description":"x","commands":[],"verification":null,"rollback":null,"expected_files":[]}]\n```'
