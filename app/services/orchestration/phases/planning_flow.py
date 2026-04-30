@@ -598,11 +598,12 @@ def execute_planning_phase(
                     f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                 )
 
+            sanitized_plan = PlannerService.sanitize_common_plan_issues(extracted_plan)
             ctx.orchestration_state.plan = normalize_plan_with_live_logging(
                 ctx.db,
                 ctx.session_id,
                 ctx.task_id,
-                extracted_plan,
+                sanitized_plan,
                 ctx.orchestration_state.project_dir,
                 ctx.logger,
                 ctx.session_instance_id,

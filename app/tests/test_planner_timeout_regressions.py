@@ -97,7 +97,7 @@ def test_large_planning_context_is_compressed_before_first_attempt():
     assert "Very long planning context" in compressed
 
 
-def test_planner_flags_immediate_repair_issues_for_write_and_background_commands():
+def test_planner_allows_write_pseudo_commands_but_flags_background_commands():
     issues = PlannerService.find_immediate_repair_step_issues(
         [
             {
@@ -114,7 +114,6 @@ def test_planner_flags_immediate_repair_issues_for_write_and_background_commands
     )
 
     assert issues == {
-        "non_runnable_steps": [1],
         "background_process_steps": [2],
     }
 
@@ -207,6 +206,40 @@ def test_validator_still_warns_on_weak_verification_for_implementation_plan(tmp_
 
     assert verdict.warning is True
     assert "weak_verification_steps" in verdict.details
+
+
+def test_planner_sanitizes_common_local_model_static_site_plan_issues():
+    sanitized = PlannerService.sanitize_common_plan_issues(
+        [
+            {
+                "step_number": 1,
+                "description": "Create index",
+                "commands": [
+                    "write index.html: html shell",
+                    "file index.html should be a semantic landing page",
+                ],
+                "verification": "test -f index.html",
+                "rollback": "trash index.html",
+                "expected_files": ["index.html"],
+            },
+            {
+                "step_number": 2,
+                "description": "Final validation: open the page in a local preview to confirm rendering",
+                "commands": [
+                    "python3 -m http.server 8080 --bind 127.0.0.1 &",
+                    "sleep 1 && curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/index.html",
+                    "pkill -f 'python3 -m http.server 8080' || true",
+                ],
+                "verification": "echo ok",
+                "rollback": "pkill -f 'python3 -m http.server' || true",
+                "expected_files": ["index.html"],
+            },
+        ]
+    )
+
+    assert len(sanitized) == 1
+    assert sanitized[0]["commands"] == ["write index.html: html shell"]
+    assert sanitized[0]["rollback"] == "rm -f index.html"
 
 
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():

@@ -20,7 +20,6 @@ class PlannerService:
     """Planning-stage fallback and repair helpers."""
 
     _NON_RUNNABLE_COMMAND_PREFIXES = (
-        "write ",
         "edit ",
         "verify ",
         "check ",
@@ -217,6 +216,81 @@ class PlannerService:
         return any(marker in text for marker in background_markers)
 
     @staticmethod
+    def _command_is_plain_english_file_instruction(command: str) -> bool:
+        text = str(command or "").strip().lower()
+        if not text:
+            return False
+        return text.startswith("file ") and " should be " in text
+
+    @staticmethod
+    def _looks_like_preview_only_step(
+        step: Dict[str, Any], *, step_index: int, total_steps: int
+    ) -> bool:
+        if step_index != total_steps:
+            return False
+        description = str(step.get("description") or "").lower()
+        commands = [
+            str(command or "").strip() for command in step.get("commands", []) or []
+        ]
+        preview_markers = (
+            "final validation",
+            "local preview",
+            "open the page",
+            "confirm rendering",
+            "preview",
+            "rendering",
+        )
+        return any(marker in description for marker in preview_markers) and any(
+            PlannerService._uses_background_process(command) for command in commands
+        )
+
+    @staticmethod
+    def _rewrite_trash_rollback(command: Optional[str]) -> Optional[str]:
+        text = str(command or "").strip()
+        if not text:
+            return command
+        match = re.match(r"^\s*trash\s+(.+?)\s*$", text)
+        if not match:
+            return command
+        target = match.group(1).strip()
+        return f"rm -f {target}"
+
+    @classmethod
+    def sanitize_common_plan_issues(
+        cls, plan: Optional[List[Dict[str, Any]]]
+    ) -> List[Dict[str, Any]]:
+        sanitized_plan: List[Dict[str, Any]] = []
+        total_steps = len(plan or [])
+
+        for index, raw_step in enumerate(plan or [], start=1):
+            step = dict(raw_step or {})
+            commands = [
+                str(command or "").strip()
+                for command in (step.get("commands", []) or [])
+            ]
+            commands = [command for command in commands if command]
+
+            if cls._looks_like_preview_only_step(
+                step, step_index=index, total_steps=total_steps
+            ):
+                continue
+
+            commands = [
+                command
+                for command in commands
+                if not cls._command_is_plain_english_file_instruction(command)
+            ]
+            step["commands"] = commands
+            step["rollback"] = cls._rewrite_trash_rollback(step.get("rollback"))
+
+            sanitized_plan.append(step)
+
+        for index, step in enumerate(sanitized_plan, start=1):
+            step["step_number"] = int(step.get("step_number") or index)
+
+        return sanitized_plan
+
+    @staticmethod
     def _command_is_placeholder_only(command: str) -> bool:
         text = str(command or "").strip().lower()
         if not text:
@@ -310,6 +384,9 @@ class PlannerService:
                 rendered = str(command or "").strip()
                 lowered = rendered.lower()
                 if lowered.startswith(PlannerService._NON_RUNNABLE_COMMAND_PREFIXES):
+                    issues["non_runnable_steps"].append(step_number)
+                    break
+                if PlannerService._command_is_plain_english_file_instruction(rendered):
                     issues["non_runnable_steps"].append(step_number)
                     break
                 if PlannerService._uses_background_process(rendered):
