@@ -295,28 +295,12 @@ class PromptTemplates:
 6. Prefer the smallest workable plan; each step should change one concern only
 
 **Planning Rules:**
-1. Prefer short, targeted shell commands over large generated scripts
-2. For steps that create source/implementation files: the executor will use the Write tool to write actual content. In `commands`, describe what the file should implement (e.g., `"write src/comparator.js: exports compareSchemas function"`), NOT `touch src/comparator.js`. `touch`-only commands for implementation files are FORBIDDEN — the executor cannot know what content to write from a bare `touch`.
-3. `cat <<EOF` heredocs are acceptable ONLY for short config files (< 20 lines). For larger source files, rely on the executor's Write tool by describing the implementation in the step description and commands.
-4. Prefer incremental setup:
-   - create directories first
-   - create or edit one file at a time
-   - install dependencies in a separate step from code changes
-5. Prefer package-manager or editor-friendly commands for config changes when possible
-6. Do NOT assume files already exist; inspect or create them deliberately
-7. Keep verification commands short, machine-runnable, and relative to `{project_dir}`
-8. If source files need imports or references, only use relative paths that are valid inside the task workspace layout
-9. Do NOT reference parent directories in shell commands
-10. Avoid bundling install + scaffold + config + tests into one step
-11. Prefer commands that are easy to retry after partial completion
-12. Do NOT use `cd ... && ...` because the working directory is already `{project_dir}`
-13. Do NOT use background-process commands such as `&`, `nohup`, `disown`, or shell job control
-14. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
-15. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
-16. If the context mentions completed or promoted prior task artifacts, assume those files have already been hydrated into `{project_dir}` and extend them instead of recreating parallel implementations
-17. Never join separate shell commands with commas; each command must stand alone as a valid shell command
-18. Use only relative paths in `expected_files` — never absolute paths like `/root/...` or `/home/...`
-19. Do not pre-expand planned file paths to `{project_dir}/...`; keep them relative and let execution promote them only when a file tool call is needed
+1. Short targeted shell commands only. For source files, describe the implementation in `commands` (e.g. `"write src/foo.js: exports X"`); bare `touch` is forbidden.
+2. Incremental: create dirs first, one file at a time, install deps in a separate step from code changes.
+3. Relative paths everywhere — no `..`, `~`, absolute paths, `cd ... && ...`, or `{project_dir}/` prefixes in `expected_files`.
+4. No background commands (`&`, `nohup`, `disown`). One-shot verification only (no long-running servers).
+5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
+6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
 
 **Execution Profile Rules:**
 {execution_profile_rules}

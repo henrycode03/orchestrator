@@ -558,7 +558,7 @@ class ValidatorService:
         text = str(command or "").strip().lower()
         if not text:
             return False
-        if re.search(r"(^|[^&])&(?=[^&]|$)", text):
+        if re.search(r"(?<![&])&(\s|$)", text):
             return True
         return any(
             marker in text

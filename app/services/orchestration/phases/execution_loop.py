@@ -30,7 +30,10 @@ from app.services.orchestration.execution.step_support import (
     step_needs_command_repair,
 )
 from app.services.orchestration.phases.completion_flow import finalize_successful_task
-from app.services.orchestration.policy import DEBUG_TIMEOUT_SECONDS, MAX_STEP_ATTEMPTS
+from app.services.orchestration.policy import (
+    DEBUG_TIMEOUT_SECONDS,
+    MAX_STEP_ATTEMPTS,
+)
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
@@ -184,6 +187,7 @@ def execute_step_loop(
     # fires. SIGTERM from terminate=True may also be delayed if the worker is
     # mid-HTTP-request. The pause is "guaranteed before the next step" not
     # "instantaneous".
+    plan_revision_count = 0
     for step_index in range(
         orchestration_state.current_step_index, len(orchestration_state.plan)
     ):
@@ -963,7 +967,7 @@ def execute_step_loop(
         if (
             current_attempt >= max_attempts
             and not orchestration_state.relaxed_mode
-            and ctx.policy_profile_name != "strict"
+            and ctx.policy_profile.allow_relaxed_mode
         ):
             orchestration_state.relaxed_mode = True
             orchestration_state.debug_attempts.append(
@@ -1114,7 +1118,31 @@ def execute_step_loop(
             fix_type = debug_data.get("fix_type", "code_fix")
             logger.info("[DEBUG-PARSE] Using strategy: %s", strategy_info)
 
+            max_plan_revisions = ctx.policy_profile.max_plan_revisions
+            if fix_type == "revise_plan" and plan_revision_count >= max_plan_revisions:
+                logger.warning(
+                    "[ORCHESTRATION] Plan revision cap (%d) reached; aborting instead of re-planning",
+                    max_plan_revisions,
+                )
+                emit_live(
+                    "ERROR",
+                    f"[ORCHESTRATION] Plan revision cap ({max_plan_revisions}) reached; aborting",
+                    metadata={"phase": "plan_revision", "step_index": step_index + 1},
+                )
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = f"Plan revision cap ({max_plan_revisions}) reached after step {step_index + 1}"
+                task.status = TaskStatus.FAILED
+                task.error_message = orchestration_state.abort_reason
+                if session_task_link:
+                    session_task_link.status = TaskStatus.FAILED
+                    session_task_link.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                restore_workspace_snapshot_if_needed("max step attempts reached")
+                write_project_state_snapshot_fn(db, project, task, session_id)
+                return {"status": "failed", "reason": "plan_revision_cap_reached"}
+
             if fix_type == "revise_plan":
+                plan_revision_count += 1
                 logger.info(
                     "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase"
                 )

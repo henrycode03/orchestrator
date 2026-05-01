@@ -359,11 +359,12 @@ export interface OrchestrationEvent {
 
 export interface SessionStateDiffResponse {
   session_id: number;
-  task_id: number;
-  from_checkpoint: number;
-  to_checkpoint: number;
-  from_snapshot: Record<string, unknown>;
-  to_snapshot: Record<string, unknown>;
+  task_id: number | null;
+  from_checkpoint: number | null;
+  to_checkpoint: number | null;
+  from_snapshot: Record<string, unknown> | null;
+  to_snapshot: Record<string, unknown> | null;
+  available?: boolean;
   delta: {
     current_step_index: { from: number; to: number; change: number };
     retry_budget_remaining: { from: number; to: number; change: number };
@@ -383,7 +384,7 @@ export interface SessionStateDiffResponse {
     };
     prompt_byte_estimate: { from: number; to: number; change: number };
     workspace_hash_changed: boolean;
-  };
+  } | null;
 }
 
 export interface SessionDivergenceCompareResponse {

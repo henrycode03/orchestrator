@@ -100,3 +100,4 @@ alembic.ini
 .claude/
 .agents/
 plugins/
+CLAUDE.md

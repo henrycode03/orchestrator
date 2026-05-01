@@ -354,6 +354,35 @@ def test_validator_flags_write_pseudo_commands_and_background_processes():
     assert verdict.details["background_process_steps"] == [2]
 
 
+def test_validator_does_not_flag_html_entities_as_background_processes():
+    """HTML entities like &nbsp; inside heredoc commands must not trigger the background-process check."""
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create index.html with HTML entity in content",
+                "commands": [
+                    "cat > index.html << 'EOF'\n"
+                    "<!DOCTYPE html><html><body>"
+                    "<p>Spring&nbsp;&amp;&nbsp;Summer</p>"
+                    "</body></html>\nEOF"
+                ],
+                "verification": "test -f index.html && echo OK",
+                "rollback": "rm index.html",
+                "expected_files": ["index.html"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Create a flower landing page",
+        execution_profile="full_lifecycle",
+    )
+
+    assert (
+        "background_process_steps" not in verdict.details
+        or verdict.details.get("background_process_steps") == []
+    )
+
+
 def test_validator_allows_static_site_asset_roots_without_nested_project_false_positive():
     verdict = ValidatorService.validate_plan(
         [

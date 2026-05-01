@@ -715,8 +715,13 @@ export default function SessionDetail() {
       const response = await sessionsAPI.getSessionDiff(currentSessionId, {
         task_id: relevantTask?.id,
       });
-      diffAvailableRef.current = true;
-      setStateDiff(response.data);
+      if (response.data?.available === false) {
+        diffAvailableRef.current = null;
+        setStateDiff(null);
+      } else {
+        diffAvailableRef.current = true;
+        setStateDiff(response.data);
+      }
     } catch (loadError) {
       diffAvailableRef.current = false;
       console.debug('State diff unavailable:', loadError);

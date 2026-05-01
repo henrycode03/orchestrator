@@ -38,7 +38,11 @@ def test_synthesis_prompt_is_compacted_for_long_transcripts():
     project = type(
         "ProjectStub",
         (),
-        {"name": "Big Project", "description": "existing project " * 80},
+        {
+            "name": "Big Project",
+            "description": "existing project " * 80,
+            "project_rules": None,
+        },
     )()
 
     prompt = service._build_synthesis_prompt(session, project)
@@ -62,7 +66,11 @@ def test_synthesis_prompt_uses_active_adaptation_profile(monkeypatch):
     project = type(
         "ProjectStub",
         (),
-        {"name": "Adapted Project", "description": "Backend and frontend auth work."},
+        {
+            "name": "Adapted Project",
+            "description": "Backend and frontend auth work.",
+            "project_rules": None,
+        },
     )()
 
     monkeypatch.setattr(
@@ -132,7 +140,11 @@ def test_synthesis_prompt_uses_db_selected_adaptation_profile(db_session):
     project = type(
         "ProjectStub",
         (),
-        {"name": "DB Adapted Project", "description": "Queue and worker cleanup."},
+        {
+            "name": "DB Adapted Project",
+            "description": "Queue and worker cleanup.",
+            "project_rules": None,
+        },
     )()
 
     prompt = service._build_synthesis_prompt(session, project)

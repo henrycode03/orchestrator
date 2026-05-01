@@ -14,6 +14,7 @@ ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS = 3300
 ORCHESTRATION_TASK_TIME_LIMIT_SECONDS = 3600
 STALE_RUN_GUARD_SECONDS = 300
 MAX_STEP_ATTEMPTS = 3
+MAX_PLAN_REVISIONS = 1
 DEBUG_TIMEOUT_SECONDS = 180
 SUMMARY_TIMEOUT_SECONDS = 180
 COMPLETION_VERIFICATION_TIMEOUT_SECONDS = 180
@@ -67,6 +68,8 @@ class PolicyProfile:
     planning_mode: str
     retry_mode: str
     restore_behavior_label: str
+    max_plan_revisions: int = 1
+    allow_relaxed_mode: bool = False
 
     def effect_summary(self) -> dict[str, Any]:
         return {
@@ -76,6 +79,8 @@ class PolicyProfile:
             "retry_mode": self.retry_mode,
             "workspace_restore_mode": self.workspace_restore_mode,
             "restore_behavior_label": self.restore_behavior_label,
+            "max_plan_revisions": self.max_plan_revisions,
+            "allow_relaxed_mode": self.allow_relaxed_mode,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -95,6 +100,8 @@ _POLICY_PROFILES = {
         planning_mode="balanced",
         retry_mode="single_repair_then_relax",
         restore_behavior_label="Restore only workspace-isolation failures by default",
+        max_plan_revisions=1,
+        allow_relaxed_mode=False,
     ),
     "strict": PolicyProfile(
         name="strict",
@@ -106,6 +113,8 @@ _POLICY_PROFILES = {
         planning_mode="strict",
         retry_mode="fail_fast",
         restore_behavior_label="Restore most orchestration failures to the pre-run snapshot",
+        max_plan_revisions=0,
+        allow_relaxed_mode=False,
     ),
     "recovery_friendly": PolicyProfile(
         name="recovery_friendly",
@@ -117,6 +126,8 @@ _POLICY_PROFILES = {
         planning_mode="recovery_friendly",
         retry_mode="extra_repair_budget",
         restore_behavior_label="Preserve more workspace state to support replay and operator recovery",
+        max_plan_revisions=2,
+        allow_relaxed_mode=True,
     ),
 }
 

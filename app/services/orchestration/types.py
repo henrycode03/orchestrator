@@ -7,6 +7,7 @@ import json
 from typing import Any, Callable, Dict, List, Optional
 
 from app.services.agents.interfaces import AgentRuntime
+from app.services.orchestration.policy import PolicyProfile, get_policy_profile
 
 
 @dataclass
@@ -176,6 +177,10 @@ class OrchestrationRunContext:
     validation_severity: str = "standard"
     completion_repair_budget: int = 1
     restore_workspace_snapshot_if_needed: Optional[Callable[[str], Any]] = None
+
+    @property
+    def policy_profile(self) -> PolicyProfile:
+        return get_policy_profile(self.policy_profile_name)
 
     @property
     def session_instance_id(self) -> Optional[str]:

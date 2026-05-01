@@ -45,7 +45,9 @@ def test_execute_task_retries_context_overflow_with_compact_prompt(
 
     seen_prompts: list[str] = []
 
-    async def fake_execute_task_with_streaming(prompt, timeout_seconds, log_callback):
+    async def fake_execute_task_with_streaming(
+        prompt, timeout_seconds, log_callback, *, reuse_task_session=True
+    ):
         seen_prompts.append(prompt)
         if len(seen_prompts) == 1:
             return {

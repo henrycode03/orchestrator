@@ -1214,7 +1214,16 @@ def get_session_state_diff_payload(
     except ValueError as exc:
         msg = str(exc)
         if "No orchestration state snapshots found" in msg:
-            raise HTTPException(status_code=404, detail=msg) from exc
+            return {
+                "session_id": session_id,
+                "task_id": task_id,
+                "from_checkpoint": None,
+                "to_checkpoint": None,
+                "from_snapshot": None,
+                "to_snapshot": None,
+                "delta": None,
+                "available": False,
+            }
         raise HTTPException(status_code=400, detail=msg) from exc
 
 
