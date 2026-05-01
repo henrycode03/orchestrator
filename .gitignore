@@ -12,6 +12,9 @@ ENV/
 dist/
 build/
 .black
+.pytest_cache/
+.mypy_cache/
+.git/
 
 # Node.js
 node_modules/
@@ -20,6 +23,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.pnpm-store/
 
 # IDE
 .idea/
@@ -32,7 +36,7 @@ lerna-debug.log*
 .DS_Store
 Thumbs.db
 
-# SSL/TLS Certificates (SECURITY - NEVER COMMIT)
+# SSL/TLS Certificates (SECURITY)
 *.pem
 *.key
 cert.pem
@@ -54,13 +58,13 @@ coverage/
 *.tmp
 .cache/
 
-# Development files (NEVER COMMIT)
+# Development files
 .notes/
 .tests/
 *.note
 *.test
 
-# Database files (NEVER COMMIT - contains sensitive data)
+# Database files
 *.db
 *.sqlite
 *.sqlite3
@@ -68,7 +72,7 @@ coverage/
 dump.rdb
 *.rdb
 
-# Checkpoint files (runtime state - NEVER COMMIT)
+# Checkpoint files (runtime state)
 checkpoints/
 
 # Documentation
@@ -101,3 +105,7 @@ alembic.ini
 .agents/
 plugins/
 CLAUDE.md
+
+# graphify
+.graphify-venv/
+graphify-out/

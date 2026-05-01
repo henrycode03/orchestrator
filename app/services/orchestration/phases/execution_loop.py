@@ -115,6 +115,20 @@ def execute_step_loop(
     error_handler = ctx.error_handler
     restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
 
+    # Synthesize a minimal artifact when resuming from an old checkpoint that
+    # predates the reasoning_artifact field (stored None).
+    if getattr(orchestration_state, "reasoning_artifact", None) is None:
+        orchestration_state.reasoning_artifact = {
+            "schema_version": 1,
+            "intent": " ".join(str(ctx.prompt or "").split())[:220],
+            "workspace_facts": [f"project_dir={orchestration_state.project_dir}"],
+            "planned_actions": [
+                str(step.get("description") or f"Step {i + 1}")
+                for i, step in enumerate(orchestration_state.plan[:8])
+            ],
+            "verification_plan": ["verify each planned step outcome"],
+        }
+
     reasoning_verdict = ValidatorService.validate_reasoning_artifact(
         getattr(orchestration_state, "reasoning_artifact", None),
         plan=orchestration_state.plan,

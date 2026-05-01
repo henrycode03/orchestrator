@@ -16,7 +16,18 @@ from ..policy import apply_validation_policy
 from ..types import ValidationVerdict
 
 
-SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx"}
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".html",
+    ".css",
+    ".scss",
+    ".svg",
+    ".sh",
+}
 DOC_NAMES = {"readme.md", "notes.md", "summary.md"}
 ROOT_LEVEL_EXPECTED_DIRS = {
     "src",

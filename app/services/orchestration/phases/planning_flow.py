@@ -765,22 +765,43 @@ def execute_planning_phase(
                 continue
 
             if not plan_verdict.accepted:
-                planning_result = __repair_planning_output(
-                    ctx=ctx,
-                    planning_timeout_seconds=planning_timeout_seconds,
-                    malformed_output=output_text,
-                    reason="plan_validation_failed_after_repair: "
-                    + "; ".join(plan_verdict.reasons[:3]),
-                    rejection_reasons=plan_verdict.reasons,
-                    prompt_profile=prompt_profile,
+                # Repair already attempted and validation still fails — abort
+                # instead of looping through more repair calls (prevents the
+                # plan→error→repair→retry chain from burning minutes of budget).
+                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                ctx.orchestration_state.abort_reason = (
+                    "Planning validation failed after repair: "
+                    + "; ".join(plan_verdict.reasons[:3])
                 )
                 ctx.logger.warning(
-                    "[ORCHESTRATION] Plan validation failed after repair; requesting a fresh planning result (failure_count=%d)",
+                    "[ORCHESTRATION] Plan validation still failing after repair; aborting to prevent retry loop (failure_count=%d)",
                     retry_state.consecutive_failures,
                 )
-                retry_state.consecutive_failures += 1
-                retry_state.repair_prompt_used = True
-                continue
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="ERROR",
+                    phase="planning",
+                    message="[ORCHESTRATION] Plan validation failed after repair",
+                    details={
+                        "reason": "planning_validation_failed_after_repair",
+                        "validation_reasons": plan_verdict.reasons[:5],
+                    },
+                )
+                ctx.task.status = TaskStatus.FAILED
+                ctx.task.error_message = (
+                    "Plan validation failed after repair: "
+                    + "; ".join(plan_verdict.reasons[:4])
+                )
+                ctx.db.commit()
+                if ctx.restore_workspace_snapshot_if_needed:
+                    ctx.restore_workspace_snapshot_if_needed(
+                        "planning validation failure"
+                    )
+                return {
+                    "status": "failed",
+                    "reason": "planning_validation_failed_after_repair",
+                }
 
             reasoning_artifact = _build_reasoning_artifact(
                 ctx=ctx,

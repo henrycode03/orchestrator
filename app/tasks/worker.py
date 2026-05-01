@@ -223,7 +223,13 @@ def _should_reject_stale_dispatch_claim(
     task_id: int,
     queued_event: Optional[Dict[str, Any]],
     queue_latency_seconds: Optional[float],
+    resume_checkpoint_name: Optional[str] = None,
 ) -> Optional[str]:
+    # Resume dispatches are always intentional — the user explicitly triggered
+    # them.  The TASK_QUEUED event they inherit belongs to the original run, so
+    # latency-based stale detection produces false positives here.
+    if resume_checkpoint_name:
+        return None
     if not dispatch_project_dir or not queued_event:
         return None
     if (
@@ -465,6 +471,7 @@ def execute_orchestration_task(
             task_id=task_id,
             queued_event=queued_event,
             queue_latency_seconds=queue_latency_seconds,
+            resume_checkpoint_name=resume_checkpoint_name,
         )
         if stale_dispatch_reason:
             reject_details = {
@@ -1085,6 +1092,9 @@ def execute_orchestration_task(
             # be used in prompts and tool calls.
 
             orchestration_state.plan = checkpoint_state.get("plan", []) or []
+            orchestration_state.reasoning_artifact = checkpoint_state.get(
+                "reasoning_artifact"
+            )
             orchestration_state.current_step_index = (
                 checkpoint_state.get(
                     "current_step_index",
