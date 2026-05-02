@@ -76,7 +76,9 @@ def _build_fallback_summary(db: DBSession, session_id: int) -> str:
         .limit(50)
         .all()
     )
-    meaningful_errors = [l for l in error_logs if not _is_json_fragment(l.message)][:10]
+    meaningful_errors = [
+        entry for entry in error_logs if not _is_json_fragment(entry.message)
+    ][:10]
 
     failed_tasks = (
         db.query(Task)
@@ -154,7 +156,7 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
         )
 
         log_block = (
-            "\n".join(f"[{l.level}] {l.message[:300]}" for l in error_logs)
+            "\n".join(f"[{entry.level}] {entry.message[:300]}" for entry in error_logs)
             or "(no error logs)"
         )
 
