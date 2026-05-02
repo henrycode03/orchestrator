@@ -3,10 +3,7 @@ import { Link } from 'react-router-dom';
 import { tasksAPI, projectsAPI } from '@/api/client';
 import type { Task, Project } from '@/types/api';
 import { 
-  CheckCircle2, 
-  PlayCircle, 
-  XCircle, 
-  Clock, 
+  XCircle,
   Search,
   Filter,
   ListTodo,

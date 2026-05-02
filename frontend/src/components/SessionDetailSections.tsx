@@ -16,8 +16,6 @@ import { TerminalViewer } from '@/components/TerminalViewer';
 import { StatusBadge } from '@/components/ui';
 import {
   Activity,
-  CheckCircle2,
-  Clock,
   ExternalLink,
   MessageCircle,
   RefreshCw,
