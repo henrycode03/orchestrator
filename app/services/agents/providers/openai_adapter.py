@@ -68,7 +68,9 @@ class OpenAIResponsesRuntime:
         timeout_seconds: int = 180,
         source_brain: str = "local",
         session_prefix: str = "planning",
+        isolate_workspace_context: bool = False,
     ) -> dict[str, Any]:
+        del isolate_workspace_context
         api_key = (settings.OPENAI_API_KEY or "").strip()
         if not api_key:
             raise AgentRuntimeError(

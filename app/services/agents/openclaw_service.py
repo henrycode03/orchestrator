@@ -22,6 +22,7 @@ import shutil
 import shlex
 import time
 import re
+import tempfile
 from typing import Optional, Dict, Any, List, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1909,6 +1910,7 @@ class OpenClawSessionService:
         timeout_seconds: int = 180,
         source_brain: str = "local",
         session_prefix: str = "planning",
+        isolate_workspace_context: bool = False,
     ) -> Dict[str, Any]:
         """Run a one-shot prompt using the CLI request path."""
 
@@ -1919,13 +1921,26 @@ class OpenClawSessionService:
             session_prefix=session_prefix,
         )
         try:
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                full_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds + 30,
-            )
+            if isolate_workspace_context:
+                with tempfile.TemporaryDirectory(
+                    prefix="openclaw-planning-repair-"
+                ) as isolated_cwd:
+                    proc = await asyncio.to_thread(
+                        subprocess.run,
+                        full_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_seconds + 30,
+                        cwd=isolated_cwd,
+                    )
+            else:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    full_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds + 30,
+                )
         except subprocess.TimeoutExpired as exc:
             raise OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"

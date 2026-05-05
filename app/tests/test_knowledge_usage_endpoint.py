@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -54,18 +55,30 @@ def _make_knowledge_item(db, *, title="Test Item", knowledge_type="format_guide"
     return item
 
 
-def _make_usage_log(db, session, item, *, trigger_phase="planning", task_id=None):
+def _make_usage_log(
+    db,
+    session,
+    item,
+    *,
+    trigger_phase="planning",
+    task_id=None,
+    retrieval_reason="test retrieval",
+    confidence=0.85,
+    used_in_prompt=True,
+    created_at=None,
+):
     log = KnowledgeUsageLog(
         session_id=session.id,
         task_id=task_id,
         knowledge_item_id=item.id,
         trigger_phase=trigger_phase,
-        retrieval_reason="test retrieval",
+        retrieval_reason=retrieval_reason,
         retrieval_query="test query",
-        confidence=0.85,
+        confidence=confidence,
         rank=0,
-        used_in_prompt=True,
+        used_in_prompt=used_in_prompt,
         was_effective=None,
+        created_at=created_at,
     )
     db.add(log)
     db.commit()
@@ -102,10 +115,13 @@ def test_knowledge_usage_single_phase(authenticated_client, db_session):
     assert e["knowledge_item_id"] == item.id
     assert e["title"] == "Format Guide"
     assert e["knowledge_type"] == "format_guide"
-    assert e["confidence"] == pytest.approx(0.85)
+    assert e["confidence_avg"] == pytest.approx(0.85)
+    assert e["confidence_max"] == pytest.approx(0.85)
     assert e["used_in_prompt"] is True
     assert e["retrieval_reason"] == "test retrieval"
-    assert e["task_id"] is None
+    assert e["usage_count"] == 1
+    assert e["first_used_at"] is not None
+    assert e["last_used_at"] is not None
 
 
 def test_knowledge_usage_multiple_phases(authenticated_client, db_session):
@@ -127,6 +143,95 @@ def test_knowledge_usage_multiple_phases(authenticated_client, db_session):
     assert len(data["phases"]["failure"]) == 1
     assert data["phases"]["planning"][0]["title"] == "Planning Item"
     assert data["phases"]["failure"][0]["title"] == "Failure Item"
+
+
+def test_knowledge_usage_groups_duplicate_logs_without_deleting_rows(
+    authenticated_client, db_session
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project)
+    item = _make_knowledge_item(
+        db_session, title="Planning Output Format Guide", knowledge_type="format_guide"
+    )
+    created_at_1 = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    created_at_2 = created_at_1 + timedelta(minutes=5)
+
+    _make_usage_log(
+        db_session,
+        session,
+        item,
+        trigger_phase="planning",
+        retrieval_reason="sqlite_fallback_qdrant_or_embedding_unavailable",
+        confidence=0.2,
+        used_in_prompt=True,
+        created_at=created_at_1,
+    )
+    _make_usage_log(
+        db_session,
+        session,
+        item,
+        trigger_phase="planning",
+        retrieval_reason="sqlite_fallback_qdrant_or_embedding_unavailable",
+        confidence=0.4,
+        used_in_prompt=True,
+        created_at=created_at_2,
+    )
+
+    resp = authenticated_client.get(f"/api/v1/sessions/{session.id}/knowledge-usage")
+    assert resp.status_code == 200
+    entries = resp.json()["phases"]["planning"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["knowledge_item_id"] == item.id
+    assert entry["usage_count"] == 2
+    assert entry["used_in_prompt"] is True
+    assert (
+        entry["retrieval_reason"] == "sqlite_fallback_qdrant_or_embedding_unavailable"
+    )
+    assert entry["first_used_at"] == created_at_1.isoformat()
+    assert entry["last_used_at"] == created_at_2.isoformat()
+    assert entry["confidence_max"] == pytest.approx(0.4)
+    assert entry["confidence_avg"] == pytest.approx(0.3)
+
+    raw_rows = (
+        db_session.query(KnowledgeUsageLog)
+        .filter(KnowledgeUsageLog.session_id == session.id)
+        .all()
+    )
+    assert len(raw_rows) == 2
+
+
+def test_knowledge_usage_keeps_distinct_used_in_prompt_groups_separate(
+    authenticated_client, db_session
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project)
+    item = _make_knowledge_item(
+        db_session, title="Failure Case", knowledge_type="debug_case"
+    )
+
+    _make_usage_log(
+        db_session,
+        session,
+        item,
+        trigger_phase="failure",
+        retrieval_reason="semantic_retrieval",
+        used_in_prompt=False,
+    )
+    _make_usage_log(
+        db_session,
+        session,
+        item,
+        trigger_phase="failure",
+        retrieval_reason="semantic_retrieval",
+        used_in_prompt=True,
+    )
+
+    resp = authenticated_client.get(f"/api/v1/sessions/{session.id}/knowledge-usage")
+    assert resp.status_code == 200
+    entries = resp.json()["phases"]["failure"]
+    assert len(entries) == 2
+    assert sorted(entry["used_in_prompt"] for entry in entries) == [False, True]
 
 
 def test_knowledge_usage_session_not_found(authenticated_client, db_session):

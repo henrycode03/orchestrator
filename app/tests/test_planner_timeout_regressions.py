@@ -1,3 +1,5 @@
+import json
+
 from app.services.orchestration.phases.planning_flow import (
     _compress_project_context_for_planning,
     _should_repair_truncated_single_step_plan,
@@ -161,6 +163,12 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "inspect -> edit -> verify" in prompt
     assert "prefer `python3 - <<'PY'` heredoc" in prompt
     assert "never emit `python -c` commands" in prompt
+    assert (
+        "Each step must include: step_number, description, commands, verification, rollback, expected_files"
+        in prompt
+    )
+    assert "`step_number` must be a unique integer" in prompt
+    assert "Do not omit keys" in prompt
 
 
 def test_weak_verification_is_not_treated_as_blocking_immediate_repair_issue():
@@ -212,6 +220,47 @@ def test_validator_still_warns_on_weak_verification_for_implementation_plan(tmp_
 
     assert verdict.warning is True
     assert "weak_verification_steps" in verdict.details
+
+
+def test_schema_valid_planner_output_passes_validator_without_repair(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect current Python runtime entry points",
+            "commands": ['rg -n "FastAPI|create_app|app =" app || true'],
+            "verification": "python3 -c \"print('inspect ok')\"",
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Update runtime configuration defaults",
+            "commands": ["mkdir -p app && printf 'VALUE = 1\\n' > app/config.py"],
+            "verification": "python3 -m py_compile app/config.py",
+            "rollback": "rm -f app/config.py",
+            "expected_files": ["app/config.py"],
+        },
+        {
+            "step_number": 3,
+            "description": "Verify configuration imports cleanly",
+            "commands": ["python3 -m py_compile app/config.py"],
+            "verification": "python3 -m py_compile app/config.py",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Update runtime configuration",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is True
+    assert verdict.repairable is False
+    assert verdict.rejected is False
 
 
 def test_planner_sanitizes_common_local_model_static_site_plan_issues():
@@ -325,6 +374,8 @@ def test_planning_repair_prompt_uses_reduced_context_only():
     assert "Task:" not in prompt
     assert "Working directory:" not in prompt
     assert "Workflow profile:" not in prompt
+    assert "projectContext" not in prompt
+    assert "nonProjectContext" not in prompt
     assert prompt.count("[format_guide]") == 1
     assert prompt.count("[task_example]") == 1
     assert "Third" not in prompt
@@ -399,6 +450,37 @@ def test_planning_repair_still_succeeds_for_small_malformed_output():
     assert len(captured["prompt"]) < PLANNING_REPAIR_PROMPT_MAX_CHARS
 
 
+def test_planning_repair_uses_isolated_one_shot_prompt_when_available():
+    captured = {}
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return {"output": '[{"step_number":1}]'}
+
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='{"projectContext":"bad","nonProjectContext":"bad"}',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=__import__("logging").getLogger("test"),
+        emit_live=lambda *a, **kw: None,
+        reason="json_parse_failed",
+        rejection_reasons=["commands must be an array"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert result == {"output": '[{"step_number":1}]'}
+    assert "projectContext" not in captured["prompt"]
+    assert "nonProjectContext" not in captured["prompt"]
+    assert captured["kwargs"]["isolate_workspace_context"] is True
+    assert captured["kwargs"]["session_prefix"] == "planning-repair"
+
+
 def test_planning_repair_budget_fails_fast_without_retry():
     runtime = type(
         "Runtime",
@@ -411,48 +493,58 @@ def test_planning_repair_budget_fails_fast_without_retry():
     )()
     oversized_output = '[{"step_number":1,"description":"' + ("x" * 12000) + '"}]'
 
+    from app.services.orchestration import planning as planning_pkg
+
+    original_budget = planning_pkg.planner.REPAIR_PROMPT_MAX_CHARS
+    original_alias_budget = planning_pkg.planner.PLANNING_REPAIR_PROMPT_MAX_CHARS
+    planning_pkg.planner.REPAIR_PROMPT_MAX_CHARS = 200
+    planning_pkg.planner.PLANNING_REPAIR_PROMPT_MAX_CHARS = 200
     try:
-        PlannerService.repair_output(
-            runtime_service=runtime,
-            task_description="Build a page",
-            malformed_output=oversized_output,
-            project_dir=__import__("pathlib").Path("/tmp/project"),
-            timeout_seconds=300,
-            logger=__import__("logging").getLogger("test"),
-            emit_live=lambda *a, **kw: None,
-            reason="json_parse_failed",
-            rejection_reasons=[("commands must be array " + ("z" * 400))] * 4,
-            knowledge_context=type(
-                "KnowledgeCtx",
-                (),
-                {
-                    "retrieved_items": [
-                        type(
-                            "Ref",
-                            (),
-                            {
-                                "knowledge_type": "format_guide",
-                                "title": "Hint",
-                                "content": "y" * 2000,
-                            },
-                        )(),
-                        type(
-                            "Ref",
-                            (),
-                            {
-                                "knowledge_type": "task_example",
-                                "title": "Hint 2",
-                                "content": "q" * 2000,
-                            },
-                        )(),
-                    ]
-                },
-            )(),
-        )
-    except PlanningRepairBudgetExceeded:
-        pass
-    else:
-        raise AssertionError("Expected PlanningRepairBudgetExceeded")
+        try:
+            PlannerService.repair_output(
+                runtime_service=runtime,
+                task_description="Build a page",
+                malformed_output=oversized_output,
+                project_dir=__import__("pathlib").Path("/tmp/project"),
+                timeout_seconds=300,
+                logger=__import__("logging").getLogger("test"),
+                emit_live=lambda *a, **kw: None,
+                reason="json_parse_failed",
+                rejection_reasons=[("commands must be array " + ("z" * 400))] * 4,
+                knowledge_context=type(
+                    "KnowledgeCtx",
+                    (),
+                    {
+                        "retrieved_items": [
+                            type(
+                                "Ref",
+                                (),
+                                {
+                                    "knowledge_type": "format_guide",
+                                    "title": "Hint",
+                                    "content": "y" * 2000,
+                                },
+                            )(),
+                            type(
+                                "Ref",
+                                (),
+                                {
+                                    "knowledge_type": "task_example",
+                                    "title": "Hint 2",
+                                    "content": "q" * 2000,
+                                },
+                            )(),
+                        ]
+                    },
+                )(),
+            )
+        except PlanningRepairBudgetExceeded:
+            pass
+        else:
+            raise AssertionError("Expected PlanningRepairBudgetExceeded")
+    finally:
+        planning_pkg.planner.REPAIR_PROMPT_MAX_CHARS = original_budget
+        planning_pkg.planner.PLANNING_REPAIR_PROMPT_MAX_CHARS = original_alias_budget
 
 
 def test_local_qwen_single_step_plan_is_routed_to_repair():

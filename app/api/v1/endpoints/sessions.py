@@ -1526,18 +1526,56 @@ def get_session_knowledge_usage(
     )
 
     phases: Dict[str, list] = {}
+    grouped: Dict[tuple[str, str, str, bool], dict] = {}
     for log, item in rows:
-        entry = {
-            "knowledge_item_id": log.knowledge_item_id,
-            "title": item.title,
-            "knowledge_type": item.knowledge_type,
-            "confidence": log.confidence,
-            "retrieval_reason": log.retrieval_reason,
-            "used_in_prompt": log.used_in_prompt,
-            "created_at": log.created_at.isoformat() if log.created_at else None,
-            "task_id": log.task_id,
-        }
-        phases.setdefault(log.trigger_phase, []).append(entry)
+        key = (
+            str(log.trigger_phase or ""),
+            str(log.knowledge_item_id),
+            str(log.retrieval_reason or ""),
+            bool(log.used_in_prompt),
+        )
+        created_at_iso = log.created_at.isoformat() if log.created_at else None
+        entry = grouped.get(key)
+        if entry is None:
+            entry = {
+                "knowledge_item_id": log.knowledge_item_id,
+                "title": item.title,
+                "knowledge_type": item.knowledge_type,
+                "confidence_avg": float(log.confidence or 0.0),
+                "confidence_max": float(log.confidence or 0.0),
+                "retrieval_reason": log.retrieval_reason,
+                "used_in_prompt": log.used_in_prompt,
+                "usage_count": 1,
+                "first_used_at": created_at_iso,
+                "last_used_at": created_at_iso,
+            }
+            grouped[key] = entry
+            continue
+
+        entry["usage_count"] += 1
+        confidence = float(log.confidence or 0.0)
+        previous_count = entry["usage_count"] - 1
+        entry["confidence_avg"] = (
+            (float(entry["confidence_avg"]) * previous_count) + confidence
+        ) / entry["usage_count"]
+        entry["confidence_max"] = max(float(entry["confidence_max"]), confidence)
+        if created_at_iso:
+            if not entry["first_used_at"] or created_at_iso < entry["first_used_at"]:
+                entry["first_used_at"] = created_at_iso
+            if not entry["last_used_at"] or created_at_iso > entry["last_used_at"]:
+                entry["last_used_at"] = created_at_iso
+
+    for (trigger_phase, _, _, _), entry in grouped.items():
+        phases.setdefault(trigger_phase, []).append(entry)
+
+    for phase_entries in phases.values():
+        phase_entries.sort(
+            key=lambda entry: (
+                entry["first_used_at"] or "",
+                entry["title"],
+                entry["retrieval_reason"] or "",
+            )
+        )
 
     return {"session_id": session_id, "phases": phases}
 

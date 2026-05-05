@@ -103,6 +103,7 @@ class AgentRuntime(Protocol):
         timeout_seconds: int = 180,
         source_brain: str = "local",
         session_prefix: str = "planning",
+        isolate_workspace_context: bool = False,
     ) -> dict[str, Any]: ...
 
     def get_backend_metadata(self) -> dict[str, Any]: ...

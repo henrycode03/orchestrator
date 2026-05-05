@@ -293,6 +293,12 @@ class PromptTemplates:
 4. Do NOT create documentation files unless the task explicitly asks for them
 5. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 6. Prefer the smallest workable plan; each step should change one concern only
+7. `step_number` values must be unique integers and exactly 1, 2, 3... in order
+8. Every step object must include all six keys exactly once: step_number, description, commands, verification, rollback, expected_files
+9. `commands` must be a JSON array of non-empty strings
+10. `verification` must always be present and must be one shell string or null
+11. `rollback` must always be present and must be one shell string or null
+12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
 
 **Planning Rules:**
 1. Short targeted shell commands only. For source files, describe the implementation in `commands` (e.g. `"write src/foo.js: exports X"`); bare `touch` is forbidden.
@@ -314,8 +320,8 @@ class PromptTemplates:
     "step_number": 1,
     "description": "...",
     "commands": ["..."],
-    "verification": "..." or null,
-    "rollback": "..." or null,
+    "verification": null,
+    "rollback": null,
     "expected_files": ["..."]
   }}
 ]

@@ -1256,14 +1256,14 @@ export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
             <div className="space-y-2">
               {phases[phase].map((entry, i) => (
                 <div
-                  key={`${entry.knowledge_item_id}-${i}`}
+                  key={`${entry.knowledge_item_id}-${entry.retrieval_reason}-${entry.used_in_prompt}-${i}`}
                   className="rounded-md border border-slate-700 px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium text-slate-200">{entry.title}</p>
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="text-xs text-slate-400">
-                        {(entry.confidence * 100).toFixed(0)}%
+                        {(entry.confidence_max * 100).toFixed(0)}%
                       </span>
                       <span
                         className={cn(
@@ -1273,6 +1273,11 @@ export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
                       >
                         {entry.used_in_prompt ? 'injected' : 'retrieved'}
                       </span>
+                      {entry.usage_count > 1 ? (
+                        <span className="text-xs text-slate-400">
+                          used {entry.usage_count} times
+                        </span>
+                      ) : null}
                     </div>
                   </div>
                   <p className="mt-1 text-xs text-slate-400">

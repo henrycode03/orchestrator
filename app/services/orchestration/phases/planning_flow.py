@@ -844,6 +844,16 @@ def execute_planning_phase(
                         exc,
                     )
             ctx.db.commit()
+            schema_validation = (plan_verdict.details or {}).get("plan_schema") or {}
+            if not schema_validation.get("valid", True):
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Planning schema mismatch session_id=%s task_id=%s "
+                    "errors=%s details=%s",
+                    ctx.session_id,
+                    ctx.task_id,
+                    schema_validation.get("errors", []),
+                    schema_validation.get("details", {}),
+                )
             try:
                 phase_finished_event = append_orchestration_event(
                     project_dir=ctx.orchestration_state.project_dir,
@@ -1045,25 +1055,8 @@ def execute_planning_phase(
             ctx.task.current_step = 0
             ctx.db.commit()
             return {"status": "completed"}
-    except workspace_violation_error_cls as exc:
-        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
-        ctx.orchestration_state.abort_reason = f"Workspace isolation violation: {exc}"
-        emit_phase_event(
-            ctx.orchestration_state,
-            ctx.emit_live,
-            level="ERROR",
-            phase="planning",
-            message=f"[ORCHESTRATION] Planning output blocked: {exc}",
-            details={"reason": "workspace_isolation_violation"},
-        )
-        ctx.task.status = TaskStatus.FAILED
-        ctx.task.error_message = str(exc)
-        ctx.db.commit()
-        if ctx.restore_workspace_snapshot_if_needed:
-            ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
-        return {"status": "failed", "reason": "workspace_isolation_violation"}
     except PlanningRepairBudgetExceeded as exc:
-        failure_type = "planning_repair_prompt_budget_exceeded"
+        failure_type = "planning_repair_prompt_too_large"
         ctx.logger.error(
             "[ORCHESTRATION] Planning repair was skipped because the repair prompt exceeded the safe budget: %s",
             exc,
@@ -1088,6 +1081,23 @@ def execute_planning_phase(
                 "planning repair prompt budget exceeded"
             )
         return {"status": "failed", "reason": failure_type}
+    except workspace_violation_error_cls as exc:
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = f"Workspace isolation violation: {exc}"
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=f"[ORCHESTRATION] Planning output blocked: {exc}",
+            details={"reason": "workspace_isolation_violation"},
+        )
+        ctx.task.status = TaskStatus.FAILED
+        ctx.task.error_message = str(exc)
+        ctx.db.commit()
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
+        return {"status": "failed", "reason": "workspace_isolation_violation"}
     except TimeoutError as exc:
         failure_type = _classify_planning_timeout_failure(exc, retry_state)
         ctx.logger.error(

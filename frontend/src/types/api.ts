@@ -568,11 +568,13 @@ export interface KnowledgeUsageEntry {
   knowledge_item_id: string;
   title: string;
   knowledge_type: string;
-  confidence: number;
+  confidence_avg: number;
+  confidence_max: number;
   retrieval_reason: string;
   used_in_prompt: boolean;
-  created_at: string | null;
-  task_id: number | null;
+  usage_count: number;
+  first_used_at: string | null;
+  last_used_at: string | null;
 }
 
 export interface KnowledgeUsageResponse {
