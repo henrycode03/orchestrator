@@ -526,6 +526,19 @@ def execute_planning_phase(
                     ctx.logger.info(
                         "[ORCHESTRATION] Recovered planning steps from prose summary output"
                     )
+                else:
+                    workspace_plan = PlannerService.maybe_load_workspace_plan(
+                        output_text=output_text,
+                        project_dir=ctx.orchestration_state.project_dir,
+                        logger=ctx.logger,
+                    )
+                    if workspace_plan is not None:
+                        success = True
+                        plan_data = workspace_plan
+                        strategy_info = "Recovered plan from workspace plan.json"
+                        ctx.logger.info(
+                            "[ORCHESTRATION] Planning output referenced plan.json; using workspace file instead of strict JSON retry"
+                        )
 
             if (
                 PlannerService.should_retry_with_minimal_prompt(

@@ -78,6 +78,16 @@ from app.services import (
 )
 from app.services.name_formatter import humanize_display_name
 from app.services.auth_rate_limit import enforce_api_rate_limit
+
+
+def _serialize_session_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
 from app.services.orchestration import is_known_event_type
 from app.dependencies import get_current_active_user, get_current_user
 
@@ -1534,7 +1544,7 @@ def get_session_knowledge_usage(
             str(log.retrieval_reason or ""),
             bool(log.used_in_prompt),
         )
-        created_at_iso = log.created_at.isoformat() if log.created_at else None
+        created_at_iso = _serialize_session_timestamp(log.created_at)
         entry = grouped.get(key)
         if entry is None:
             entry = {

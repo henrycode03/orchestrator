@@ -38,6 +38,9 @@ PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "payloads",
     "executionLogs",
 }
+WORKSPACE_PLAN_REFERENCE_RE = re.compile(
+    r"(?i)(?:^|[\s`'\"(])(?:[A-Za-z0-9_./-]*/)?plan\.json(?:$|[\s`'\":,.)])"
+)
 
 
 def _render_knowledge_block(knowledge_context: Any) -> str:
@@ -374,10 +377,12 @@ class PlannerService:
 
         for index, raw_step in enumerate(plan or [], start=1):
             step = dict(raw_step or {})
-            commands = [
-                str(command or "").strip()
-                for command in (step.get("commands", []) or [])
-            ]
+            raw_commands = step.get("commands", [])
+            if isinstance(raw_commands, str):
+                raw_commands = [raw_commands]
+            elif not isinstance(raw_commands, list):
+                raw_commands = []
+            commands = [str(command or "").strip() for command in raw_commands]
             commands = [command for command in commands if command]
 
             if cls._looks_like_preview_only_step(
@@ -390,13 +395,41 @@ class PlannerService:
                 for command in commands
                 if not cls._command_is_plain_english_file_instruction(command)
             ]
-            step["commands"] = commands
-            step["rollback"] = cls._rewrite_trash_rollback(step.get("rollback"))
+            raw_expected_files = step.get("expected_files", [])
+            if isinstance(raw_expected_files, str):
+                raw_expected_files = [raw_expected_files]
+            elif raw_expected_files is None:
+                raw_expected_files = []
+            elif not isinstance(raw_expected_files, list):
+                raw_expected_files = []
+            expected_files = [
+                str(path or "").strip()
+                for path in raw_expected_files
+                if str(path or "").strip()
+            ]
+
+            verification = step.get("verification")
+            if verification is not None:
+                verification = str(verification).strip() or None
+
+            rollback = cls._rewrite_trash_rollback(step.get("rollback"))
+            if rollback is not None:
+                rollback = str(rollback).strip() or None
+
+            description = str(step.get("description") or "").strip()
+            if not description:
+                description = f"Execute step {index}"
+
+            step = {
+                "step_number": index,
+                "description": description,
+                "commands": commands,
+                "verification": verification,
+                "rollback": rollback,
+                "expected_files": expected_files,
+            }
 
             sanitized_plan.append(step)
-
-        for index, step in enumerate(sanitized_plan, start=1):
-            step["step_number"] = int(step.get("step_number") or index)
 
         return sanitized_plan
 
@@ -613,6 +646,74 @@ Requirements:
     def _looks_like_timeout_error(exc: Exception) -> bool:
         message = str(exc).lower()
         return "timed out" in message or "timeout" in message
+
+    @staticmethod
+    def maybe_load_workspace_plan(
+        output_text: str,
+        project_dir: Path,
+        logger: logging.Logger,
+    ) -> Optional[Any]:
+        if not WORKSPACE_PLAN_REFERENCE_RE.search(str(output_text or "")):
+            return None
+
+        plan_path = project_dir / "plan.json"
+        if not plan_path.is_file():
+            logger.warning(
+                "[ORCHESTRATION] Planner output referenced plan.json but no workspace file was found at %s",
+                plan_path,
+            )
+            return None
+
+        try:
+            plan_text = plan_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.warning(
+                "[ORCHESTRATION] Failed reading workspace plan file %s: %s",
+                plan_path,
+                exc,
+            )
+            return None
+
+        if not plan_text:
+            logger.warning(
+                "[ORCHESTRATION] Workspace plan file %s was empty despite planner reference",
+                plan_path,
+            )
+            return None
+
+        try:
+            parsed = json.loads(plan_text)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "[ORCHESTRATION] Workspace plan file %s was not valid JSON: %s",
+                plan_path,
+                exc,
+            )
+            return None
+
+        logger.info(
+            "[ORCHESTRATION] Recovered planning payload from workspace plan file %s",
+            plan_path,
+        )
+        return parsed
+
+    @staticmethod
+    def _build_repair_prompt_budget_error(
+        *,
+        repair_prompt_chars: int,
+        malformed_output_chars: int,
+        validation_error_chars: int,
+        knowledge_context_chars: int,
+    ) -> str:
+        return (
+            "Planning repair prompt exceeded safe budget "
+            f"({repair_prompt_chars} > {PLANNING_REPAIR_PROMPT_MAX_CHARS} chars). "
+            "Repair prompts may include only malformed output, validation error, "
+            "schema guidance, and small knowledge references. "
+            f"Components: malformed_output={malformed_output_chars}, "
+            f"validation_error={validation_error_chars}, "
+            f"knowledge_context={knowledge_context_chars}."
+        )
 
     @staticmethod
     async def _invoke_repair_prompt(
@@ -878,6 +979,16 @@ Rules:
             knowledge_context_chars,
         )
         if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            budget_error = cls._build_repair_prompt_budget_error(
+                repair_prompt_chars=len(repair_prompt),
+                malformed_output_chars=len(
+                    _sanitize_malformed_repair_output(malformed_output)[
+                        :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
+                    ]
+                ),
+                validation_error_chars=validation_error_chars,
+                knowledge_context_chars=knowledge_context_chars,
+            )
             logger.warning(
                 "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_exceeds_limit "
                 "repair_prompt_chars=%s limit=%s",
@@ -902,9 +1013,7 @@ Rules:
                     "knowledge_context_chars": knowledge_context_chars,
                 },
             )
-            raise PlanningRepairBudgetExceeded(
-                f"Planning repair prompt exceeded safe budget ({len(repair_prompt)} chars)"
-            )
+            raise PlanningRepairBudgetExceeded(budget_error)
         emit_live(
             "WARN",
             (

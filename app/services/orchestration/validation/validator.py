@@ -132,12 +132,26 @@ class ValidatorService:
         invalid_step_numbers: List[int] = []
         invalid_descriptions: List[int] = []
         invalid_commands: List[int] = []
+        invalid_verification: List[int] = []
+        invalid_rollback: List[int] = []
         invalid_expected_files: List[int] = []
+        missing_required_fields: Dict[int, List[str]] = {}
+        required_fields = {
+            "step_number",
+            "description",
+            "commands",
+            "verification",
+            "rollback",
+            "expected_files",
+        }
 
         for index, step in enumerate(plan, start=1):
             if not isinstance(step, dict):
                 non_dict_steps.append(index)
                 continue
+            missing_fields = sorted(required_fields.difference(step.keys()))
+            if missing_fields:
+                missing_required_fields[index] = missing_fields
             if not isinstance(step.get("step_number"), int):
                 invalid_step_numbers.append(index)
             if not isinstance(step.get("description", ""), str):
@@ -147,6 +161,12 @@ class ValidatorService:
                 not isinstance(command, str) for command in commands
             ):
                 invalid_commands.append(index)
+            verification = step.get("verification")
+            if verification is not None and not isinstance(verification, str):
+                invalid_verification.append(index)
+            rollback = step.get("rollback")
+            if rollback is not None and not isinstance(rollback, str):
+                invalid_rollback.append(index)
             expected_files = step.get("expected_files", [])
             if expected_files is not None and (
                 not isinstance(expected_files, list)
@@ -166,6 +186,17 @@ class ValidatorService:
         if invalid_commands:
             errors.append("Plan step commands must be arrays of strings")
             details["invalid_commands_steps"] = invalid_commands
+        if missing_required_fields:
+            errors.append(
+                "Plan steps must include step_number, description, commands, verification, rollback, and expected_files"
+            )
+            details["missing_required_fields"] = missing_required_fields
+        if invalid_verification:
+            errors.append("Plan step verification values must be strings or null")
+            details["invalid_verification_steps"] = invalid_verification
+        if invalid_rollback:
+            errors.append("Plan step rollback values must be strings or null")
+            details["invalid_rollback_steps"] = invalid_rollback
         if invalid_expected_files:
             errors.append("Plan expected_files must be arrays of strings")
             details["invalid_expected_files_steps"] = invalid_expected_files

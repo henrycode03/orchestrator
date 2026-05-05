@@ -1,15 +1,20 @@
+import logging
 import json
+from unittest.mock import MagicMock
 
 from app.services.orchestration.phases.planning_flow import (
     _compress_project_context_for_planning,
     _should_repair_truncated_single_step_plan,
+    execute_planning_phase,
 )
 from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairBudgetExceeded,
     PLANNING_REPAIR_PROMPT_MAX_CHARS,
 )
+from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
@@ -293,8 +298,53 @@ def test_planner_sanitizes_common_local_model_static_site_plan_issues():
     )
 
     assert len(sanitized) == 1
+    assert sanitized[0]["step_number"] == 1
     assert sanitized[0]["commands"] == ["write index.html: html shell"]
     assert sanitized[0]["rollback"] == "rm -f index.html"
+    assert sanitized[0]["verification"] == "test -f index.html"
+    assert sanitized[0]["expected_files"] == ["index.html"]
+
+
+def test_planner_sanitization_aligns_schema_and_step_sequence():
+    sanitized = PlannerService.sanitize_common_plan_issues(
+        [
+            {
+                "step_number": 9,
+                "description": "",
+                "commands": "printf 'ok\\n' > app/config.py",
+                "verification": ["python3 -m py_compile app/config.py"],
+                "rollback": "",
+                "expected_files": "app/config.py",
+            },
+            {
+                "step_number": 9,
+                "description": "Verify config import",
+                "commands": ["python3 -m py_compile app/config.py", ""],
+                "verification": "python3 -m py_compile app/config.py",
+                "rollback": None,
+                "expected_files": None,
+            },
+        ]
+    )
+
+    assert sanitized == [
+        {
+            "step_number": 1,
+            "description": "Execute step 1",
+            "commands": ["printf 'ok\\n' > app/config.py"],
+            "verification": None,
+            "rollback": None,
+            "expected_files": ["app/config.py"],
+        },
+        {
+            "step_number": 2,
+            "description": "Verify config import",
+            "commands": ["python3 -m py_compile app/config.py"],
+            "verification": "python3 -m py_compile app/config.py",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
 
 
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
@@ -538,13 +588,203 @@ def test_planning_repair_budget_fails_fast_without_retry():
                     },
                 )(),
             )
-        except PlanningRepairBudgetExceeded:
-            pass
+        except PlanningRepairBudgetExceeded as exc:
+            assert "malformed_output=" in str(exc)
+            assert "validation_error=" in str(exc)
+            assert "knowledge_context=" in str(exc)
         else:
             raise AssertionError("Expected PlanningRepairBudgetExceeded")
     finally:
         planning_pkg.planner.REPAIR_PROMPT_MAX_CHARS = original_budget
         planning_pkg.planner.PLANNING_REPAIR_PROMPT_MAX_CHARS = original_alias_budget
+
+
+def test_validator_schema_requires_full_planner_step_shape():
+    schema = ValidatorService.validate_plan_schema(
+        [
+            {
+                "step_number": 1,
+                "description": "Inspect files",
+                "commands": ["rg -n foo app"],
+                "expected_files": [],
+            }
+        ]
+    )
+
+    assert schema["valid"] is False
+    assert "missing_required_fields" in schema["details"]
+    assert schema["details"]["missing_required_fields"][1] == [
+        "rollback",
+        "verification",
+    ]
+
+
+def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeypatch):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect current FastAPI routes",
+            "commands": ['rg -n "APIRouter|include_router" app/api app/main.py'],
+            "verification": "python3 -c \"print('inspect ok')\"",
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Adjust planner recovery path",
+            "commands": [
+                "printf 'patched\\n' > app/services/orchestration/planning/recovery.txt"
+            ],
+            "verification": "python3 -c \"print('edit ok')\"",
+            "rollback": "rm -f app/services/orchestration/planning/recovery.txt",
+            "expected_files": [
+                "app/services/orchestration/planning/recovery.txt",
+            ],
+        },
+        {
+            "step_number": 3,
+            "description": "Verify planner module still imports",
+            "commands": [
+                "python3 -m py_compile app/services/orchestration/planning/planner.py"
+            ],
+            "verification": "python3 -m py_compile app/services/orchestration/planning/planner.py",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+    (tmp_path / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    runtime_service = MagicMock()
+    runtime_service.get_backend_metadata.return_value = {}
+    runtime_service.execute_task.return_value = {
+        "status": "completed",
+        "returncode": 0,
+        "output": "",
+        "stderr": "Recovered structured response from stderr",
+        "finalAssistantVisibleText": "Validated the JSON. Plan written to `plan.json` - 7 steps",
+    }
+
+    task = MagicMock()
+    task.title = "Recover planner output"
+    task.description = "Use plan.json when stdout is empty"
+    task.status = None
+    task.error_message = None
+    task.steps = None
+    task.current_step = None
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=MagicMock(instance_id=None),
+        project=MagicMock(),
+        task=task,
+        session_task_link=MagicMock(),
+        session_id=45,
+        task_id=6,
+        prompt="Fix planner recovery",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=runtime_service,
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.planner_workspace_plan"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda *args, **kwargs: (
+        False,
+        None,
+        "json parse failed",
+    )
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *args, **kwargs: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.record_validation_verdict",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.maybe_emit_divergence_detected",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Recover planner output from workspace file",
+            "workspace_facts": ["plan.json exists in the task workspace"],
+            "planned_actions": ["Use workspace plan.json instead of retrying"],
+            "verification_plan": ["Validate recovered plan with the planner validator"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        classmethod(
+            lambda cls, *args, **kwargs: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": True,
+                    "status": "accepted",
+                    "reasons": [],
+                },
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "retry_with_minimal_prompt",
+        classmethod(
+            lambda cls, *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("strict JSON retry should not be called")
+            )
+        ),
+    )
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert ctx.orchestration_state.plan == plan
+    assert json.loads(task.steps) == plan
 
 
 def test_local_qwen_single_step_plan_is_routed_to_repair():
