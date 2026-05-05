@@ -34,6 +34,7 @@ from app.services.task_service import TaskService
 logger = logging.getLogger(__name__)
 
 _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
+_STALE_RUNNING_SESSION_SWEEP_SECONDS = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS + 300
 
 
 def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
@@ -141,64 +142,207 @@ def _recover_orphaned_running_session_if_needed(
     if age_seconds < _ORPHANED_PLANNING_RECOVERY_SECONDS:
         return False
 
-    latest_link.status = TaskStatus.PENDING
-    latest_link.started_at = None
-    latest_link.completed_at = None
+    _stop_running_session_for_recovery(
+        db,
+        session=session,
+        task=task,
+        session_task=latest_link,
+        stop_reason="orphaned_running_session",
+        task_error_message=(
+            "Recovered an orphaned planning run after no progress logs arrived "
+            "following planning-response validation."
+        ),
+        alert_message=(
+            "Recovered an orphaned planning run so the session can be started again."
+        ),
+        recovery_log_message=(
+            "Recovered orphaned running task after planning-response handling "
+            "stalled without further progress"
+        ),
+    )
+    return True
+
+
+def _record_failure_knowledge_for_recovery(
+    db: Session,
+    *,
+    session_id: int,
+    task_id: int,
+    stop_reason: str,
+) -> bool:
+    try:
+        from app.services.orchestration.phases.failure_flow import (
+            record_failure_knowledge_for_stopped_session,
+        )
+
+        return bool(
+            record_failure_knowledge_for_stopped_session(
+                db=db,
+                session_id=session_id,
+                task_id=task_id,
+                failure_reason=stop_reason,
+                logger=logger,
+            )
+        )
+    except Exception as knowledge_exc:
+        logger.warning(
+            "[STOP] session=%s task_id=%s stop_reason=%s knowledge_recorded=False error=%s",
+            session_id,
+            task_id,
+            stop_reason,
+            knowledge_exc,
+        )
+        return False
+
+
+def _stop_running_session_for_recovery(
+    db: Session,
+    *,
+    session: SessionModel,
+    task: Task,
+    session_task: SessionTask,
+    stop_reason: str,
+    task_error_message: str,
+    alert_message: str,
+    recovery_log_message: str,
+) -> bool:
+    session_task.status = TaskStatus.PENDING
+    session_task.started_at = None
+    session_task.completed_at = None
     task.status = TaskStatus.PENDING
     task.started_at = None
     task.completed_at = None
-    task.error_message = (
-        "Recovered an orphaned planning run after no progress logs arrived "
-        "following planning-response validation."
-    )
+    task.error_message = task_error_message
     task.current_step = 0
     session.status = "stopped"
     session.is_active = False
-    set_session_alert(
-        db,
-        session,
-        "warn",
-        "Recovered an orphaned planning run so the session can be started again.",
-    )
+    session.stopped_at = datetime.now(timezone.utc)
+    set_session_alert(db, session, "warn", alert_message)
     db.add(
         LogEntry(
             session_id=session.id,
             task_id=task.id,
             session_instance_id=session.instance_id,
             level="WARN",
-            message=(
-                "Recovered orphaned running task after planning-response handling "
-                "stalled without further progress"
-            ),
+            message=recovery_log_message,
         )
     )
     db.commit()
+    knowledge_recorded = _record_failure_knowledge_for_recovery(
+        db,
+        session_id=session.id,
+        task_id=task.id,
+        stop_reason=stop_reason,
+    )
     logger.warning(
-        "[STOP] session=%s task_id=%s stop_reason=orphaned_planning_stall "
-        "handle_task_failure=False knowledge_failure_recording=triggered",
+        "[STOP] session=%s task_id=%s stop_reason=%s knowledge_recorded=%s",
         session.id,
         task.id,
+        stop_reason,
+        knowledge_recorded,
     )
-    try:
-        from app.services.orchestration.phases.failure_flow import (
-            record_failure_knowledge_for_stopped_session,
+    return knowledge_recorded
+
+
+def recover_stale_running_sessions(
+    db: Session,
+    *,
+    stale_after_seconds: int = _STALE_RUNNING_SESSION_SWEEP_SECONDS,
+) -> list[dict[str, Any]]:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    running_sessions = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.status == "running",
+            SessionModel.is_active.is_(True),
+            SessionModel.deleted_at.is_(None),
+        )
+        .all()
+    )
+    recovered_sessions: list[dict[str, Any]] = []
+
+    for session in running_sessions:
+        latest_link = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.session_id == session.id,
+                SessionTask.status == TaskStatus.RUNNING,
+            )
+            .order_by(SessionTask.id.desc())
+            .first()
+        )
+        if not latest_link:
+            continue
+
+        task = db.query(Task).filter(Task.id == latest_link.task_id).first()
+        if not task or task.status != TaskStatus.RUNNING:
+            continue
+
+        latest_log = (
+            db.query(LogEntry)
+            .filter(
+                LogEntry.session_id == session.id,
+                LogEntry.task_id == task.id,
+            )
+            .order_by(LogEntry.id.desc())
+            .first()
         )
 
-        record_failure_knowledge_for_stopped_session(
-            db=db,
-            session_id=session.id,
-            task_id=task.id,
-            failure_reason="orphaned planning run stalled after planning-response handling",
-            logger=logger,
+        last_progress_at = next(
+            (
+                candidate
+                for candidate in (
+                    latest_log.created_at if latest_log else None,
+                    latest_link.started_at,
+                    task.started_at,
+                    session.updated_at,
+                    session.started_at,
+                    session.created_at,
+                )
+                if candidate is not None
+            ),
+            None,
         )
-    except Exception as knowledge_exc:
-        logger.warning(
-            "[STOP] record_failure_knowledge_for_stopped_session failed session=%s task=%s: %s",
-            session.id,
-            task.id,
-            knowledge_exc,
+        if last_progress_at is None:
+            continue
+
+        age_seconds = (
+            now - _coerce_naive_utc_datetime(last_progress_at)
+        ).total_seconds()
+        if age_seconds < stale_after_seconds:
+            continue
+
+        stop_reason = (
+            "no_progress_timeout"
+            if latest_log and latest_log.created_at
+            else "hard_time_limit_or_worker_killed"
         )
-    return True
+        knowledge_recorded = _stop_running_session_for_recovery(
+            db,
+            session=session,
+            task=task,
+            session_task=latest_link,
+            stop_reason=stop_reason,
+            task_error_message=(
+                "Recovered stale running session after runtime stopped making progress."
+            ),
+            alert_message=(
+                "Recovered stale running session after runtime stopped making progress."
+            ),
+            recovery_log_message=(
+                "Recovered stale running session after no progress timeout."
+            ),
+        )
+        recovered_sessions.append(
+            {
+                "session_id": session.id,
+                "task_id": task.id,
+                "stop_reason": stop_reason,
+                "knowledge_recorded": knowledge_recorded,
+            }
+        )
+
+    return recovered_sessions
 
 
 def _ensure_session_task_ready_for_resume(

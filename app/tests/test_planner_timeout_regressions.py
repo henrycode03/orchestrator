@@ -2,7 +2,11 @@ from app.services.orchestration.phases.planning_flow import (
     _compress_project_context_for_planning,
     _should_repair_truncated_single_step_plan,
 )
-from app.services.orchestration.planning.planner import PlannerService
+from app.services.orchestration.planning.planner import (
+    PlannerService,
+    PlanningRepairBudgetExceeded,
+    PLANNING_REPAIR_PROMPT_MAX_CHARS,
+)
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
@@ -155,6 +159,8 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "materially write or edit file contents" in prompt
     assert "verification must prove behavior or content" in prompt
     assert "inspect -> edit -> verify" in prompt
+    assert "prefer `python3 - <<'PY'` heredoc" in prompt
+    assert "never emit `python -c` commands" in prompt
 
 
 def test_weak_verification_is_not_treated_as_blocking_immediate_repair_issue():
@@ -259,7 +265,194 @@ def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
     assert "frontend/src/frontend/src" in prompt
     assert "backend/src/backend/src" in prompt
     assert "rooted exactly once" in prompt
-    assert "Never use parent-directory traversal like `../backend`" in prompt
+    assert "Never use parent-directory traversal like `../backend`" not in prompt
+
+
+def test_planning_repair_prompt_uses_reduced_context_only():
+    knowledge_context = type(
+        "KnowledgeCtx",
+        (),
+        {
+            "retrieved_items": [
+                type(
+                    "Ref",
+                    (),
+                    {
+                        "knowledge_type": "format_guide",
+                        "title": "First",
+                        "content": "alpha" * 200,
+                    },
+                )(),
+                type(
+                    "Ref",
+                    (),
+                    {
+                        "knowledge_type": "task_example",
+                        "title": "Second",
+                        "content": "beta" * 200,
+                    },
+                )(),
+                type(
+                    "Ref",
+                    (),
+                    {
+                        "knowledge_type": "debug_case",
+                        "title": "Third",
+                        "content": "gamma" * 200,
+                    },
+                )(),
+            ]
+        },
+    )()
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Massive task context that should not survive into repair prompt",
+        malformed_output='{"nonProjectContext":"' + ("x" * 7000) + '"}',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=[
+            "commands must be an array",
+            "verification must be a shell string",
+        ],
+        workflow_profile="fullstack_scaffold",
+        workflow_phases=[
+            "create_frontend_skeleton",
+            "create_backend_skeleton",
+        ],
+        workspace_has_existing_files=True,
+        knowledge_context=knowledge_context,
+    )
+
+    assert "Task:" not in prompt
+    assert "Working directory:" not in prompt
+    assert "Workflow profile:" not in prompt
+    assert prompt.count("[format_guide]") == 1
+    assert prompt.count("[task_example]") == 1
+    assert "Third" not in prompt
+    assert "nonProjectContextChars" not in prompt
+    assert "Validation error:" in prompt
+    assert "Required JSON schema:" in prompt
+    assert len(prompt) < PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "python3 - <<'PY'" in prompt
+
+
+def test_validator_rejects_brittle_python_c_with_nested_quotes(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Check Python version",
+                "commands": [
+                    "python3 -c \"import sys; print(f'Python {sys.version}')\"",
+                ],
+                "verification": "test -n ok",
+                "rollback": None,
+                "expected_files": [],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Check runtime",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "brittle" in " ".join(verdict.reasons).lower()
+
+
+def test_shell_safe_command_guide_recommends_python_heredoc():
+    guide = (
+        __import__("pathlib")
+        .Path("knowledge/seed/format_guides/shell-safe-command.md")
+        .read_text()
+    )
+
+    assert "prefer heredoc syntax for inline python" in guide.lower()
+    assert "python3 - <<'PY'" in guide
+
+
+def test_planning_repair_still_succeeds_for_small_malformed_output():
+    captured = {}
+
+    class Runtime:
+        async def execute_task(self, prompt, timeout_seconds=300, **kwargs):
+            captured["prompt"] = prompt
+            captured["timeout_seconds"] = timeout_seconds
+            return {"output": '[{"step_number":1}]'}
+
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='{"steps":"bad"}',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=__import__("logging").getLogger("test"),
+        emit_live=lambda *a, **kw: None,
+        reason="json_parse_failed",
+        rejection_reasons=["commands must be an array"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert result == {"output": '[{"step_number":1}]'}
+    assert "nonProjectContext" not in captured["prompt"]
+    assert len(captured["prompt"]) < PLANNING_REPAIR_PROMPT_MAX_CHARS
+
+
+def test_planning_repair_budget_fails_fast_without_retry():
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "execute_task": lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("repair should be skipped before runtime call")
+            )
+        },
+    )()
+    oversized_output = '[{"step_number":1,"description":"' + ("x" * 12000) + '"}]'
+
+    try:
+        PlannerService.repair_output(
+            runtime_service=runtime,
+            task_description="Build a page",
+            malformed_output=oversized_output,
+            project_dir=__import__("pathlib").Path("/tmp/project"),
+            timeout_seconds=300,
+            logger=__import__("logging").getLogger("test"),
+            emit_live=lambda *a, **kw: None,
+            reason="json_parse_failed",
+            rejection_reasons=[("commands must be array " + ("z" * 400))] * 4,
+            knowledge_context=type(
+                "KnowledgeCtx",
+                (),
+                {
+                    "retrieved_items": [
+                        type(
+                            "Ref",
+                            (),
+                            {
+                                "knowledge_type": "format_guide",
+                                "title": "Hint",
+                                "content": "y" * 2000,
+                            },
+                        )(),
+                        type(
+                            "Ref",
+                            (),
+                            {
+                                "knowledge_type": "task_example",
+                                "title": "Hint 2",
+                                "content": "q" * 2000,
+                            },
+                        )(),
+                    ]
+                },
+            )(),
+        )
+    except PlanningRepairBudgetExceeded:
+        pass
+    else:
+        raise AssertionError("Expected PlanningRepairBudgetExceeded")
 
 
 def test_local_qwen_single_step_plan_is_routed_to_repair():

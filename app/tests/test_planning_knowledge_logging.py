@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -18,11 +18,14 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import (
     Base,
+    ExecutionFailureSummary,
     KnowledgeItem,
     KnowledgeUsageLog,
     Project,
     Session as SessionModel,
+    SessionTask,
     Task,
+    TaskStatus,
 )
 from app.schemas.knowledge import (
     KnowledgeContext,
@@ -76,6 +79,14 @@ def _seed_db(db):
     db.add(task)
     db.flush()
 
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    db.add(link)
+    db.flush()
+
     content = "planning format guide content"
     item = KnowledgeItem(
         title="Planning Format Guide",
@@ -92,7 +103,7 @@ def _seed_db(db):
     db.refresh(session)
     db.refresh(task)
     db.refresh(item)
-    return project, session, task, item
+    return project, session, task, link, item
 
 
 def _knowledge_ctx_for(item: KnowledgeItem) -> KnowledgeContext:
@@ -115,7 +126,7 @@ def _knowledge_ctx_for(item: KnowledgeItem) -> KnowledgeContext:
     )
 
 
-def _build_ctx(db, session, task, item) -> OrchestrationRunContext:
+def _build_ctx(db, session, task, link, item) -> OrchestrationRunContext:
     orchestration_state = MagicMock()
     orchestration_state.project_dir = Path("/tmp/kl_project")
     orchestration_state.project_context = ""
@@ -129,7 +140,7 @@ def _build_ctx(db, session, task, item) -> OrchestrationRunContext:
         session=session,
         project=MagicMock(),
         task=task,
-        session_task_link=MagicMock(),
+        session_task_link=link,
         session_id=session.id,
         task_id=task.id,
         prompt="Build a test page",
@@ -153,9 +164,9 @@ def test_knowledge_usage_logged_before_planning_llm_timeout(mem_db, monkeypatch)
       _retrieve_knowledge  →  assemble_planning_prompt  →  _log_knowledge_usage (db.commit)
       →  [LLM call — may raise]
     """
-    project, session, task, item = _seed_db(mem_db)
+    project, session, task, link, item = _seed_db(mem_db)
     knowledge_ctx = _knowledge_ctx_for(item)
-    ctx = _build_ctx(mem_db, session, task, item)
+    ctx = _build_ctx(mem_db, session, task, link, item)
 
     # Suppress Qdrant/OpenAI retrieval — return a known context instead.
     monkeypatch.setattr(
@@ -225,7 +236,7 @@ def test_knowledge_usage_logged_before_planning_llm_timeout(mem_db, monkeypatch)
 
 def test_knowledge_usage_logged_with_sqlite_fallback_context(mem_db, monkeypatch):
     """KnowledgeUsageLog rows are written even when retrieval used sqlite_fallback path."""
-    project, session, task, item = _seed_db(mem_db)
+    project, session, task, link, item = _seed_db(mem_db)
 
     fallback_ref = KnowledgeItemRef(
         id=item.id,
@@ -245,7 +256,7 @@ def test_knowledge_usage_logged_with_sqlite_fallback_context(mem_db, monkeypatch
         recommended_action=RecommendedAction.none,
     )
 
-    ctx = _build_ctx(mem_db, session, task, item)
+    ctx = _build_ctx(mem_db, session, task, link, item)
 
     monkeypatch.setattr(
         "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
@@ -301,4 +312,219 @@ def test_knowledge_usage_logged_with_sqlite_fallback_context(mem_db, monkeypatch
     assert logs[0].retrieval_reason == "sqlite_fallback_qdrant_or_embedding_unavailable"
     assert logs[0].trigger_phase == "planning"
     assert logs[0].used_in_prompt is True
+    assert logs[0].knowledge_item_id == item.id
+
+
+def test_malformed_planning_output_repair_timeout_does_not_leave_session_running(
+    mem_db, monkeypatch
+):
+    project, session, task, link, item = _seed_db(mem_db)
+    fallback_ctx = KnowledgeContext(
+        retrieved_items=[],
+        query=None,
+        trigger_phase="failure",
+        retrieval_reason="sqlite_fallback_qdrant_or_embedding_unavailable",
+        confidence=0.0,
+        matched_failure_memory=False,
+        recommended_action=RecommendedAction.none,
+    )
+    ctx = _build_ctx(mem_db, session, task, link, item)
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        lambda *a, **kw: _knowledge_ctx_for(item),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *a, **kw: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *a, **kw: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *a, **kw: None,
+    )
+
+    from app.services.orchestration.planning.planner import PlannerService
+
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *a, **kw: True),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_retry_with_minimal_prompt",
+        staticmethod(lambda *a, **kw: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "retry_with_minimal_prompt",
+        classmethod(lambda cls, *a, **kw: {"output": "still malformed"}),
+    )
+
+    def _raise_repair_timeout(*args, **kwargs):
+        raise TimeoutError("repair timeout")
+
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(lambda cls, *a, **kw: _raise_repair_timeout()),
+    )
+
+    def _attempt_json_parsing(*args, **kwargs):
+        return False, None, "json parse failed"
+
+    ctx.error_handler.attempt_json_parsing = _attempt_json_parsing
+
+    with patch(
+        "app.services.knowledge.knowledge_service.KnowledgeService"
+    ) as MockSvc, patch(
+        "app.services.knowledge.failure_signature_service.extract"
+    ) as mock_extract:
+        mock_extract.return_value = MagicMock(
+            normalized_message="malformed planning output timeout",
+            signature_hash=lambda: "feedface" * 8,
+        )
+        MockSvc.return_value.retrieve.return_value = fallback_ctx
+
+        result = execute_planning_phase(
+            ctx=ctx,
+            workspace_review={},
+            extract_structured_text=lambda x: str(x),
+            extract_plan_steps=lambda x: x,
+            looks_like_truncated_multistep_plan=lambda text, plan: False,
+            normalize_plan_with_live_logging=lambda *a, **kw: [],
+            workspace_violation_error_cls=RuntimeError,
+        )
+
+    mem_db.refresh(session)
+    mem_db.refresh(task)
+    mem_db.refresh(link)
+    assert result == {
+        "status": "failed",
+        "reason": "malformed_planning_output_repair_timeout",
+    }
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    summary = (
+        mem_db.query(ExecutionFailureSummary).filter_by(session_id=session.id).first()
+    )
+    assert summary is not None
+
+
+def test_planning_repair_timeout_records_failure_knowledge(mem_db, monkeypatch):
+    project, session, task, link, item = _seed_db(mem_db)
+    failure_ctx = KnowledgeContext(
+        retrieved_items=[
+            KnowledgeItemRef(
+                id=item.id,
+                title=item.title,
+                knowledge_type=item.knowledge_type,
+                content=item.content,
+                priority=item.priority,
+                confidence=0.91,
+            )
+        ],
+        query="repair timeout",
+        trigger_phase="failure",
+        retrieval_reason="semantic_retrieval",
+        confidence=0.91,
+        matched_failure_memory=False,
+        recommended_action=RecommendedAction.none,
+    )
+    ctx = _build_ctx(mem_db, session, task, link, item)
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        lambda *a, **kw: _knowledge_ctx_for(item),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *a, **kw: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *a, **kw: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *a, **kw: None,
+    )
+
+    from app.services.orchestration.planning.planner import PlannerService
+
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *a, **kw: True),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_retry_with_minimal_prompt",
+        staticmethod(lambda *a, **kw: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "retry_with_minimal_prompt",
+        classmethod(lambda cls, *a, **kw: {"output": "still malformed"}),
+    )
+
+    def _raise_repair_timeout(*args, **kwargs):
+        raise TimeoutError("repair timeout")
+
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(lambda cls, *a, **kw: _raise_repair_timeout()),
+    )
+
+    def _attempt_json_parsing(*args, **kwargs):
+        return False, None, "json parse failed"
+
+    ctx.error_handler.attempt_json_parsing = _attempt_json_parsing
+
+    with patch(
+        "app.services.knowledge.knowledge_service.KnowledgeService"
+    ) as MockSvc, patch(
+        "app.services.knowledge.failure_signature_service.extract"
+    ) as mock_extract:
+        mock_extract.return_value = MagicMock(
+            normalized_message="repair timeout",
+            signature_hash=lambda: "deadbeef" * 8,
+        )
+        MockSvc.return_value.retrieve.return_value = failure_ctx
+
+        result = execute_planning_phase(
+            ctx=ctx,
+            workspace_review={},
+            extract_structured_text=lambda x: str(x),
+            extract_plan_steps=lambda x: x,
+            looks_like_truncated_multistep_plan=lambda text, plan: False,
+            normalize_plan_with_live_logging=lambda *a, **kw: [],
+            workspace_violation_error_cls=RuntimeError,
+        )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "malformed_planning_output_repair_timeout"
+    logs = (
+        mem_db.query(KnowledgeUsageLog)
+        .filter_by(session_id=session.id, task_id=task.id, trigger_phase="failure")
+        .all()
+    )
+    assert len(logs) == 1
+    assert logs[0].retrieval_reason == "semantic_retrieval"
+    assert logs[0].used_in_prompt is False
     assert logs[0].knowledge_item_id == item.id

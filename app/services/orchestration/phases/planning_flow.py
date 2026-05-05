@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any, Callable, Dict
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -21,9 +22,13 @@ from app.services.orchestration.persistence import (
     append_orchestration_event,
     maybe_emit_divergence_detected,
     record_validation_verdict,
+    set_session_alert,
     write_orchestration_state_snapshot,
 )
-from app.services.orchestration.planning.planner import PlannerService
+from app.services.orchestration.planning.planner import (
+    PlannerService,
+    PlanningRepairBudgetExceeded,
+)
 from app.services.orchestration.policy import (
     PLANNING_REPAIR_TIMEOUT_SECONDS,
     clamp_planning_timeout,
@@ -140,10 +145,103 @@ class _PlanningRetryState:
         self.consecutive_failures = 0
         self.minimal_prompt_used = False
         self.repair_prompt_used = False
+        self.last_repair_reason = ""
 
     @property
     def circuit_open(self) -> bool:
         return self.consecutive_failures >= MAX_PLANNING_RETRIES
+
+
+def _classify_planning_timeout_failure(
+    exc: Exception,
+    retry_state: _PlanningRetryState | None,
+) -> str:
+    message = str(exc).lower()
+    if "context" in message or "context overflow" in message:
+        return "planning_context_overflow"
+    if retry_state and (
+        retry_state.repair_prompt_used or bool(retry_state.last_repair_reason)
+    ):
+        if any(
+            marker in (retry_state.last_repair_reason or "")
+            for marker in (
+                "json_parse_failed",
+                "unexpected_plan_shape",
+                "truncated_multistep_plan",
+                "plan_contains_immediate_repair_issues",
+            )
+        ):
+            return "malformed_planning_output_repair_timeout"
+        return "planning_repair_timeout"
+    return "planning_repair_timeout"
+
+
+def _finalize_planning_timeout_failure(
+    *,
+    ctx: OrchestrationRunContext,
+    failure_type: str,
+    failure_reason: str,
+) -> bool:
+    completed_at = datetime.now(UTC)
+    if ctx.task:
+        ctx.task.status = TaskStatus.FAILED
+        ctx.task.error_message = failure_reason
+        ctx.task.completed_at = completed_at
+    if ctx.session_task_link:
+        ctx.session_task_link.status = TaskStatus.FAILED
+        ctx.session_task_link.completed_at = completed_at
+    if ctx.session:
+        ctx.session.status = "paused"
+        ctx.session.is_active = False
+        ctx.session.paused_at = completed_at
+        set_session_alert(ctx.session, "error", failure_reason[:2000])
+    ctx.db.commit()
+    try:
+        from app.services.session.replan_service import get_or_generate_failure_summary
+
+        get_or_generate_failure_summary(ctx.db, ctx.session_id)
+    except Exception as summary_exc:
+        ctx.logger.debug(
+            "[ORCHESTRATION] Failed to create/update failure summary for session=%s: %s",
+            ctx.session_id,
+            summary_exc,
+        )
+
+    knowledge_recorded = False
+    try:
+        from app.services.orchestration.phases.failure_flow import (
+            record_failure_knowledge_for_stopped_session,
+        )
+
+        knowledge_recorded = bool(
+            record_failure_knowledge_for_stopped_session(
+                db=ctx.db,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                failure_reason=failure_type,
+                logger=ctx.logger,
+            )
+        )
+    except Exception as knowledge_exc:
+        ctx.logger.warning(
+            "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
+            "handle_task_failure_called=False knowledge_recorded=False error=%s",
+            ctx.session_id,
+            ctx.task_id,
+            failure_type,
+            knowledge_exc,
+        )
+        return False
+
+    ctx.logger.warning(
+        "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
+        "handle_task_failure_called=False knowledge_recorded=%s",
+        ctx.session_id,
+        ctx.task_id,
+        failure_type,
+        knowledge_recorded,
+    )
+    return knowledge_recorded
 
 
 def execute_planning_phase(
@@ -366,8 +464,8 @@ def execute_planning_phase(
         )
         used_minimal_planning_prompt = True
 
+    retry_state = _PlanningRetryState()
     try:
-        retry_state = _PlanningRetryState()
         while True:
             # Circuit breaker: abort after too many consecutive validation failures
             if retry_state.circuit_open:
@@ -471,6 +569,9 @@ def execute_planning_phase(
                 ctx.logger.info(
                     "[ORCHESTRATION] Calling repair pass for planning output"
                 )
+                retry_state.last_repair_reason = (
+                    f"json_parse_failed_after_minimal: {strategy_info}"
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -526,6 +627,7 @@ def execute_planning_phase(
                 ctx.logger.info(
                     "[ORCHESTRATION] Plan extraction failed, calling repair"
                 )
+                retry_state.last_repair_reason = "unexpected_plan_shape_after_minimal"
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -561,6 +663,7 @@ def execute_planning_phase(
                             "model_profile": prompt_profile,
                         },
                     )
+                    retry_state.last_repair_reason = "truncated_multistep_plan_detected"
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         planning_timeout_seconds=planning_timeout_seconds,
@@ -586,6 +689,9 @@ def execute_planning_phase(
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
                 and not retry_state.repair_prompt_used
             ):
+                retry_state.last_repair_reason = (
+                    "truncated_multistep_plan_after_minimal"
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -676,6 +782,7 @@ def execute_planning_phase(
                         "placeholder-only implementation steps in steps "
                         f"{blocking_repair_issues['placeholder_only_steps'][:5]}"
                     )
+                retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -778,6 +885,7 @@ def execute_planning_phase(
                     _log_knowledge_usage(
                         ctx, validation_knowledge_ctx, used_in_prompt=True
                     )
+                retry_state.last_repair_reason = "plan_validation_failed"
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -954,7 +1062,34 @@ def execute_planning_phase(
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
         return {"status": "failed", "reason": "workspace_isolation_violation"}
+    except PlanningRepairBudgetExceeded as exc:
+        failure_type = "planning_repair_prompt_budget_exceeded"
+        ctx.logger.error(
+            "[ORCHESTRATION] Planning repair was skipped because the repair prompt exceeded the safe budget: %s",
+            exc,
+        )
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = str(exc)
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=f"[ORCHESTRATION] Planning repair prompt exceeded safe budget: {exc}",
+            details={"reason": failure_type},
+        )
+        _finalize_planning_timeout_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=str(exc),
+        )
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed(
+                "planning repair prompt budget exceeded"
+            )
+        return {"status": "failed", "reason": failure_type}
     except TimeoutError as exc:
+        failure_type = _classify_planning_timeout_failure(exc, retry_state)
         ctx.logger.error(
             "[ORCHESTRATION] Planning timed out or exceeded context before a valid plan was produced: %s",
             exc,
@@ -969,7 +1104,7 @@ def execute_planning_phase(
             level="ERROR",
             phase="planning",
             message=f"[ORCHESTRATION] Planning timed out or exceeded context: {exc}",
-            details={"reason": "planning_timeout_or_context_overflow"},
+            details={"reason": failure_type},
         )
         try:
             phase_finished_event = append_orchestration_event(
@@ -996,15 +1131,18 @@ def execute_planning_phase(
                 "[ORCHESTRATION] Failed to persist planning timeout phase-finish snapshot: %s",
                 exc,
             )
-        ctx.task.status = TaskStatus.FAILED
-        ctx.task.error_message = str(exc)
-        ctx.db.commit()
+        _finalize_planning_timeout_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=str(exc),
+        )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed(
                 "planning timeout or context overflow"
             )
-        return {"status": "failed", "reason": "planning_timeout_or_context_overflow"}
+        return {"status": "failed", "reason": failure_type}
     except SoftTimeLimitExceeded as exc:
+        failure_type = _classify_planning_timeout_failure(exc, retry_state)
         ctx.logger.error(
             "[ORCHESTRATION] Planning was interrupted by the Celery soft time limit: %s",
             exc,
@@ -1020,7 +1158,7 @@ def execute_planning_phase(
                 "[ORCHESTRATION] Planning exceeded the worker soft time limit "
                 "before a valid plan was produced"
             ),
-            details={"reason": "planning_soft_time_limit_exceeded"},
+            details={"reason": failure_type},
         )
         try:
             phase_finished_event = append_orchestration_event(
@@ -1047,14 +1185,19 @@ def execute_planning_phase(
                 "[ORCHESTRATION] Failed to persist planning soft-time-limit phase-finish snapshot: %s",
                 exc,
             )
-        ctx.task.status = TaskStatus.FAILED
-        ctx.task.error_message = "Planning exceeded the worker soft time limit before a valid plan was produced"
-        ctx.db.commit()
+        _finalize_planning_timeout_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=(
+                "Planning exceeded the worker soft time limit before a valid plan "
+                "was produced"
+            ),
+        )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed(
                 "planning soft time limit exceeded"
             )
-        return {"status": "failed", "reason": "planning_soft_time_limit_exceeded"}
+        return {"status": "failed", "reason": failure_type}
     except Exception as exc:
         ctx.logger.error("[ORCHESTRATION] Failed to parse planning result: %s", exc)
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED
@@ -1151,6 +1294,8 @@ def __repair_planning_output(
             ctx, "workspace_has_existing_files", False
         ),
         knowledge_context=knowledge_context,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
     )
 
 

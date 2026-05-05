@@ -411,7 +411,7 @@ def record_failure_knowledge_for_stopped_session(
     task_id: int,
     failure_reason: str,
     logger: logging.Logger,
-) -> None:
+) -> bool:
     """Record KnowledgeUsageLog for a session stopped by a runtime failure.
 
     Called from stop paths that bypass handle_task_failure() (orphan recovery,
@@ -455,6 +455,7 @@ def record_failure_knowledge_for_stopped_session(
             len(knowledge_ctx.retrieved_items),
             knowledge_ctx.retrieval_reason,
         )
+        return True
     except Exception as record_exc:
         logger.warning(
             "[KNOWLEDGE] record_failure_knowledge_for_stopped_session failed "
@@ -463,3 +464,4 @@ def record_failure_knowledge_for_stopped_session(
             task_id,
             record_exc,
         )
+        return False

@@ -530,6 +530,8 @@ class ValidatorService:
             for command in commands:
                 raw_command = str(command or "")
                 lowered = raw_command.lower()
+                if ValidatorService._uses_brittle_python_inline_command(raw_command):
+                    return True
                 if "cat >" in lowered and "<< 'eof'" in lowered:
                     heredoc_count += 1
                 if "cat >" in lowered and "<< eof" in lowered:
@@ -549,6 +551,30 @@ class ValidatorService:
             return True
 
         return False
+
+    @staticmethod
+    def _uses_brittle_python_inline_command(command: str) -> bool:
+        raw = str(command or "").strip()
+        lowered = raw.lower()
+        if "python -c" not in lowered and "python3 -c" not in lowered:
+            return False
+
+        quote_chars = raw.count('"') + raw.count("'")
+        has_nested_python_content = any(
+            marker in raw
+            for marker in (
+                "f'",
+                'f"',
+                'print("',
+                "print('",
+                "json.dumps(",
+                "assert ",
+                ";",
+                "{",
+                "}",
+            )
+        )
+        return quote_chars >= 4 and has_nested_python_content
 
     @staticmethod
     def _is_non_runnable_command(command: str) -> bool:

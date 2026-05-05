@@ -1895,6 +1895,7 @@ from app.tasks.maintenance import (  # noqa: E402
     generate_task_report,
     process_github_webhook,
     scheduled_task_execution,
+    sweep_orphaned_running_sessions,
 )
 
 

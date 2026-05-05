@@ -5,7 +5,11 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from celery.schedules import crontab
 from app.celery_app import celery_app
-from app.tasks.worker import cleanup_old_logs, scheduled_task_execution
+from app.tasks.worker import (
+    cleanup_old_logs,
+    scheduled_task_execution,
+    sweep_orphaned_running_sessions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,12 @@ class JobScheduler:
             "task": "app.tasks.worker.cleanup_old_logs",
             "schedule": crontab(hour=0, minute=0),  # Daily at midnight
             "kwargs": {"days": 30},
+            "enabled": True,
+        },
+        "recover-orphaned-running-sessions": {
+            "task": "app.tasks.worker.sweep_orphaned_running_sessions",
+            "schedule": timedelta(minutes=15),
+            "kwargs": {},
             "enabled": True,
         },
         "health-check": {

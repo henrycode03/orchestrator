@@ -15,6 +15,13 @@ from ..policy import (
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
+PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 2
+PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
+PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 3500
+PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 800
+PLANNING_REPAIR_PROMPT_MAX_CHARS = 7000
+PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {"format_guide", "task_example"}
+
 
 def _render_knowledge_block(knowledge_context: Any) -> str:
     if not knowledge_context or not getattr(knowledge_context, "retrieved_items", None):
@@ -30,6 +37,37 @@ def _render_knowledge_block(knowledge_context: Any) -> str:
         lines.append(item.content)
         lines.append("")
     return "\n".join(lines)
+
+
+def _render_repair_knowledge_block(knowledge_context: Any) -> str:
+    if not knowledge_context or not getattr(knowledge_context, "retrieved_items", None):
+        return ""
+    allowed_items = [
+        item
+        for item in knowledge_context.retrieved_items
+        if str(getattr(item, "knowledge_type", "") or "")
+        in PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES
+    ][:PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS]
+    if not allowed_items:
+        return ""
+    lines = [
+        "## RELEVANT REFERENCES",
+        "Use these only if they help repair the malformed plan.",
+        "",
+    ]
+    for idx, item in enumerate(allowed_items, start=1):
+        lines.append(f"[{idx}] [{item.knowledge_type}] {item.title}")
+        lines.append(
+            str(getattr(item, "content", "") or "")[
+                :PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS
+            ]
+        )
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+class PlanningRepairBudgetExceeded(RuntimeError):
+    """Raised when the repair prompt exceeds the safe repair budget."""
 
 
 class PlannerService:
@@ -456,16 +494,18 @@ Rules:
 8. `verification` must be a single shell string or null
 9. `rollback` must be a single shell string or null
 10. expected_files must be relative file paths or []
-11. Do not use `cat > file <<EOF`, heredocs, or multi-line inline file creation in planning output
-12. Do not join separate shell commands with commas
-13. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
-14. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
-15. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
-16. Output JSON array only
-17. If the workspace already has files, start by inspecting or extending them before re-scaffolding
-18. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
-19. For implementation-heavy steps, verification must prove behavior or content, not only file existence
-20. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
+11. Do not use `cat > file <<EOF` or large multi-line inline file creation in planning output
+12. For inline Python, prefer `python3 - <<'PY'` heredoc or a script file over `python3 -c`
+13. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
+14. Do not join separate shell commands with commas
+15. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+16. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
+17. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
+18. Output JSON array only
+19. If the workspace already has files, start by inspecting or extending them before re-scaffolding
+20. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
+21. For implementation-heavy steps, verification must prove behavior or content, not only file existence
+22. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -498,15 +538,17 @@ Requirements:
 1. 2 to 5 steps only
 2. Use short relative shell commands only, and keep expected_files relative
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
-4. No heredocs, no long inline source dumps, no absolute paths, no .., no ~
-5. Each step must contain exactly these keys:
+4. No long inline source dumps, no absolute paths, no .., no ~
+5. For inline Python, prefer `python3 - <<'PY'` heredoc or a script file over `python3 -c`
+6. Avoid nested shell quoting in inline Python commands
+7. Each step must contain exactly these keys:
    step_number, description, commands, verification, rollback, expected_files
-6. `verification` and `rollback` must each be one shell string or null
-7. No background processes or long-running servers
-8. Keep each command short and machine-runnable
-9. If the workspace already has files, inspect or extend them before re-scaffolding
-10. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
-11. For implementation-heavy steps, use verification stronger than file-existence checks
+8. `verification` and `rollback` must each be one shell string or null
+9. No background processes or long-running servers
+10. Keep each command short and machine-runnable
+11. If the workspace already has files, inspect or extend them before re-scaffolding
+12. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
+13. For implementation-heavy steps, use verification stronger than file-existence checks
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -527,39 +569,37 @@ Requirements:
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
     ) -> str:
-        concise_task = " ".join((task_description or "").split())[:2000]
-        broken_output = (malformed_output or "")[:8000]
-        display_project_dir = render_workspace_path_for_prompt(project_dir)
-        workflow_guidance = PlannerService._render_workflow_guidance(
-            workflow_profile=workflow_profile,
-            workflow_phases=workflow_phases,
-            workspace_has_existing_files=workspace_has_existing_files,
-        )
-        structured_feedback = ""
+        del task_description
+        del project_dir
+        del workflow_profile
+        del workflow_phases
+        del workspace_has_existing_files
+        broken_output = (malformed_output or "")[
+            :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
+        ]
+        validation_error = ""
         if rejection_reasons:
             reason_lines = "\n".join(
                 f"- {reason[:300]}" for reason in rejection_reasons[:8]
             )
-            structured_feedback = (
-                "\nPrevious validator rejection reasons:\n"
-                f"{reason_lines}\n"
-                "You must address every rejection reason in the repaired plan.\n"
-            )
-        knowledge_block = _render_knowledge_block(knowledge_context)
-        prompt = f"""{knowledge_block + chr(10) if knowledge_block else ""}Repair this malformed planning output into valid machine-runnable JSON. Return JSON array only.
-
-Task:
-{concise_task}
-
-Working directory:
-{display_project_dir}
-
-Workflow:
-{workflow_guidance or "No explicit workflow phases."}
+            validation_error = "Validation error:\n" f"{reason_lines}\n"
+        validation_error = validation_error[:PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS]
+        knowledge_block = _render_repair_knowledge_block(knowledge_context)
+        prompt = f"""{knowledge_block + chr(10) if knowledge_block else ""}Repair this malformed planning output into valid machine-runnable JSON.
 
 Malformed planning output:
 {broken_output}
-{structured_feedback}
+
+{validation_error if validation_error else "Validation error:\n- malformed or non-runnable planning output\n"}
+
+Required JSON schema:
+- Return a JSON array only
+- 3 to 8 sequential steps
+- Each step must include: step_number, description, commands, verification, rollback, expected_files
+- commands: array of shell strings
+- verification: one shell string or null
+- rollback: one shell string or null
+- expected_files: array of relative file paths
 
 Rules:
 1. Return a JSON array only
@@ -569,17 +609,17 @@ Rules:
 5. `verification` must be one shell string or null
 6. `rollback` must be one shell string or null
 7. Use relative paths only in shell commands and expected_files
-8. If a step will later use file-read or file-write tools, keep that path relative here; execution will expand it under {display_project_dir}
+8. If a step will later use file-read or file-write tools, keep that path relative here
 9. Do not use absolute paths, .., or ~
-10. Do not use heredocs, `cat > file <<EOF`, or multi-line inline file dumps in the repaired plan
-11. Do not join separate shell commands with commas
-12. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
-13. Prefer short setup/edit commands over dumping full source files in planning output
-14. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
-15. expected_files must be a JSON array of relative file paths
-16. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
-17. Paths must be rooted exactly once from the canonical project workspace
-18. If the workspace already has files, inspect or extend them before re-scaffolding
+10. Prefer `python3 - <<'PY'` heredoc or a script file over brittle `python3 -c` quoting
+11. Reject nested shell quoting patterns in inline Python commands
+12. Do not join separate shell commands with commas
+13. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+14. Prefer short setup/edit commands over dumping full source files in planning output
+15. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
+16. expected_files must be a JSON array of relative file paths
+17. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
+18. Paths must be rooted exactly once from the project workspace
 19. For implementation steps with expected_files, include at least one command that writes or edits real file contents
 20. Do not return placeholder-only steps that only mkdir, touch, or create empty files
 21. For implementation-heavy steps, verification must prove behavior or content, not only file existence
@@ -715,12 +755,68 @@ Rules:
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
+        session_id: Optional[int] = None,
+        task_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         logger.warning(
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
             f"attempting repair ({reason})"
         )
         repair_timeout = min(timeout_seconds, PLANNING_REPAIR_TIMEOUT_SECONDS)
+        repair_prompt = cls.build_planning_repair_prompt(
+            task_description,
+            malformed_output,
+            project_dir,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            workflow_profile=workflow_profile,
+            workflow_phases=workflow_phases,
+            workspace_has_existing_files=workspace_has_existing_files,
+            knowledge_context=knowledge_context,
+        )
+        validation_error_chars = sum(
+            len(str(reason_text or "")[:300])
+            for reason_text in (rejection_reasons or [])[:8]
+        )
+        knowledge_context_chars = len(_render_repair_knowledge_block(knowledge_context))
+        logger.warning(
+            "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
+            "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s",
+            session_id,
+            task_id,
+            len(repair_prompt),
+            len((malformed_output or "")[:PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS]),
+            validation_error_chars,
+            knowledge_context_chars,
+        )
+        if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            logger.warning(
+                "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_exceeds_limit "
+                "repair_prompt_chars=%s limit=%s",
+                session_id,
+                task_id,
+                len(repair_prompt),
+                PLANNING_REPAIR_PROMPT_MAX_CHARS,
+            )
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Planning repair prompt exceeded the safe prompt budget; skipping repair",
+                metadata={
+                    "phase": "planning",
+                    "reason": "planning_repair_prompt_budget_exceeded",
+                    "repair_prompt_chars": len(repair_prompt),
+                    "malformed_output_chars": len(
+                        (malformed_output or "")[
+                            :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
+                        ]
+                    ),
+                    "validation_error_chars": validation_error_chars,
+                    "knowledge_context_chars": knowledge_context_chars,
+                },
+            )
+            raise PlanningRepairBudgetExceeded(
+                f"Planning repair prompt exceeded safe budget ({len(repair_prompt)} chars)"
+            )
         emit_live(
             "WARN",
             (
@@ -750,67 +846,14 @@ Rules:
         try:
             return asyncio.run(
                 runtime_service.execute_task(
-                    cls.build_planning_repair_prompt(
-                        task_description,
-                        malformed_output,
-                        project_dir,
-                        rejection_reasons=rejection_reasons,
-                        prompt_profile=prompt_profile,
-                        workflow_profile=workflow_profile,
-                        workflow_phases=workflow_phases,
-                        workspace_has_existing_files=workspace_has_existing_files,
-                        knowledge_context=knowledge_context,
-                    ),
+                    repair_prompt,
                     timeout_seconds=repair_timeout,
                     reuse_task_session=False,
                 )
             )
         except Exception as exc:
-            if not cls._looks_like_timeout_error(exc):
-                raise
-            ultra_minimal_timeout = min(
-                timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
-            )
-            logger.warning(
-                "[ORCHESTRATION] Planning repair prompt timed out; retrying with ultra-minimal prompt"
-            )
-            emit_live(
-                "WARN",
-                (
-                    "[ORCHESTRATION] Planning repair timed out; retrying with "
-                    f"ultra-minimal prompt (timeout: {ultra_minimal_timeout}s)"
-                ),
-                metadata={
-                    "phase": "planning",
-                    "retry": "ultra_minimal_prompt",
-                    "reason": str(exc)[:240],
-                    "timeout_seconds": ultra_minimal_timeout,
-                },
-            )
-            emit_live(
-                "INFO",
-                (
-                    "[ORCHESTRATION] Planning attempt after repair is now running "
-                    f"with the ultra-minimal prompt (timeout: {ultra_minimal_timeout}s)"
-                ),
-                metadata={
-                    "phase": "planning",
-                    "attempt": "repair_fallback",
-                    "strategy": "ultra_minimal_prompt",
-                    "timeout_seconds": ultra_minimal_timeout,
-                },
-            )
-            return asyncio.run(
-                runtime_service.execute_task(
-                    cls.build_ultra_minimal_planning_prompt(
-                        task_description,
-                        project_dir,
-                        prompt_profile=prompt_profile,
-                        workflow_profile=workflow_profile,
-                        workflow_phases=workflow_phases,
-                        workspace_has_existing_files=workspace_has_existing_files,
-                    ),
-                    timeout_seconds=ultra_minimal_timeout,
-                    reuse_task_session=False,
+            if cls._looks_like_timeout_error(exc):
+                logger.warning(
+                    "[ORCHESTRATION] Planning repair prompt timed out; stopping instead of retrying repair"
                 )
-            )
+            raise

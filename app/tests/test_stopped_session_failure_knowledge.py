@@ -4,7 +4,9 @@ Tests:
 1. Manual stop (stop_session_lifecycle) does NOT trigger failure knowledge.
 2. Orphan-recovery stop (runtime failure) triggers retrieve(trigger_phase="failure").
 3. Orphan-recovery stop writes KnowledgeUsageLog rows.
-4. record_failure_knowledge_for_stopped_session is callable and records usage.
+4. Maintenance stale-session recovery records failure knowledge.
+5. Maintenance recovery survives adapter failure.
+6. record_failure_knowledge_for_stopped_session is callable and records usage.
 """
 
 from __future__ import annotations
@@ -288,7 +290,70 @@ def test_orphan_recovery_writes_knowledge_usage_log(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4. record_failure_knowledge_for_stopped_session standalone
+# 4. Maintenance stale-session recovery
+# ---------------------------------------------------------------------------
+
+
+def test_stale_running_session_recovery_records_failure_knowledge(db):
+    """recover_stale_running_sessions records failure knowledge for stale runtime stops."""
+    from app.services.session.session_lifecycle_service import (
+        recover_stale_running_sessions,
+    )
+
+    project, session, task, link = _seed(db)
+    task.current_step = 2
+    db.commit()
+
+    calls = []
+
+    def _track_record(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    with patch(
+        "app.services.orchestration.phases.failure_flow.record_failure_knowledge_for_stopped_session",
+        side_effect=_track_record,
+    ):
+        recovered = recover_stale_running_sessions(db, stale_after_seconds=60)
+
+    assert len(recovered) == 1
+    assert recovered[0]["session_id"] == session.id
+    assert recovered[0]["task_id"] == task.id
+    assert recovered[0]["stop_reason"] == "no_progress_timeout"
+    assert recovered[0]["knowledge_recorded"] is True
+    db.refresh(session)
+    db.refresh(task)
+    assert session.status == "stopped"
+    assert task.status == TaskStatus.PENDING
+    assert len(calls) == 1
+    assert calls[0]["failure_reason"] == "no_progress_timeout"
+
+
+def test_stale_running_session_recovery_survives_adapter_failure(db):
+    """recover_stale_running_sessions must not fail when knowledge adapter raises."""
+    from app.services.session.session_lifecycle_service import (
+        recover_stale_running_sessions,
+    )
+
+    project, session, task, link = _seed(db)
+    task.current_step = 3
+    db.commit()
+
+    with patch(
+        "app.services.orchestration.phases.failure_flow.record_failure_knowledge_for_stopped_session",
+        side_effect=RuntimeError("knowledge unavailable"),
+    ):
+        recovered = recover_stale_running_sessions(db, stale_after_seconds=60)
+
+    assert len(recovered) == 1
+    assert recovered[0]["session_id"] == session.id
+    assert recovered[0]["task_id"] == task.id
+    assert recovered[0]["knowledge_recorded"] is False
+    db.refresh(session)
+    assert session.status == "stopped"
+
+
+# 5. record_failure_knowledge_for_stopped_session standalone
 # ---------------------------------------------------------------------------
 
 

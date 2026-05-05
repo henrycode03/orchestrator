@@ -185,3 +185,17 @@ def test_normalize_command_rejects_malformed_shell_quoting(tmp_path):
 
     with pytest.raises(TaskWorkspaceViolationError, match="malformed shell quoting"):
         normalize_command("echo 'unterminated", project_dir)
+
+
+def test_normalize_command_accepts_python_heredoc(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+
+    command = """python3 - <<'PY'
+import sys
+print("Python", sys.version)
+PY"""
+
+    normalized = normalize_command(command, project_dir)
+
+    assert normalized == command

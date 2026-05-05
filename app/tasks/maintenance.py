@@ -1,4 +1,4 @@
-"""Maintenance Celery tasks: webhook processing, scheduled execution, log cleanup, report generation."""
+"""Maintenance Celery tasks: webhook processing, recovery sweeps, cleanup, report generation."""
 
 import logging
 from datetime import timezone, timedelta
@@ -91,6 +91,31 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
     except Exception as exc:
         logger.error(f"Scheduled task {task_id} failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
+
+
+@celery_app.task(bind=True)
+def sweep_orphaned_running_sessions(
+    self, stale_after_seconds: int = 2100
+) -> Dict[str, Any]:
+    db = get_db_session()
+    try:
+        from app.services.session.session_lifecycle_service import (
+            recover_stale_running_sessions,
+        )
+
+        recovered = recover_stale_running_sessions(
+            db, stale_after_seconds=stale_after_seconds
+        )
+        return {
+            "status": "completed",
+            "recovered_count": len(recovered),
+            "recovered_sessions": recovered,
+        }
+    except Exception as exc:
+        logger.error("Orphaned running session sweep failed: %s", exc)
+        raise self.retry(exc=exc, max_retries=3)
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True)
