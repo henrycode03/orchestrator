@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+_VISIBLE_TEXT_KEYS = (
+    "finalAssistantVisibleText",
+    "final_assistant_visible_text",
+    "text",
+    "output_text",
+    "content_text",
+)
+
+
 def _strip_markdown_fences(text: str) -> str:
     stripped = str(text or "").strip()
     if not stripped:
@@ -70,6 +79,60 @@ def _parse_nested_json_text(text: str) -> Any:
             return json.loads(candidate_text)
         except json.JSONDecodeError:
             continue
+    return None
+
+
+def _extract_quoted_json_string_value(text: str, key: str) -> Optional[str]:
+    """Decode a JSON string value from a partial `"key": "..."` fragment."""
+
+    key_pattern = re.compile(rf'"{re.escape(key)}"\s*:', re.DOTALL)
+    decoder = json.JSONDecoder()
+
+    for match in key_pattern.finditer(text or ""):
+        value_start = match.end()
+        while value_start < len(text) and text[value_start].isspace():
+            value_start += 1
+        if value_start >= len(text) or text[value_start] != '"':
+            continue
+
+        fragment = text[value_start:]
+        try:
+            value, _ = decoder.raw_decode(fragment)
+        except json.JSONDecodeError:
+            value = None
+
+        if isinstance(value, str) and value.strip():
+            return value
+
+        in_escape = False
+        for offset, char in enumerate(fragment[1:], 1):
+            if in_escape:
+                in_escape = False
+                continue
+            if char == "\\":
+                in_escape = True
+                continue
+            if char != '"':
+                continue
+            candidate = fragment[: offset + 1]
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError:
+                break
+            if isinstance(decoded, str) and decoded.strip():
+                return decoded
+            break
+
+    return None
+
+
+def _extract_visible_text_from_json_like_fragment(text: str) -> Optional[str]:
+    """Recover visible model text from invalid outer JSON/OpenClaw fragments."""
+
+    for key in _VISIBLE_TEXT_KEYS:
+        value = _extract_quoted_json_string_value(text, key)
+        if value and value.strip():
+            return value
     return None
 
 
@@ -252,7 +315,10 @@ def extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, A
         return parsed_planning_output
 
     if isinstance(parsed_planning_output, str):
-        reparsed = _parse_nested_json_text(parsed_planning_output)
+        visible_text = _extract_visible_text_from_json_like_fragment(
+            parsed_planning_output
+        )
+        reparsed = _parse_nested_json_text(visible_text or parsed_planning_output)
         if reparsed is None or reparsed == parsed_planning_output:
             return None
         return extract_plan_steps(reparsed)
@@ -310,6 +376,49 @@ def extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, A
     return None
 
 
+def _extract_visible_text_payload(value: Any) -> Optional[str]:
+    """Return model-visible text from nested wrapper payloads only."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        parts = [
+            text for item in value if (text := _extract_visible_text_payload(item))
+        ]
+        return "\n".join(parts) if parts else None
+
+    if not isinstance(value, dict):
+        return None
+
+    for key in _VISIBLE_TEXT_KEYS:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    for key in ("content", "message", "payloads"):
+        candidate = value.get(key)
+        if isinstance(candidate, (dict, list)):
+            nested_text = _extract_visible_text_payload(candidate)
+            if nested_text and nested_text.strip():
+                return nested_text
+        elif isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    for candidate in value.values():
+        if isinstance(candidate, (dict, list)):
+            nested_text = _extract_visible_text_payload(candidate)
+            if nested_text and nested_text.strip():
+                return nested_text
+        elif isinstance(candidate, str) and candidate.strip():
+            parsed = _parse_nested_json_text(candidate)
+            nested_text = _extract_visible_text_payload(parsed)
+            if nested_text and nested_text.strip():
+                return nested_text
+
+    return None
+
+
 def extract_structured_text(value: Any) -> str:
     """Recover human/model text from common OpenClaw payload shapes."""
 
@@ -317,6 +426,13 @@ def extract_structured_text(value: Any) -> str:
         return ""
 
     if isinstance(value, str):
+        parsed = _parse_nested_json_text(value)
+        nested_text = _extract_visible_text_payload(parsed)
+        if nested_text and nested_text.strip():
+            return nested_text
+        fragment_text = _extract_visible_text_from_json_like_fragment(value)
+        if fragment_text and fragment_text.strip():
+            return fragment_text
         return value
 
     if isinstance(value, list):
@@ -326,13 +442,7 @@ def extract_structured_text(value: Any) -> str:
     if not isinstance(value, dict):
         return str(value)
 
-    for key in (
-        "text",
-        "output_text",
-        "content_text",
-        "finalAssistantVisibleText",
-        "final_assistant_visible_text",
-    ):
+    for key in _VISIBLE_TEXT_KEYS:
         candidate = value.get(key)
         if isinstance(candidate, str) and candidate.strip():
             return candidate
@@ -356,6 +466,10 @@ def extract_structured_text(value: Any) -> str:
         payload_text = extract_structured_text(payloads)
         if payload_text.strip():
             return payload_text
+
+    nested_visible_text = _extract_visible_text_payload(value)
+    if nested_visible_text and nested_visible_text.strip():
+        return nested_visible_text
 
     for candidate in value.values():
         if isinstance(candidate, (dict, list, str)):

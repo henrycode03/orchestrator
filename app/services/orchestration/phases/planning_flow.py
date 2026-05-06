@@ -159,8 +159,10 @@ def _classify_planning_timeout_failure(
     message = str(exc).lower()
     if "context" in message or "context overflow" in message:
         return "planning_context_overflow"
-    if retry_state and (
-        retry_state.repair_prompt_used or bool(retry_state.last_repair_reason)
+    if (
+        retry_state
+        and "repair" in message
+        and (retry_state.repair_prompt_used or bool(retry_state.last_repair_reason))
     ):
         if any(
             marker in (retry_state.last_repair_reason or "")
@@ -173,7 +175,7 @@ def _classify_planning_timeout_failure(
         ):
             return "malformed_planning_output_repair_timeout"
         return "planning_repair_timeout"
-    return "planning_repair_timeout"
+    return "planning_timeout"
 
 
 def _finalize_planning_terminal_failure(
@@ -1168,21 +1170,39 @@ def execute_planning_phase(
             ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
         return {"status": "failed", "reason": "workspace_isolation_violation"}
     except TimeoutError as exc:
+        timeout_exc = exc
         failure_type = _classify_planning_timeout_failure(exc, retry_state)
-        ctx.logger.error(
-            "[ORCHESTRATION] Planning timed out or exceeded context before a valid plan was produced: %s",
-            exc,
-        )
+        is_repair_timeout = "repair_timeout" in failure_type
+        if is_repair_timeout:
+            ctx.logger.error(
+                "[ORCHESTRATION] Planning repair timed out before a valid plan was produced: %s",
+                timeout_exc,
+            )
+        else:
+            ctx.logger.error(
+                "[ORCHESTRATION] Planning timed out or exceeded context before a valid plan was produced: %s",
+                timeout_exc,
+            )
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED
         ctx.orchestration_state.abort_reason = (
-            f"Planning timed out or exceeded context: {exc}"
+            f"Planning repair timed out: {timeout_exc}"
+            if is_repair_timeout
+            else f"Planning timed out or exceeded context: {timeout_exc}"
+        )
+        failure_message = (
+            f"[ORCHESTRATION] Planning repair timed out: {timeout_exc}"
+            if is_repair_timeout
+            else (
+                "[ORCHESTRATION] Planning timed out or exceeded context: "
+                f"{timeout_exc}"
+            )
         )
         emit_phase_event(
             ctx.orchestration_state,
             ctx.emit_live,
             level="ERROR",
             phase="planning",
-            message=f"[ORCHESTRATION] Planning timed out or exceeded context: {exc}",
+            message=failure_message,
             details={"reason": failure_type},
         )
         try:
@@ -1194,7 +1214,11 @@ def execute_planning_phase(
                 parent_event_id=(planning_phase_event or {}).get("event_id"),
                 details={
                     "phase": "planning",
-                    "status": "timeout_or_context_overflow",
+                    "status": (
+                        "repair_timeout"
+                        if is_repair_timeout
+                        else "timeout_or_context_overflow"
+                    ),
                 },
             )
             write_orchestration_state_snapshot(
@@ -1213,11 +1237,13 @@ def execute_planning_phase(
         _finalize_planning_timeout_failure(
             ctx=ctx,
             failure_type=failure_type,
-            failure_reason=str(exc),
+            failure_reason=str(timeout_exc),
         )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed(
-                "planning timeout or context overflow"
+                "planning repair timeout"
+                if is_repair_timeout
+                else "planning timeout or context overflow"
             )
         return {"status": "failed", "reason": failure_type}
     except SoftTimeLimitExceeded as exc:

@@ -1059,13 +1059,21 @@ Rules:
         repair_started_at = time.monotonic()
         try:
             result = asyncio.run(
-                cls._invoke_repair_prompt(
-                    runtime_service,
-                    repair_prompt,
-                    repair_timeout,
+                asyncio.wait_for(
+                    cls._invoke_repair_prompt(
+                        runtime_service,
+                        repair_prompt,
+                        repair_timeout,
+                    ),
+                    timeout=repair_timeout,
                 )
             )
             repair_duration_seconds = time.monotonic() - repair_started_at
+            if repair_duration_seconds > repair_timeout:
+                raise TimeoutError(
+                    f"Planning repair timed out after {repair_timeout:g}s "
+                    f"(duration={repair_duration_seconds:.2f}s)"
+                )
             logger.info(
                 "[ORCHESTRATION] Planning repair completed in %.2fs "
                 "(timeout=%ss session_id=%s task_id=%s)",
@@ -1091,6 +1099,17 @@ Rules:
             return result
         except Exception as exc:
             repair_duration_seconds = time.monotonic() - repair_started_at
+            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                timeout_exc = TimeoutError(
+                    f"Planning repair timed out after {repair_timeout:g}s "
+                    f"(duration={repair_duration_seconds:.2f}s)"
+                )
+                logger.warning(
+                    "[ORCHESTRATION] Planning repair prompt timed out after %.2fs; "
+                    "stopping instead of retrying repair",
+                    repair_duration_seconds,
+                )
+                raise timeout_exc from exc
             if cls._looks_like_timeout_error(exc):
                 logger.warning(
                     "[ORCHESTRATION] Planning repair prompt timed out after %.2fs; "

@@ -163,6 +163,31 @@ def test_extract_plan_steps_can_unwrap_stringified_wrapper_payload():
     assert plan[0]["description"] == "x"
 
 
+def test_extract_structured_text_recovers_visible_text_from_partial_fragment():
+    fragment = (
+        '"total": 0\n'
+        '"systemPrompt": {\n'
+        '"finalAssistantVisibleText": "[\\n  {\\n'
+        '    \\"step_number\\": 1,\\n'
+        '    \\"description\\": \\"Inspect planning parser\\",\\n'
+        '    \\"commands\\": [\\"rg parsing app/services/orchestration/validation\\"],\\n'
+        '    \\"verification\\": \\"python3 -m pytest app/tests/test_debug_parsing_regressions.py -q\\",\\n'
+        '    \\"rollback\\": null,\\n'
+        '    \\"expected_files\\": []\\n'
+        '  }\\n]"\n'
+    )
+
+    text = extract_structured_text(fragment)
+    plan = extract_plan_steps(text)
+    direct_plan = extract_plan_steps(fragment)
+
+    assert text.startswith("[\n")
+    assert plan is not None
+    assert plan[0]["description"] == "Inspect planning parser"
+    assert direct_plan is not None
+    assert direct_plan[0]["description"] == "Inspect planning parser"
+
+
 def test_extract_plan_steps_from_summary_text_recovers_markdown_table_plan():
     text = """
 Plan written -> `vault/projects/garden-story-microsite/plan.json`
