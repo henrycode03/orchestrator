@@ -319,6 +319,7 @@ def get_mobile_connection_info(
             f"{mobile_base_url}/projects/{{project_id}}/tasks",
             f"{mobile_base_url}/sessions",
             f"{mobile_base_url}/sessions/{{session_id}}/summary",
+            f"{mobile_base_url}/sessions/{{session_id}}/knowledge-usage",
             f"{mobile_base_url}/sessions/{{session_id}}/checkpoints",
             f"{mobile_base_url}/sessions/{{session_id}}/resume",
             f"{mobile_base_url}/sessions/{{session_id}}/stop",
@@ -603,6 +604,17 @@ def get_session_summary(
             for log in reversed(recent_logs)
         ],
     }
+
+
+@router.get("/mobile/sessions/{session_id}/knowledge-usage")
+def get_mobile_session_knowledge_usage(
+    session_id: int, request: Request, db: Session = Depends(get_db)
+):
+    """Return session knowledge usage using mobile shared-key auth."""
+    _log_mobile_request(request, "session_knowledge_usage", session_id=session_id)
+    from app.api.v1.endpoints.sessions import get_session_knowledge_usage_payload
+
+    return get_session_knowledge_usage_payload(db, session_id)
 
 
 @router.get("/mobile/sessions/{session_id}/checkpoints")
