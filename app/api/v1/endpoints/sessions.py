@@ -1722,6 +1722,10 @@ def get_session_knowledge_usage(
     current_user=Depends(get_current_user),
 ):
     """Return knowledge references used in a session, grouped by trigger_phase."""
+    return get_session_knowledge_usage_payload(db, session_id)
+
+
+def get_session_knowledge_usage_payload(db: Session, session_id: int) -> Dict[str, Any]:
     from app.models import KnowledgeItem, KnowledgeUsageLog as KUL
 
     session = (

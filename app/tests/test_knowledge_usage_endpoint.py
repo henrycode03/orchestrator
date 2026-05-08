@@ -14,6 +14,7 @@ from app.models import (
     Project,
     Session as SessionModel,
 )
+from app.config import settings
 
 
 def _make_project(db):
@@ -122,6 +123,31 @@ def test_knowledge_usage_single_phase(authenticated_client, db_session):
     assert e["usage_count"] == 1
     assert e["first_used_at"] is not None
     assert e["last_used_at"] is not None
+
+
+def test_mobile_knowledge_usage_uses_mobile_gateway_auth(
+    api_client, db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "MOBILE_GATEWAY_API_KEY", "mobile-ku-test-key")
+    project = _make_project(db_session)
+    session = _make_session(db_session, project)
+    item = _make_knowledge_item(
+        db_session, title="Mobile Format Guide", knowledge_type="format_guide"
+    )
+    _make_usage_log(db_session, session, item, trigger_phase="planning")
+
+    resp = api_client.get(
+        f"/api/v1/mobile/sessions/{session.id}/knowledge-usage",
+        headers={"X-OpenClaw-API-Key": "mobile-ku-test-key"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["session_id"] == session.id
+    entries = data["phases"]["planning"]
+    assert len(entries) == 1
+    assert entries[0]["title"] == "Mobile Format Guide"
+    assert entries[0]["confidence_max"] == pytest.approx(0.85)
 
 
 def test_knowledge_usage_multiple_phases(authenticated_client, db_session):
