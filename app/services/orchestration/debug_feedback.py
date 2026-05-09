@@ -137,11 +137,19 @@ def classify_debug_failure(
         or "cannot find module" in combined
     ):
         return "missing_dependency"
+    if (
+        "step verification command failed" in combined
+        or "completion verification command failed" in combined
+        or "enoent:" in combined
+        or "no such file or directory" in combined
+    ):
+        return "completion_validation_failed"
     if "pytest" in combined and (
         " failed" in combined
         or " failures" in combined
         or "failed tests" in combined
         or "== fail" in combined
+        or "test session starts" in combined
         or "assertionerror" in combined
         or re.search(r"\bassert\b", combined)
     ):

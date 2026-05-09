@@ -197,6 +197,18 @@ def test_phase7f_classifies_runtime_failures():
         )
         == "pytest_failure"
     )
+    assert (
+        classify_debug_failure(
+            stderr=(
+                "============================= test session starts "
+                "==============================\n"
+                "platform linux -- Python 3.12.3, pytest-9.0.3, pluggy-1.6.0\n"
+                "rootdir: /tmp/project\n"
+                "plugins: asyncio-1.3.0"
+            )
+        )
+        == "pytest_failure"
+    )
     assert classify_debug_failure(stderr="AssertionError: boom") == (
         "runtime_assertion_failure"
     )
@@ -206,6 +218,15 @@ def test_phase7f_classifies_runtime_failures():
             stderr="sh: 1: vitest: not found",
         )
         == "missing_dependency"
+    )
+    assert (
+        classify_debug_failure(
+            stderr=(
+                "Step verification command failed (`node -e \"readFileSync('index')\"`): "
+                "Error: ENOENT: no such file or directory, open 'index'"
+            )
+        )
+        == "completion_validation_failed"
     )
 
 
