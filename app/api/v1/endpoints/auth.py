@@ -234,7 +234,11 @@ def refresh_token(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    payload = verify_token(token_data.refresh_token, credentials_exception)
+    payload = verify_token(
+        token_data.refresh_token,
+        credentials_exception,
+        expected_type="refresh",
+    )
     email: str = payload.get("sub")
 
     if email is None:

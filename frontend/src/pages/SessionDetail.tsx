@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
 import type {
@@ -33,6 +33,8 @@ import {
   SessionTasksPanel,
   SessionTimelinePanel,
   type SessionDetailTab,
+  type OffTrackMoment,
+  type RepairGenealogyNode,
   type TimelineSpan,
 } from '@/components/SessionDetailSections';
 import { MessageCircle, Pause, Play, Square, XCircle } from 'lucide-react';
@@ -851,6 +853,199 @@ export default function SessionDetail() {
       };
     })
     .filter((event) => Number.isFinite(event.score));
+
+  const offTrackMoment = useMemo<OffTrackMoment | null>(() => {
+    if (orchestrationEvents.length === 0) {
+      return null;
+    }
+
+    const sortedEvents = orchestrationEvents
+      .slice()
+      .sort((a, b) => {
+        const aTime = parseApiDate(a.timestamp)?.getTime() || 0;
+        const bTime = parseApiDate(b.timestamp)?.getTime() || 0;
+        return aTime - bTime;
+      });
+    const candidates: OffTrackMoment[] = [];
+
+    for (const event of sortedEvents) {
+      const details = event.details || {};
+      const score =
+        typeof details.score === 'number'
+          ? details.score
+          : typeof details.score === 'string'
+            ? Number(details.score)
+            : null;
+      const phase =
+        detailToText(details.phase) ||
+        detailToText(details.stage) ||
+        humanizeToken(event.event_type);
+
+      if (event.event_type === 'health_score_updated' && score !== null && score < 40) {
+        candidates.push({
+          id: `health-${buildOrchestrationTimelineKey(event)}`,
+          timestamp: event.timestamp,
+          phase,
+          reason: `Health score crossed below 40 at ${score}/100.`,
+          trigger: 'health_threshold',
+          health_score: score,
+          event_type: event.event_type,
+          event_id: event.event_id,
+        });
+      }
+
+      if (['divergence_detected', 'intent_outcome_mismatch'].includes(event.event_type)) {
+        candidates.push({
+          id: `divergence-${buildOrchestrationTimelineKey(event)}`,
+          timestamp: event.timestamp,
+          phase,
+          reason:
+            detailToText(details.reason) ||
+            detailToText(details.message) ||
+            'The runtime recorded divergence between intended and observed progress.',
+          trigger: 'divergence',
+          event_type: event.event_type,
+          event_id: event.event_id,
+        });
+      }
+    }
+
+    for (let index = 0; index < sortedEvents.length; index += 1) {
+      const event = sortedEvents[index];
+      if (event.event_type !== 'validation_result') {
+        continue;
+      }
+      const details = event.details || {};
+      const status = String(details.status || '').toLowerCase();
+      if (!['rejected', 'failed', 'invalid'].includes(status)) {
+        continue;
+      }
+      const laterAcceptedRepair = sortedEvents.slice(index + 1).find((candidate) => {
+        if (candidate.event_type === 'repair_applied') {
+          return true;
+        }
+        if (candidate.event_type !== 'validation_result') {
+          return false;
+        }
+        const candidateStatus = String(candidate.details?.status || '').toLowerCase();
+        return ['accepted', 'passed', 'success'].includes(candidateStatus);
+      });
+      if (!laterAcceptedRepair) {
+        continue;
+      }
+      const phase =
+        detailToText(details.phase) ||
+        detailToText(details.stage) ||
+        humanizeToken(event.event_type);
+      candidates.push({
+        id: `accepted-after-rejection-${buildOrchestrationTimelineKey(event)}`,
+        timestamp: event.timestamp,
+        phase,
+        reason:
+          detailToText(details.reasons) ||
+          detailToText(details.reason) ||
+          'Validation rejected an output that later continued through repair.',
+        trigger: 'accepted_after_rejection',
+        event_type: event.event_type,
+        event_id: event.event_id,
+      });
+    }
+
+    return candidates.sort((a, b) => {
+      const aTime = parseApiDate(a.timestamp)?.getTime() || 0;
+      const bTime = parseApiDate(b.timestamp)?.getTime() || 0;
+      return aTime - bTime;
+    })[0] || null;
+  }, [buildOrchestrationTimelineKey, detailToText, humanizeToken, orchestrationEvents, parseApiDate]);
+
+  const repairGenealogy = useMemo<RepairGenealogyNode[]>(() => {
+    if (!orchestrationEvents.some((event) => event.event_type.startsWith('repair_'))) {
+      return [];
+    }
+
+    const sortedEvents = orchestrationEvents
+      .slice()
+      .sort((a, b) => {
+        const aTime = parseApiDate(a.timestamp)?.getTime() || 0;
+        const bTime = parseApiDate(b.timestamp)?.getTime() || 0;
+        return aTime - bTime;
+      });
+    const firstRepairIndex = sortedEvents.findIndex((event) =>
+      event.event_type.startsWith('repair_')
+    );
+    if (firstRepairIndex < 0) {
+      return [];
+    }
+    let firstRejectedValidationIndex = -1;
+    for (let index = firstRepairIndex; index >= 0; index -= 1) {
+      const event = sortedEvents[index];
+      if (event.event_type !== 'validation_result') {
+        continue;
+      }
+      const status = String(event.details?.status || '').toLowerCase();
+      if (['rejected', 'failed', 'invalid'].includes(status)) {
+        firstRejectedValidationIndex = index;
+        break;
+      }
+    }
+    const startIndex = Math.max(0, firstRejectedValidationIndex);
+    const relevantEvents = sortedEvents
+      .slice(startIndex)
+      .filter((event) => {
+        if (event.event_type.startsWith('repair_')) {
+          return true;
+        }
+        if (event.event_type === 'retry_entered') {
+          return true;
+        }
+        if (event.event_type === 'validation_result') {
+          return true;
+        }
+        return ['task_failed', 'completion_evidence_failed'].includes(event.event_type);
+      })
+      .slice(0, 32);
+
+    let previousId: string | null = null;
+    return relevantEvents.map((event, index) => {
+      const details = event.details || {};
+      const rawStatus = String(details.status || '').toLowerCase();
+      const status: RepairGenealogyNode['status'] =
+        index === 0 && event.event_type === 'validation_result'
+          ? 'original'
+          : event.event_type === 'repair_rejected' ||
+              ['rejected', 'failed', 'invalid'].includes(rawStatus)
+            ? 'rejected'
+            : event.event_type === 'repair_applied' ||
+                ['accepted', 'passed', 'success'].includes(rawStatus)
+              ? 'accepted'
+              : ['task_failed', 'completion_evidence_failed'].includes(event.event_type)
+                ? 'abandoned'
+                : 'repair';
+      const nodeId = buildOrchestrationTimelineKey(event);
+      const node: RepairGenealogyNode = {
+        id: nodeId,
+        parent_id: previousId,
+        timestamp: event.timestamp,
+        event_type: event.event_type,
+        title:
+          status === 'original'
+            ? 'Original Rejected'
+            : event.event_type === 'retry_entered'
+              ? 'Retry Started'
+              : humanizeToken(event.event_type),
+        status,
+        validator: detailToText(details.validator) || detailToText(details.stage),
+        reason:
+          detailToText(details.reasons) ||
+          detailToText(details.reason) ||
+          detailToText(details.message),
+        event_id: event.event_id,
+        details,
+      };
+      previousId = nodeId;
+      return node;
+    });
+  }, [buildOrchestrationTimelineKey, detailToText, humanizeToken, orchestrationEvents, parseApiDate]);
 
   const anomalyEvents = timelineEvents.filter(
     (event) => event.title === 'Off-Track Detected' || event.title === 'Intent Gap'
@@ -2224,6 +2419,8 @@ export default function SessionDetail() {
             <SessionTimelinePanel
               decisionEvents={decisionEvents}
               formatDateTime={formatDateTime}
+              offTrackMoment={offTrackMoment}
+              repairGenealogy={repairGenealogy}
               timelineEvents={timelineEvents}
               timelineSpans={timelineSpans}
             />

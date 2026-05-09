@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.auth import create_access_token, create_refresh_token, verify_token
 from app.dependencies import get_current_user
 from app.models import Project, Session as SessionModel, Task, User
 from app.services.session.session_runtime_service import ensure_task_workspace
@@ -81,3 +82,35 @@ def test_task_subfolder_cannot_escape_project_workspace(db_session, tmp_path):
 
     assert exc_info.value.status_code == 400
     assert not (tmp_path / "outside").exists()
+
+
+def test_refresh_token_is_not_accepted_as_access_token():
+    credentials_exception = HTTPException(status_code=401, detail="bad token")
+    refresh_token = create_refresh_token({"sub": "user@example.com"})
+
+    with pytest.raises(HTTPException):
+        verify_token(refresh_token, credentials_exception)
+
+    payload = verify_token(
+        refresh_token,
+        credentials_exception,
+        expected_type="refresh",
+    )
+    assert payload["sub"] == "user@example.com"
+    assert payload["typ"] == "refresh"
+
+
+def test_access_token_is_not_accepted_as_refresh_token():
+    credentials_exception = HTTPException(status_code=401, detail="bad token")
+    access_token = create_access_token({"sub": "user@example.com"})
+
+    with pytest.raises(HTTPException):
+        verify_token(
+            access_token,
+            credentials_exception,
+            expected_type="refresh",
+        )
+
+    payload = verify_token(access_token, credentials_exception)
+    assert payload["sub"] == "user@example.com"
+    assert payload["typ"] == "access"

@@ -30,6 +30,7 @@ from app.models import (
     Task,
     TaskStatus,
 )
+from .session_lookup import get_session_or_404
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +41,6 @@ _DEFAULT_EXPIRY_MINUTES = 120
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-
-
-def _get_session_or_404(db: DBSession, session_id: int) -> SessionModel:
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session
 
 
 def _get_intervention_or_404(
@@ -148,7 +138,7 @@ def create_intervention_request(
             detail=f"intervention_type must be one of {sorted(INTERVENTION_TYPES)}",
         )
 
-    session = _get_session_or_404(db, session_id)
+    session = get_session_or_404(db, session_id)
 
     if session.status not in {"running", "paused", "awaiting_input"}:
         raise HTTPException(
@@ -291,7 +281,9 @@ def _sync_linked_permission(
     """If req was bridged from permission_service, sync the PermissionRequest status."""
     try:
         ctx = json.loads(req.context_snapshot) if req.context_snapshot else {}
-    except Exception:
+    except (TypeError, ValueError):
+        return
+    if not isinstance(ctx, dict):
         return
     permission_request_id = ctx.get("permission_request_id")
     if not permission_request_id:

@@ -28,6 +28,7 @@ from app.database import get_db_session
 from app.services import (
     create_agent_runtime,
     build_task_subfolder_name,
+    get_session_or_404,
 )
 from app.services.orchestration import (
     STALE_RUN_GUARD_SECONDS,
@@ -112,8 +113,22 @@ from app.services.observability import (
 
 logger = logging.getLogger(__name__)
 
+MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
+
 _PROGRESS_NOTES_MAX_BYTES = 8000
 _STALE_QUEUE_CLAIM_SLA_SECONDS = 900
+
+
+def _decode_context_snapshot_object(raw_snapshot: Any) -> Dict[str, Any]:
+    if not raw_snapshot:
+        return {}
+    try:
+        decoded = json.loads(raw_snapshot)
+    except (TypeError, ValueError):
+        return {}
+    if isinstance(decoded, dict):
+        return decoded
+    return {"previous_context_snapshot": decoded}
 
 
 def _parse_event_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
@@ -1099,22 +1114,22 @@ def execute_orchestration_task(
                 task_title_slug = build_task_subfolder_name(task.title, task_id)
 
                 # Resolve collisions once, then freeze.
-                counter = 1
                 subfolder_name = task_title_slug
-                while True:
-                    existing_tasks = (
+                for counter in range(1, MAX_SUBFOLDER_COLLISION_ATTEMPTS + 1):
+                    existing_task = (
                         db.query(Task)
                         .filter(
                             Task.project_id == session.project_id,
                             Task.task_subfolder == subfolder_name,
                             Task.id != task_id,  # exclude self
                         )
-                        .all()
+                        .first()
                     )
-                    if not existing_tasks:
+                    if not existing_task:
                         break
                     subfolder_name = f"{task_title_slug}-{counter}"
-                    counter += 1
+                else:
+                    subfolder_name = f"{task_title_slug}-{task_id}"
 
                 task.task_subfolder = subfolder_name
                 db.commit()
@@ -1206,7 +1221,7 @@ def execute_orchestration_task(
                     )
         if not os.path.exists(task_workspace):
             os.makedirs(task_workspace, exist_ok=True)
-            logger.info(f"Created task workspace: {task_workspace}")
+            logger.info("Created task workspace: %s", task_workspace)
 
         hydration_result = (
             task_service.hydrate_task_workspace(
@@ -1283,10 +1298,6 @@ def execute_orchestration_task(
             )
         )
 
-        orchestration_state.project_context = _build_base_project_context(
-            task_service, project, task, hydration_result
-        )
-
         # Check if task has been running too long (safety check).
         # Skip this stale-run guard for explicit checkpoint resumes, otherwise a
         # legitimate resume after several minutes gets rejected before we even
@@ -1297,7 +1308,9 @@ def execute_orchestration_task(
             )
             if time_since_start.total_seconds() > STALE_RUN_GUARD_SECONDS:
                 logger.warning(
-                    f"[ORCHESTRATION] Task {task_id} already running for {time_since_start}, marking as failed"
+                    "[ORCHESTRATION] Task %s already running for %s, marking as failed",
+                    task_id,
+                    time_since_start,
                 )
                 task.status = TaskStatus.FAILED
                 task.error_message = f"Task already running for {time_since_start}, possible duplicate execution"
@@ -1333,7 +1346,9 @@ def execute_orchestration_task(
         db.commit()
         _write_project_state_snapshot(db, project, task, session_id)
 
-        logger.info(f"[ORCHESTRATION] Starting multi-step execution for task {task_id}")
+        logger.info(
+            "[ORCHESTRATION] Starting multi-step execution for task %s", task_id
+        )
         emit_live(
             "INFO",
             f"[ORCHESTRATION] Starting multi-step execution for task {task_id}",
@@ -1691,7 +1706,9 @@ def execute_orchestration_task(
             resumed_from_checkpoint = bool(orchestration_state.plan)
             if resumed_from_checkpoint:
                 logger.info(
-                    f"[ORCHESTRATION] Resuming from checkpoint '{resolved_resume_checkpoint_name}' at step index {orchestration_state.current_step_index}"
+                    "[ORCHESTRATION] Resuming from checkpoint '%s' at step index %s",
+                    resolved_resume_checkpoint_name,
+                    orchestration_state.current_step_index,
                 )
                 emit_live(
                     "INFO",
@@ -2113,13 +2130,10 @@ def answer_human_intervention_query(
     """
     from app.models import InterventionRequest
     from app.services.agents.agent_runtime import invoke_runtime_prompt
-    import json as _json
 
     db = get_db_session()
     try:
-        from app.services.session.intervention_service import _get_session_or_404
-
-        session = _get_session_or_404(db, session_id)
+        session = get_session_or_404(db, session_id)
         req = (
             db.query(InterventionRequest)
             .filter(InterventionRequest.id == intervention_id)
@@ -2169,15 +2183,10 @@ def answer_human_intervention_query(
         )
         ai_answer = str((result or {}).get("output", "")).strip() or "(No response)"
 
-        # Store AI answer in context_snapshot as JSON
-        existing = {}
-        try:
-            if req.context_snapshot:
-                existing = _json.loads(req.context_snapshot)
-        except Exception:
-            pass
+        # Store AI answer in context_snapshot as JSON while preserving non-object snapshots.
+        existing = _decode_context_snapshot_object(req.context_snapshot)
         existing["ai_response"] = ai_answer
-        req.context_snapshot = _json.dumps(existing)
+        req.context_snapshot = json.dumps(existing)
         db.commit()
 
         # Emit the completed answer so WebSocket picks it up

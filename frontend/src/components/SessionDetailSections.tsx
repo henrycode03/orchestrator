@@ -64,6 +64,30 @@ export interface TimelineSpan {
   summary: string;
 }
 
+export interface OffTrackMoment {
+  id: string;
+  timestamp: string;
+  phase: string;
+  reason: string;
+  trigger: 'health_threshold' | 'accepted_after_rejection' | 'divergence';
+  health_score?: number | null;
+  event_type: string;
+  event_id?: string | null;
+}
+
+export interface RepairGenealogyNode {
+  id: string;
+  parent_id?: string | null;
+  timestamp: string;
+  event_type: string;
+  title: string;
+  status: 'original' | 'repair' | 'accepted' | 'rejected' | 'abandoned';
+  validator?: string | null;
+  reason?: string | null;
+  event_id?: string | null;
+  details?: Record<string, unknown>;
+}
+
 const getStringList = (value: unknown): string[] =>
   Array.isArray(value)
     ? value
@@ -450,6 +474,8 @@ interface SessionTimelinePanelProps {
   formatDateTime: (value?: string | null) => string;
   timelineSpans?: TimelineSpan[];
   timelineEvents: TimelineEvent[];
+  offTrackMoment?: OffTrackMoment | null;
+  repairGenealogy?: RepairGenealogyNode[];
 }
 
 interface SessionDiagnosticsPanelProps {
@@ -860,9 +886,121 @@ export function SessionTimelinePanel({
   formatDateTime,
   timelineSpans = [],
   timelineEvents,
+  offTrackMoment = null,
+  repairGenealogy = [],
 }: SessionTimelinePanelProps) {
   return (
     <div className="space-y-4">
+      {(offTrackMoment || repairGenealogy.length > 0) && (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <div className="rounded-lg border border-amber-700/60 bg-amber-950/20 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-amber-100">Off-Track Moment</h3>
+              {offTrackMoment && (
+                <span className="rounded-sm border border-amber-700/70 px-1.5 py-0.5 text-xs uppercase text-amber-200">
+                  {offTrackMoment.trigger.replace(/_/g, ' ')}
+                </span>
+              )}
+            </div>
+            {!offTrackMoment ? (
+              <p className="text-sm text-slate-400">
+                No off-track moment detected from health, divergence, or repair acceptance signals.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                  <span>{formatDateTime(offTrackMoment.timestamp)}</span>
+                  <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 uppercase">
+                    {offTrackMoment.phase}
+                  </span>
+                  {typeof offTrackMoment.health_score === 'number' && (
+                    <span className="text-amber-200">
+                      Health {offTrackMoment.health_score}/100
+                    </span>
+                  )}
+                </div>
+                <p className="break-words text-sm text-slate-100">{offTrackMoment.reason}</p>
+                <p className="break-words text-xs text-slate-500">
+                  {offTrackMoment.event_type}
+                  {offTrackMoment.event_id ? ` • ${offTrackMoment.event_id}` : ''}
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-orange-800/50 bg-slate-800 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-slate-200">Repair Genealogy</h3>
+              <span className="text-xs text-slate-400">{repairGenealogy.length} nodes</span>
+            </div>
+            {repairGenealogy.length === 0 ? (
+              <p className="text-sm text-slate-400">
+                No repair attempts detected in the orchestration event journal.
+              </p>
+            ) : (
+              <div className="max-h-72 space-y-2 overflow-y-auto">
+                {repairGenealogy.map((node, index) => (
+                  <div key={node.id} className="relative pl-5">
+                    {index < repairGenealogy.length - 1 && (
+                      <span className="absolute left-1.5 top-7 h-[calc(100%-0.25rem)] w-px bg-slate-700" />
+                    )}
+                    <span
+                      className={cn(
+                        'absolute left-0 top-3 h-3 w-3 rounded-full border',
+                        node.status === 'original' && 'border-slate-500 bg-slate-700',
+                        node.status === 'repair' && 'border-orange-400 bg-orange-500/40',
+                        node.status === 'accepted' && 'border-emerald-400 bg-emerald-500/40',
+                        node.status === 'rejected' && 'border-red-400 bg-red-500/40',
+                        node.status === 'abandoned' && 'border-amber-400 bg-amber-500/40'
+                      )}
+                    />
+                    <div className="rounded-md border border-slate-700 bg-slate-950/30 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={cn(
+                              'text-xs font-medium uppercase',
+                              node.status === 'original' && 'text-slate-300',
+                              node.status === 'repair' && 'text-orange-300',
+                              node.status === 'accepted' && 'text-emerald-300',
+                              node.status === 'rejected' && 'text-red-300',
+                              node.status === 'abandoned' && 'text-amber-300'
+                            )}
+                          >
+                            {node.title}
+                          </span>
+                          <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs uppercase text-slate-400">
+                            {node.status}
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-400">
+                          {formatDateTime(node.timestamp)}
+                        </span>
+                      </div>
+                      {(node.validator || node.reason) && (
+                        <p className="mt-1 break-words text-xs text-slate-400">
+                          {[node.validator, node.reason].filter(Boolean).join(' | ')}
+                        </p>
+                      )}
+                      {node.details && Object.keys(node.details).length > 0 && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs text-slate-500">
+                            Raw event details
+                          </summary>
+                          <pre className="mt-2 max-h-36 overflow-auto rounded bg-slate-950 p-2 text-xs text-slate-400">
+                            {JSON.stringify(node.details, null, 2)}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Decision Timeline</h3>

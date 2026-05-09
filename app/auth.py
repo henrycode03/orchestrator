@@ -31,7 +31,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create JWT access token."""
-    to_encode = data.copy()
+    to_encode = {**data.copy(), "typ": "access"}
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -46,7 +46,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create JWT refresh token."""
-    to_encode = data.copy()
+    to_encode = {**data.copy(), "typ": "refresh"}
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -57,12 +57,17 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) 
     return encoded_jwt
 
 
-def verify_token(token: str, credentials_exception: Any) -> Any:
+def verify_token(
+    token: str,
+    credentials_exception: Any,
+    *,
+    expected_type: str = "access",
+) -> Any:
     """Verify JWT token and return payload."""
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
-        if email is None:
+        if email is None or payload.get("typ") != expected_type:
             raise credentials_exception
         return payload
     except JWTError:
@@ -91,7 +96,7 @@ def verify_ed25519_signature(message: bytes, signature: str, public_key: str) ->
         verifiable_key.verify(message, signature_bytes)
 
         return True
-    except (VerifyError, Exception):
+    except (VerifyError, ValueError, TypeError):
         return False
 
 

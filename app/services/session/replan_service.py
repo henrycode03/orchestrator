@@ -27,21 +27,11 @@ from app.models import (
     SessionTask,
     TaskStatus,
 )
+from .session_lookup import get_session_or_404
 
 logger = logging.getLogger(__name__)
 
 _SUMMARY_CHAR_LIMIT = 2000  # ~500 tokens
-
-
-def _get_session_or_404(db: DBSession, session_id: int) -> SessionModel:
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session
 
 
 _ANSI_RE = _re.compile(r"\x1b\[[0-9;]*m")
@@ -238,7 +228,7 @@ def get_or_generate_failure_summary(
     db: DBSession, session_id: int
 ) -> ExecutionFailureSummary:
     """Return existing summary or generate one if it doesn't exist yet."""
-    session = _get_session_or_404(db, session_id)
+    session = get_session_or_404(db, session_id)
 
     existing = (
         db.query(ExecutionFailureSummary)
@@ -272,7 +262,7 @@ def store_operator_feedback(
     db: DBSession, session_id: int, feedback: str
 ) -> ExecutionFailureSummary:
     """Store operator free-text feedback on the failure summary."""
-    _get_session_or_404(db, session_id)
+    get_session_or_404(db, session_id)
 
     record = (
         db.query(ExecutionFailureSummary)
@@ -294,7 +284,7 @@ def trigger_replan(db: DBSession, session_id: int) -> dict:
 
     Returns dict with planning_session_id and message.
     """
-    session = _get_session_or_404(db, session_id)
+    session = get_session_or_404(db, session_id)
 
     project = (
         db.query(Project)

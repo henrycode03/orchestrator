@@ -70,6 +70,7 @@ from .intervention_service import (
     get_pending_interventions,
     submit_intervention_reply,
 )
+from .session_lookup import get_session_or_404
 from .session_runtime_service import (
     build_task_execution_prompt,
     build_task_subfolder_name,
@@ -120,6 +121,7 @@ __all__ = [
     "deny_intervention",
     "get_intervention_history",
     "get_pending_interventions",
+    "get_session_or_404",
     "request_human_intervention_lifecycle",
     "submit_intervention_reply",
     "execute_task_payload",

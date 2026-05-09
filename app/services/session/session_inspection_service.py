@@ -60,15 +60,13 @@ from app.services.session.session_runtime_service import (
     get_session_task_subfolder,
     revoke_session_celery_tasks,
 )
+from .session_lookup import get_session_or_404
 
 QUEUE_WATCHDOG_SLA_SECONDS = 30
 
 
-def _get_session_or_404(db: Session, session_id: int) -> SessionModel:
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session
+def get_inspectable_session_or_404(db: Session, session_id: int) -> SessionModel:
+    return get_session_or_404(db, session_id, include_deleted=True)
 
 
 def _session_task_event_roots(
@@ -211,7 +209,7 @@ def get_session_dispatch_watchdog_payload(
     *,
     sla_seconds: int = QUEUE_WATCHDOG_SLA_SECONDS,
 ) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     roots = _session_task_event_roots(db, session)
     now = datetime.now(UTC)
     task_summaries: List[Dict[str, Any]] = []
@@ -325,7 +323,7 @@ def refresh_session_dispatch_watchdog_alert(
     *,
     sla_seconds: int = QUEUE_WATCHDOG_SLA_SECONDS,
 ) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     watchdog = get_session_dispatch_watchdog_payload(
         db, session_id, sla_seconds=sla_seconds
     )
@@ -489,7 +487,7 @@ def get_session_divergence_compare_payload(
 ) -> Dict[str, Any]:
     from app.models import Project
 
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     current = _build_session_divergence_fingerprint(db, session)
     current_tags = set(current.get("anomaly_tags", []))
 
@@ -635,7 +633,7 @@ def _prepare_session_for_replay(db: Session, session: SessionModel) -> None:
 def get_session_logs_payload(
     db: Session, session_id: int, *, limit: Optional[int] = 100, offset: int = 0
 ) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     effective_limit = min(limit if limit else 100, 1000)
 
     logs_query = db.query(LogEntry).filter(LogEntry.session_id == session_id)
@@ -663,7 +661,7 @@ def get_sorted_logs_payload(
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     effective_limit = min(limit if limit else 100, 1000)
 
     logs_query = db.query(LogEntry).filter(
@@ -717,7 +715,7 @@ def check_session_overwrites_payload(
     task_subfolder: str,
     planned_files: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     protection = OverwriteProtectionService(db)
     try:
         result = protection.check_and_warn(
@@ -742,7 +740,7 @@ def check_session_overwrites_payload(
 
 
 def create_session_backup_payload(db: Session, session_id: int) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     protection = OverwriteProtectionService(db)
     project_id = session.project_id or 1
 
@@ -759,7 +757,7 @@ def create_session_backup_payload(db: Session, session_id: int) -> Dict[str, Any
 
 
 def get_session_workspace_info_payload(db: Session, session_id: int) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     protection = OverwriteProtectionService(db)
     project_id = session.project_id or 1
 
@@ -779,7 +777,7 @@ def get_session_workspace_info_payload(db: Session, session_id: int) -> Dict[str
 async def save_session_checkpoint_payload(
     db: Session, session_id: int
 ) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     runtime = create_agent_runtime(db, session_id)
     try:
         await runtime.pause_session()
@@ -794,7 +792,7 @@ async def save_session_checkpoint_payload(
 
 
 def list_session_checkpoints_payload(db: Session, session_id: int) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     checkpoint_service = CheckpointService(db)
     checkpoints = checkpoint_service.list_checkpoints(session_id)
     recommended_checkpoint_name = checkpoint_service.resolve_resume_checkpoint_name(
@@ -811,7 +809,7 @@ def list_session_checkpoints_payload(db: Session, session_id: int) -> Dict[str, 
 def inspect_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     dispatch_watchdog = get_session_dispatch_watchdog_payload(db, session_id)
     checkpoint_service = CheckpointService(db)
     payload = checkpoint_service.load_checkpoint(session_id, checkpoint_name)
@@ -922,7 +920,7 @@ def _latest_session_task_context(
 
 
 def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     root, events, snapshots = _latest_session_task_context(db, session)
     if root is None:
         return {
@@ -946,7 +944,7 @@ def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, 
 
 
 def get_session_execution_dag_payload(db: Session, session_id: int) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     root, events, snapshots = _latest_session_task_context(db, session)
     if root is None:
         return {
@@ -966,7 +964,7 @@ def get_session_execution_dag_payload(db: Session, session_id: int) -> Dict[str,
 
 
 def get_session_focus_mode_payload(db: Session, session_id: int) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     root, events, snapshots = _latest_session_task_context(db, session)
     pending_interventions = [
         {
@@ -1000,7 +998,7 @@ def get_session_focus_mode_payload(db: Session, session_id: int) -> Dict[str, An
 def get_session_mobile_interruptions_payload(
     db: Session, session_id: int
 ) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     pending_interventions = [
         {
             "id": item.id,
@@ -1028,7 +1026,7 @@ def get_session_mobile_interruptions_payload(
 async def load_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     runtime = create_agent_runtime(db, session_id)
     try:
         session_key = await runtime.resume_session(checkpoint_name=checkpoint_name)
@@ -1053,7 +1051,7 @@ async def replay_session_checkpoint_payload(
 ) -> Dict[str, Any]:
     from app.services.session.session_lifecycle_service import resume_session_lifecycle
 
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     _prepare_session_for_replay(db, session)
 
     result = await resume_session_lifecycle(
@@ -1094,7 +1092,7 @@ async def replay_session_checkpoint_counterfactual_payload(
     from app.services.orchestration.persistence import append_orchestration_event
 
     overrides = overrides or {}
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
     _prepare_session_for_replay(db, session)
 
     checkpoint_service = CheckpointService(db)
@@ -1168,7 +1166,7 @@ def get_session_state_diff_payload(
     to_checkpoint: Optional[int] = None,
     task_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    session = _get_session_or_404(db, session_id)
+    session = get_inspectable_session_or_404(db, session_id)
 
     if task_id is None:
         latest_link = (
@@ -1234,7 +1232,7 @@ def get_session_state_diff_payload(
 def delete_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     checkpoint_service = CheckpointService(db)
     deleted = checkpoint_service.delete_checkpoint(session_id, checkpoint_name)
     if not deleted:
@@ -1251,7 +1249,7 @@ def delete_session_checkpoint_payload(
 def cleanup_session_checkpoints_payload(
     db: Session, session_id: int, *, keep_latest: int = 3, max_age_hours: int = 24
 ) -> Dict[str, Any]:
-    _get_session_or_404(db, session_id)
+    get_inspectable_session_or_404(db, session_id)
     checkpoint_service = CheckpointService(db)
     result = checkpoint_service.cleanup_old_checkpoints(
         session_id=session_id, keep_latest=keep_latest, max_age_hours=max_age_hours
