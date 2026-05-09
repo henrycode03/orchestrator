@@ -1473,7 +1473,7 @@ class ValidatorService:
             return PlanRepairRequired(verdict=verdict)
         return PlanAccepted(verdict=verdict)
 
-    @staticmethod
+    @classmethod
     def validate_step_success(
         cls,
         *,
