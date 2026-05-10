@@ -124,8 +124,9 @@ def _build_repair_rejection_reasons(
                 )
             }
         )
+        step_label = f"Step {heredoc_steps}" if heredoc_steps else "Plan"
         targeted_reasons.append(
-            f"Step {heredoc_steps}: invalid heredoc shape "
+            f"{step_label}: invalid heredoc shape "
             f"({', '.join(sorted(heredoc_subcodes))}). Rewrite file writes with "
             "printf. No heredoc."
         )
@@ -143,10 +144,10 @@ def _build_repair_rejection_reasons(
                 )
             }
         )
+        step_label = f"Step {inline_python_steps}" if inline_python_steps else "Plan"
         targeted_reasons.append(
-            f"Step {inline_python_steps}: brittle inline Python "
-            "(brittle_inline_python). Rewrite as short printf/file edit commands. "
-            "No nested python -c."
+            f"{step_label}: brittle inline Python (brittle_inline_python). "
+            "Rewrite as short printf/file edit commands. No nested python -c."
         )
 
     if details.get("placeholder_only_implementation"):
