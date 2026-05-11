@@ -228,9 +228,13 @@ def test_capture_task_evidence_bundle_writes_expected_files(tmp_path):
         module.EXPECTED_FILES
     )
     assert _load(bundle_dir, "metadata.json")["context"]["task_execution_id"] == 30
-    assert _load(bundle_dir, "failure_summary.json")["summary"] == (
-        "Stored failure summary"
+    failure_summary = _load(bundle_dir, "failure_summary.json")
+    assert failure_summary["available"] is False
+    assert (
+        failure_summary["reason"] == "stored_failure_summary_not_task_execution_scoped"
     )
+    assert "Task error: completion_validation_failed" in failure_summary["summary"]
+    assert failure_summary["ignored_stored_summary"]["scope"] == "session"
     evidence = _load(bundle_dir, "workspace_evidence_summary.json")
     assert evidence["workspace_evidence_collected"] is True
     assert evidence["evidence_total_chars"] == 12
@@ -293,6 +297,55 @@ def test_capture_task_evidence_bundle_degrades_when_failure_summary_missing(
     assert failure_summary["available"] is False
     assert failure_summary["reason"] == "stored_failure_summary_missing"
     assert "Debug feedback captured" in failure_summary["summary"]
+
+
+def test_capture_task_evidence_bundle_prefers_task_execution_scoped_summary(
+    tmp_path,
+):
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(conn, str(tmp_path / "workspace"), include_failure_summary=False)
+    conn.execute(
+        "alter table execution_failure_summaries add column task_execution_id integer"
+    )
+    conn.execute(
+        """
+        insert into execution_failure_summaries (
+            id, session_id, summary, operator_feedback, generated_at, feedback_at,
+            replan_planning_session_id, task_execution_id
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (1, 10, "Session-level stale summary", None, "older", None, None, 999),
+    )
+    conn.execute(
+        """
+        insert into execution_failure_summaries (
+            id, session_id, summary, operator_feedback, generated_at, feedback_at,
+            replan_planning_session_id, task_execution_id
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (2, 10, "TE30 scoped summary", None, "now", None, None, 30),
+    )
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    failure_summary = _load(bundle_dir, "failure_summary.json")
+
+    assert failure_summary["available"] is True
+    assert failure_summary["scope"] == "task_execution"
+    assert failure_summary["task_execution_id"] == 30
+    assert failure_summary["summary"] == "TE30 scoped summary"
 
 
 def test_capture_task_evidence_bundle_degrades_for_missing_task_execution(

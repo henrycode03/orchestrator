@@ -264,11 +264,31 @@ def _failure_summary(
     conn: sqlite3.Connection,
     *,
     session_id: int,
+    task_execution_id: int,
     rows: list[dict[str, Any]],
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    table = _table_exists(conn, "execution_failure_summaries")
-    if table:
+    if _table_exists(conn, "execution_failure_summaries"):
+        columns = _table_columns(conn, "execution_failure_summaries")
+        if "task_execution_id" in columns:
+            row = _one(
+                conn,
+                """
+                select id, session_id, task_execution_id, summary, operator_feedback,
+                       generated_at, feedback_at, replan_planning_session_id
+                from execution_failure_summaries
+                where task_execution_id = ?
+                order by generated_at desc, id desc
+                limit 1
+                """,
+                (task_execution_id,),
+            )
+            if row is not None:
+                row["available"] = True
+                row["source"] = "execution_failure_summaries"
+                row["scope"] = "task_execution"
+                return row
+
         row = _one(
             conn,
             """
@@ -280,9 +300,20 @@ def _failure_summary(
             (session_id,),
         )
         if row is not None:
-            row["available"] = True
-            row["source"] = "execution_failure_summaries"
-            return row
+            fallback = _fallback_failure_summary(rows, context)
+            return {
+                "available": False,
+                "source": "fallback_log_summary",
+                "reason": "stored_failure_summary_not_task_execution_scoped",
+                "summary": fallback,
+                "ignored_stored_summary": {
+                    "id": row.get("id"),
+                    "session_id": row.get("session_id"),
+                    "generated_at": row.get("generated_at"),
+                    "source": "execution_failure_summaries",
+                    "scope": "session",
+                },
+            }
     fallback = _fallback_failure_summary(rows, context)
     return {
         "available": False,
@@ -290,6 +321,10 @@ def _failure_summary(
         "reason": "stored_failure_summary_missing",
         "summary": fallback,
     }
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"pragma table_info({table_name})")}
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -514,7 +549,11 @@ def capture_bundle(
             "metadata.json": _metadata_payload(context, journal),
             "logs_summary.json": _logs_summary(rows),
             "failure_summary.json": _failure_summary(
-                conn, session_id=session_id, rows=rows, context=context
+                conn,
+                session_id=session_id,
+                task_execution_id=task_execution_id,
+                rows=rows,
+                context=context,
             ),
             "decision_timeline.json": _decision_timeline(rows, journal),
             "replay_report.semantic.json": _replay_report_semantic(context),

@@ -331,3 +331,36 @@ def test_completion_repair_generic_json_response_classifies_as_non_step(
     ]
     assert generated[-1]["details"]["compliance_retry_attempted"] is False
     assert generated[-1]["details"]["compliance_retry_succeeded"] is False
+
+
+def test_completion_repair_compliance_retry_wrapper_json_classifies_as_non_step(
+    db_session, tmp_path
+):
+    wrapped_ready_json = (
+        '{"finalAssistantVisibleText":"{\\n'
+        '  \\"status\\": \\"ready\\",\\n'
+        '  \\"message\\": \\"I am here and ready to help. What do you need?\\"\\n'
+        '}"}'
+    )
+    ctx, runtime = _seed_ctx(
+        db_session,
+        tmp_path,
+        runtime_output=["The repair is {not valid json}.", wrapped_ready_json],
+    )
+
+    result = _attempt_completion_repair(
+        ctx=ctx,
+        completion_validation=_completion_validation(),
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result == {"status": "failed", "reason": "repair_step_missing_step_object"}
+    assert len(runtime.prompts) == 2
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    generated = [
+        event for event in events if event["event_type"] == EventType.REPAIR_GENERATED
+    ]
+    assert generated[-1]["details"]["compliance_retry_attempted"] is True
+    assert generated[-1]["details"]["compliance_retry_succeeded"] is True
