@@ -20,6 +20,8 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 
 - `validate_plan_json.py` - validate planner JSON against the deterministic plan contract.
 - `planning_floor_check.py` - run an OpenClaw planning-floor diagnostic.
+- `phase8a_shadow_probe.py` - offline direct-vs-OpenClaw repair prompt probe
+  for Phase 8A runtime boundary diagnostics.
 - `ingest_knowledge.py` - ingest knowledge documents into SQLite and Qdrant.
 
 ## Developer Utilities
