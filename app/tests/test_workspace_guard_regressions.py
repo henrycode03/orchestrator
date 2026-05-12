@@ -6,6 +6,8 @@ import pytest
 
 from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
+    compute_workspace_checksum,
+    detect_scope_violations,
     is_workspace_cd_escape,
     normalize_command,
     normalize_step,
@@ -254,3 +256,29 @@ def test_normalize_command_rejects_home_directory_path_token(tmp_path):
 
     with pytest.raises(TaskWorkspaceViolationError, match="Home-directory paths"):
         normalize_command("rm -rf ~/.cache/openclaw", project_dir)
+
+
+def test_scope_audit_ignores_pytest_cache_side_effects(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+    pre_checksum = compute_workspace_checksum(project_dir)
+
+    cache_file = project_dir / ".pytest_cache" / "v" / "cache" / "nodeids"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text('["tests/test_config.py::test_feature_flag_is_true"]\n')
+
+    assert detect_scope_violations(project_dir, [], pre_checksum) == []
+
+
+def test_scope_audit_still_flags_unexpected_non_cache_files(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+    pre_checksum = compute_workspace_checksum(project_dir)
+
+    unexpected = project_dir / "scratch" / "debug.txt"
+    unexpected.parent.mkdir(parents=True)
+    unexpected.write_text("debug output\n")
+
+    assert detect_scope_violations(project_dir, [], pre_checksum) == [
+        "scratch/debug.txt"
+    ]

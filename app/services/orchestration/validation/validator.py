@@ -1830,13 +1830,36 @@ class ValidatorService:
             for path in (reported_changed_files or [])
             if str(path).strip()
         ]
+        delete_targets = {
+            str(op.get("path", "")).strip().lstrip("./")
+            for op in (step.get("ops") or [])
+            if isinstance(op, dict)
+            and str(op.get("op", "")).strip() == "delete_file"
+            and str(op.get("path", "")).strip()
+        }
+        reported_changed_file_set = {
+            str(path).strip().lstrip("./") for path in reported_changed_files
+        }
+        materialized_file_set = {
+            str(path).strip().lstrip("./") for path in materialized_files
+        }
+        delete_materialized_files = {
+            path
+            for path in reported_changed_file_set
+            if path in delete_targets and not (project_dir / path).exists()
+        }
         if reported_changed_files and materialized_files:
-            if not set(reported_changed_files) & set(materialized_files):
+            if not (
+                (reported_changed_file_set & materialized_file_set)
+                | delete_materialized_files
+            ):
                 repairable.append(
                     "Step reported file changes but none materialized in the expected workspace"
                 )
                 details["reported_changed_files"] = reported_changed_files[:20]
                 details["materialized_files"] = materialized_files[:20]
+                if delete_targets:
+                    details["delete_targets"] = sorted(delete_targets)[:20]
         placeholder_reasons: List[str] = []
         for candidate in candidate_files:
             placeholder_reasons.extend(cls._detect_placeholder_content(candidate))

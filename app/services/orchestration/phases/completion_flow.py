@@ -197,38 +197,6 @@ def _attempt_completion_repair(
         ],
         workspace_path=orchestration_state.project_dir,
     )
-    debug_repair_used_ids = set(
-        int(item)
-        for item in (
-            getattr(orchestration_state, "debug_repair_task_execution_ids", []) or []
-        )
-        if str(item).isdigit()
-    )
-    if (
-        ctx.task_execution_id is not None
-        and int(ctx.task_execution_id) in debug_repair_used_ids
-    ):
-        append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
-            session_id=ctx.session_id,
-            task_id=ctx.task_id,
-            event_type=EventType.REPAIR_REJECTED,
-            details={
-                "phase": "completion",
-                "reason": "debug_repair_budget_exhausted",
-                "debug_repair_terminal_reason": "debug_repair_budget_exhausted",
-                "debug_repair_attempted": False,
-                "debug_repair_used": True,
-                "debug_failure_class": debug_feedback_envelope.failure_class,
-                "task_execution_id": ctx.task_execution_id,
-            },
-        )
-        return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
-    if ctx.task_execution_id is not None:
-        orchestration_state.debug_repair_task_execution_ids = sorted(
-            {*debug_repair_used_ids, int(ctx.task_execution_id)}
-        )
-
     next_attempt = orchestration_state.completion_repair_attempts + 1
     if next_attempt > ctx.completion_repair_budget:
         return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
@@ -1267,14 +1235,6 @@ def finalize_successful_task(
                     envelope=debug_feedback_envelope,
                 )
 
-                debug_repair_used_ids = set(
-                    getattr(
-                        orchestration_state,
-                        "debug_repair_task_execution_ids",
-                        [],
-                    )
-                    or []
-                )
                 task_execution_id = (
                     int(ctx.task_execution_id)
                     if ctx.task_execution_id is not None
@@ -1283,11 +1243,7 @@ def finalize_successful_task(
                 if (
                     debug_feedback_envelope.eligible_for_debug_repair
                     and task_execution_id is not None
-                    and task_execution_id not in debug_repair_used_ids
                 ):
-                    orchestration_state.debug_repair_task_execution_ids = sorted(
-                        {*debug_repair_used_ids, task_execution_id}
-                    )
                     fallback_verdict = ValidationVerdict(
                         stage="completion_verification",
                         status="repair_required",

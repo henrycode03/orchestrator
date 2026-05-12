@@ -7,6 +7,7 @@ from app.services.orchestration.execution.step_support import (
     _infer_debug_payload_from_text,
     is_runnable_shell_command_fix,
 )
+from app.services.orchestration.execution.execution_flow import stub_expected_files
 from app.services.orchestration.debug_feedback import (
     DebugFeedbackEnvelope,
     build_bounded_debug_repair_prompt,
@@ -167,3 +168,17 @@ def test_debug_repair_prompt_rejects_prose_commands_and_heredoc_rewrites():
 
     assert "runnable shell strings, not prose instructions" in prompt
     assert "Do not use heredoc rewrites" in prompt
+
+
+def test_stub_expected_files_allows_empty_gitkeep_sentinel(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / ".gitkeep").write_text("")
+
+    assert stub_expected_files(tmp_path, ["logs/.gitkeep"]) == []
+
+
+def test_stub_expected_files_still_flags_ordinary_empty_expected_file(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "marker.txt").write_text("")
+
+    assert stub_expected_files(tmp_path, ["logs/marker.txt"]) == ["logs/marker.txt"]

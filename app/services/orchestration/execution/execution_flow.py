@@ -82,6 +82,10 @@ def determine_step_timeout(
 _MIN_MEANINGFUL_BYTES = 4
 
 
+def _is_allowed_empty_sentinel_file(path: Path) -> bool:
+    return path.name == ".gitkeep"
+
+
 def _resolve_expected_path(
     project_dir: Path, raw_path: str
 ) -> Optional[tuple[Path, str]]:
@@ -136,6 +140,8 @@ def stub_expected_files(project_dir: Path, expected_files: List[str]) -> List[st
             continue
         full_path, label = resolved
         if not full_path.exists() or full_path.is_dir():
+            continue
+        if _is_allowed_empty_sentinel_file(full_path):
             continue
         size = full_path.stat().st_size
         if size == 0:

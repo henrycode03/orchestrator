@@ -16,6 +16,7 @@ from app.services.orchestration.persistence import read_orchestration_events
 from app.services.orchestration.phases.completion_flow import (
     _augment_completion_verification_command,
     _classify_completion_verification_failure,
+    _detect_completion_verification_command,
     _execute_completion_verification,
     finalize_successful_task,
 )
@@ -143,6 +144,46 @@ def test_jest_completion_verification_excludes_openclaw_snapshots():
     )
 
     assert command == "pnpm test -- --testPathIgnorePatterns=.openclaw/"
+
+
+def test_python_completion_verification_detects_python_module_pytest(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    (project_dir / "tests" / "test_config.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    command, source = _detect_completion_verification_command(project_dir)
+
+    assert command == "python3 -m pytest"
+    assert source == "python test suite detected"
+
+
+def test_python_module_pytest_completion_verification_imports_workspace_root(
+    tmp_path,
+):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    (project_dir / "app_config.py").write_text(
+        "FEATURE_FLAG = True\n",
+        encoding="utf-8",
+    )
+    (project_dir / "tests" / "test_config.py").write_text(
+        "import app_config\n\n"
+        "def test_feature_flag_is_true():\n"
+        "    assert app_config.FEATURE_FLAG is True\n",
+        encoding="utf-8",
+    )
+    command, _ = _detect_completion_verification_command(project_dir)
+
+    result = _execute_completion_verification(
+        project_dir=project_dir,
+        command=command,
+        timeout_seconds=10,
+    )
+
+    assert result["success"] is True
 
 
 def test_completion_verification_rejects_shell_metacharacters(tmp_path):
@@ -731,11 +772,11 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
         "final_completion_verification"
     )
     assert repair_calls[0].details["failure_class"] == "import_error"
-    assert ctx.orchestration_state.debug_repair_task_execution_ids == [execution.id]
+    assert ctx.orchestration_state.debug_repair_task_execution_ids == []
     assert ctx.task.status == TaskStatus.DONE
 
 
-def test_final_verification_7f_gate_blocks_second_attempt(
+def test_final_verification_repair_runs_with_prior_execution_debug_attempt(
     db_session, tmp_path, monkeypatch
 ):
     ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
@@ -780,10 +821,102 @@ def test_final_verification_7f_gate_blocks_second_attempt(
     )
 
     assert result == {"status": "failed", "reason": "completion_verification_failed"}
-    assert repair_calls == []
+    assert repair_calls
     assert ctx.task.status == TaskStatus.FAILED
     events = read_orchestration_events(
         ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
     )
     assert events[-1]["event_type"] == EventType.PHASE_FINISHED
     assert events[-1]["details"]["status"] == "verification_failed"
+
+
+def test_completion_verification_repair_has_separate_budget_from_execution_debug(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
+    ctx.orchestration_state.debug_repair_task_execution_ids = [execution.id]
+    ctx.orchestration_state.completion_repair_attempts = 0
+    verification_outputs = [
+        {
+            "success": False,
+            "returncode": 2,
+            "output": "ImportError while importing test module tests/test_config.py",
+        },
+        {"success": True, "returncode": 0, "output": "2 passed"},
+    ]
+    runtime_outputs = [
+        {"output": "Task summary"},
+        {
+            "output": (
+                '{"description":"repair import","commands":["python -c \\"print(1)\\""],'
+                '"verification":"python -c \\"print(1)\\"","expected_files":[]}'
+            )
+        },
+        {"output": "repair applied"},
+    ]
+
+    class _Runtime:
+        async def execute_task(self, prompt, timeout_seconds=None):
+            return runtime_outputs.pop(0)
+
+        def get_backend_metadata(self):
+            return {"backend": "fake", "model_family": "test"}
+
+    ctx.runtime_service = _Runtime()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={"expected_core_files": ["tests/test_config.py"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: ("pytest", "python test suite detected"),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._classify_completion_verification_failure",
+        lambda **kwargs: ValidationVerdict(
+            stage="completion_verification",
+            status="repair_required",
+            profile="implementation",
+            reasons=["Completion verification found a repairable import issue"],
+            details={
+                "verification_command": "pytest",
+                "completion_repair_source": "final_completion_verification",
+                "failure_class": "import_error",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._execute_completion_verification",
+        lambda **kwargs: verification_outputs.pop(0),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.assess_step_execution",
+        lambda **kwargs: SimpleNamespace(
+            step_status="success",
+            step_output="repair applied",
+            error_message="",
+            missing_files=[],
+            stub_files=[],
+            tool_failures=[],
+            correction_hints=[],
+            verification_output="",
+            validation_verdict=None,
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert ctx.orchestration_state.completion_repair_attempts == 1
+    assert ctx.task.status == TaskStatus.DONE

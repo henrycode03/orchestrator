@@ -653,7 +653,15 @@ def normalize_plan(
 
 
 _CHECKSUM_IGNORED = frozenset(
-    {"node_modules", ".git", "__pycache__", "dist", "build", ".openclaw"}
+    {
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        "dist",
+        "build",
+        ".openclaw",
+    }
 )
 
 

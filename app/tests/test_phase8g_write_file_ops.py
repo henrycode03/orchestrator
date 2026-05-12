@@ -202,6 +202,19 @@ def test_phase8m_replace_in_file_aliases_normalize_to_contract():
         "old": "draft",
         "new": "ready",
     }
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "old_str": "draft",
+            "new_str": "ready",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
 
 
 def test_phase8m_replace_in_file_conflicting_aliases_do_not_normalize():
@@ -217,6 +230,66 @@ def test_phase8m_replace_in_file_conflicting_aliases_do_not_normalize():
         )
         is False
     )
+
+
+def test_validate_step_success_counts_absent_delete_file_target_as_materialized(
+    tmp_path,
+):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_config.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
+    step = {
+        "step_number": 1,
+        "description": "Delete scratch file",
+        "ops": [{"op": "delete_file", "path": "scratch/remove-me.txt"}],
+        "commands": ["python -m pytest tests/test_config.py -v"],
+        "verification": "python -m pytest tests/test_config.py -v",
+        "expected_files": ["tests/test_config.py"],
+    }
+
+    verdict = ValidatorService.validate_step_success(
+        project_dir=tmp_path,
+        step=step,
+        step_output="delete_file scratch/remove-me.txt\n2 passed",
+        missing_expected_files=[],
+        tool_failures=[],
+        validation_profile="implementation",
+        reported_changed_files=["scratch/remove-me.txt"],
+    )
+
+    assert not any("none materialized" in reason for reason in verdict.reasons)
+
+
+def test_validate_step_success_still_flags_absent_non_delete_reported_file(
+    tmp_path,
+):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_config.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
+    step = {
+        "step_number": 1,
+        "description": "Report a missing source file",
+        "ops": [],
+        "commands": ["python -m pytest tests/test_config.py -v"],
+        "verification": "python -m pytest tests/test_config.py -v",
+        "expected_files": ["tests/test_config.py"],
+    }
+
+    verdict = ValidatorService.validate_step_success(
+        project_dir=tmp_path,
+        step=step,
+        step_output="reported source change",
+        missing_expected_files=[],
+        tool_failures=[],
+        validation_profile="implementation",
+        reported_changed_files=["src/app.py"],
+    )
+
+    assert any("none materialized" in reason for reason in verdict.reasons)
 
 
 def test_phase8l_placeholder_fixture_policy_is_shared():

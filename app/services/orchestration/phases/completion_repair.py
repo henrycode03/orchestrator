@@ -220,7 +220,7 @@ def _detect_completion_verification_command(
         if (project_dir / "pyproject.toml").exists() or (
             project_dir / "tests"
         ).exists():
-            return "pytest", "python test suite detected"
+            return "python3 -m pytest", "python test suite detected"
 
     return None, None
 
