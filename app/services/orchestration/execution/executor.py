@@ -471,6 +471,26 @@ class ExecutorService:
                         "files_changed": files_changed,
                         "output": f"replace_in_file old text not found and new text is ambiguous in {relative}: {already_applied_count} occurrences",
                     }
+                try:
+                    regex_matches = list(re.finditer(old, original))
+                except re.error:
+                    regex_matches = []
+                if len(regex_matches) == 1:
+                    target.write_text(
+                        re.sub(old, lambda _match: new, original, count=1),
+                        encoding="utf-8",
+                    )
+                    files_changed.append(relative)
+                    output_lines.append(
+                        f"replace_in_file {relative} (1 regex replacement)"
+                    )
+                    continue
+                if len(regex_matches) > 1:
+                    return {
+                        "success": False,
+                        "files_changed": files_changed,
+                        "output": f"replace_in_file regex old text is ambiguous in {relative}: {len(regex_matches)} occurrences",
+                    }
                 return {
                     "success": False,
                     "files_changed": files_changed,

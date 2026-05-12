@@ -1106,10 +1106,51 @@ class ValidatorService:
         return [step for step in bad_steps if step is not None]
 
     @staticmethod
+    def _step_is_readonly_inspection(step: Dict[str, Any]) -> bool:
+        ops = step.get("ops") or []
+        if isinstance(ops, list) and any(isinstance(op, dict) for op in ops):
+            return False
+        commands = [
+            str(command or "").strip()
+            for command in (step.get("commands", []) or [])
+            if str(command or "").strip()
+        ]
+        if not commands:
+            return False
+        readonly_prefixes = (
+            "ls",
+            "cat",
+            "pwd",
+            "find",
+            "rg",
+            "grep",
+            "wc",
+            "head",
+            "tail",
+            "sed -n",
+        )
+        if not all(command.startswith(readonly_prefixes) for command in commands):
+            return False
+        description = str(step.get("description") or "").lower()
+        inspection_markers = (
+            "inspect",
+            "review",
+            "analyze",
+            "inventory",
+            "audit",
+            "list",
+            "current workspace",
+            "current project",
+        )
+        return any(marker in description for marker in inspection_markers)
+
+    @staticmethod
     def _plan_missing_verification_steps(plan: List[Dict[str, Any]]) -> List[int]:
         missing_steps: List[int] = []
         for index, step in enumerate(plan, start=1):
             step_number = step.get("step_number", index)
+            if ValidatorService._step_is_readonly_inspection(step):
+                continue
             if not str(step.get("verification") or "").strip():
                 missing_steps.append(step_number)
         return [step for step in missing_steps if step is not None]
@@ -1710,6 +1751,7 @@ class ValidatorService:
                 step.get("step_number")
                 for step in plan
                 if step.get("step_number") not in missing_verification_steps
+                and not cls._step_is_readonly_inspection(step)
                 and cls._verification_is_weak(step.get("verification"))
             ]
             if weak_verification_steps:

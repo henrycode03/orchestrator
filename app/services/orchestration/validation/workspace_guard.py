@@ -278,6 +278,28 @@ def _rewrite_safe_cd_chain(command: str, project_dir: Path) -> str:
     return " && ".join(rewritten_segments)
 
 
+def _repair_unclosed_python_c_outer_quote(command: str) -> str:
+    stripped = (command or "").strip()
+    if not re.match(r"^python3?\s+-c\s+\"", stripped):
+        return command
+
+    escaped = False
+    double_quote_count = 0
+    for char in stripped:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            double_quote_count += 1
+
+    if double_quote_count % 2 == 1:
+        return f'{command}"'
+    return command
+
+
 def _normalize_write_pseudo_command(command: str, project_dir: Path) -> Optional[str]:
     """Normalize `write path: description` pseudo-commands without parsing prose as shell."""
 
@@ -343,6 +365,7 @@ def normalize_command(command: str, project_dir: Path) -> str:
     if looks_like_plain_english_instruction(normalized):
         return normalized
 
+    normalized = _repair_unclosed_python_c_outer_quote(normalized)
     current = _rewrite_safe_cd_chain(normalized, project_dir)
     cd_pattern = re.compile(r"^\s*cd\s+([^;&|]+?)\s*&&\s*(.+)$")
     while True:

@@ -284,11 +284,12 @@ start_qdrant() {
     (
         cd "${QDRANT_HOME}"
         QDRANT__STORAGE__STORAGE_PATH="${QDRANT_STORAGE}" \
-            QDRANT__STORAGE__SNAPSHOTS_PATH="${QDRANT_SNAPSHOTS_DIR}" \
+        QDRANT__STORAGE__SNAPSHOTS_PATH="${QDRANT_SNAPSHOTS_DIR}" \
             setsid nohup "${QDRANT_BIN}" \
             >> "${LOG_DIR}/qdrant.log" 2>&1 &
         echo $! > "${PID_DIR}/qdrant.pid"
     )
+    normalize_runtime_ownership
 
     local qdrant_ok=false
     for _ in {1..15}; do
@@ -341,6 +342,7 @@ start_backend() {
         >> "${LOG_DIR}/backend.log" 2>&1 &
     local backend_pid=$!
     echo "${backend_pid}" > "${PID_DIR}/backend.pid"
+    normalize_runtime_ownership
     
     local backend_ok=false
     for _ in {1..15}; do
@@ -393,6 +395,7 @@ start_workers() {
         >> "${LOG_DIR}/worker.log" 2>&1 &
     local worker_pid=$!
     echo "${worker_pid}" > "${PID_DIR}/worker.pid"
+    normalize_runtime_ownership
 
     local worker_ok=false
     for _ in {1..20}; do
@@ -445,6 +448,7 @@ start_frontend() {
     setsid nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
     local frontend_pid=$!
     echo "${frontend_pid}" > "${PID_DIR}/frontend.pid"
+    normalize_runtime_ownership
     
     local frontend_ok=false
     for _ in {1..15}; do

@@ -4,6 +4,7 @@ import json
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.orchestration.persistence import (
+    _write_json_payload_atomic,
     append_orchestration_event,
     diff_orchestration_state_snapshots,
     emit_intent_outcome_mismatch,
@@ -48,6 +49,62 @@ def test_append_orchestration_event_writes_append_only_jsonl(tmp_path):
     ]
     assert lines[0]["details"]["phase"] == "planning"
     assert lines[1]["details"]["score"] == 100
+
+
+def test_atomic_json_write_normalizes_ownership_to_parent(monkeypatch, tmp_path):
+    parent = tmp_path / "owned-parent"
+    parent.mkdir()
+    target = parent / "payload.json"
+    expected_uid = parent.stat().st_uid
+    expected_gid = parent.stat().st_gid
+    chown_calls = []
+
+    def fake_chown(path, uid, gid):
+        chown_calls.append((str(path), uid, gid))
+
+    monkeypatch.setattr("app.services.orchestration.persistence.os.chown", fake_chown)
+
+    _write_json_payload_atomic(target, {"ok": True})
+
+    assert target.read_text(encoding="utf-8") == '{"ok": true}'
+    assert chown_calls
+    assert all(
+        uid == expected_uid and gid == expected_gid for _, uid, gid in chown_calls
+    )
+    assert any(path == str(target) for path, _, _ in chown_calls)
+
+
+def test_event_journal_writes_normalize_log_and_lock_ownership(monkeypatch, tmp_path):
+    project_dir = tmp_path / "journal-project"
+    project_dir.mkdir()
+    chown_calls = []
+
+    def fake_chown(path, uid, gid):
+        chown_calls.append((str(path), uid, gid))
+
+    monkeypatch.setattr("app.services.orchestration.persistence.os.chown", fake_chown)
+
+    append_orchestration_event(
+        project_dir=project_dir,
+        session_id=7,
+        task_id=13,
+        event_type="phase_started",
+        details={"phase": "planning"},
+    )
+
+    event_dir = project_dir / ".openclaw" / "events"
+    expected_uid = event_dir.stat().st_uid
+    expected_gid = event_dir.stat().st_gid
+    log_path = event_dir / "session_7_task_13.jsonl"
+    lock_path = event_dir / "session_7_task_13.jsonl.lock"
+
+    assert log_path.exists()
+    assert lock_path.exists()
+    assert any(path == str(log_path) for path, _, _ in chown_calls)
+    assert any(path == str(lock_path) for path, _, _ in chown_calls)
+    assert all(
+        uid == expected_uid and gid == expected_gid for _, uid, gid in chown_calls
+    )
 
 
 def test_validation_verdict_also_persists_event(db_session, tmp_path):

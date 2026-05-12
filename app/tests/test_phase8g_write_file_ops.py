@@ -539,6 +539,48 @@ def test_phase8o_replace_in_file_still_fails_when_target_state_is_unproven(tmp_p
     assert missing_new["success"] is False
     assert "old text not found" in missing_new["output"]
 
+
+def test_phase8u_replace_in_file_uses_regex_fallback_for_pattern_alias(tmp_path):
+    target = tmp_path / "app_config.py"
+    target.write_text("FEATURE_FLAG = False\n", encoding="utf-8")
+
+    result = ExecutorService.execute_file_ops(
+        Path(tmp_path),
+        [
+            {
+                "op": "replace_in_file",
+                "path": "app_config.py",
+                "old": r"FEATURE_FLAG\s*=\s*False",
+                "new": "FEATURE_FLAG = True",
+            }
+        ],
+    )
+
+    assert result["success"] is True
+    assert result["files_changed"] == ["app_config.py"]
+    assert "regex replacement" in result["output"]
+    assert target.read_text(encoding="utf-8") == "FEATURE_FLAG = True\n"
+
+
+def test_phase8u_replace_in_file_regex_fallback_rejects_ambiguous_matches(tmp_path):
+    target = tmp_path / "app_config.py"
+    target.write_text("FEATURE_FLAG = False\nFEATURE_FLAG=False\n", encoding="utf-8")
+
+    result = ExecutorService.execute_file_ops(
+        Path(tmp_path),
+        [
+            {
+                "op": "replace_in_file",
+                "path": "app_config.py",
+                "old": r"FEATURE_FLAG\s*=\s*False",
+                "new": "FEATURE_FLAG = True",
+            }
+        ],
+    )
+
+    assert result["success"] is False
+    assert "regex old text is ambiguous" in result["output"]
+
     target.write_text("DEBUG = True\nOTHER_DEBUG = True\n", encoding="utf-8")
     ambiguous_new = ExecutorService.execute_file_ops(
         Path(tmp_path),

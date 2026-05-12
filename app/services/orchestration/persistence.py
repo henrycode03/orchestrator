@@ -213,6 +213,16 @@ _WORKSPACE_HASH_CACHE: Dict[str, tuple[float, Optional[str]]] = {}
 _WORKSPACE_HASH_CACHE_TTL_SECONDS = 1.0
 
 
+def _normalize_path_ownership_to_parent(path: Path) -> None:
+    try:
+        owner = path.parent.stat()
+        os.chown(path, owner.st_uid, owner.st_gid)
+    except PermissionError:
+        return
+    except OSError:
+        return
+
+
 def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -227,7 +237,9 @@ def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
         handle.write(json.dumps(payload, default=str))
         handle.flush()
         os.fsync(handle.fileno())
+    _normalize_path_ownership_to_parent(temp_path)
     temp_path.replace(path)
+    _normalize_path_ownership_to_parent(path)
 
 
 def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
@@ -236,12 +248,14 @@ def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = log_path.with_suffix(f"{log_path.suffix}.lock")
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        _normalize_path_ownership_to_parent(lock_path)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, default=str) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            _normalize_path_ownership_to_parent(log_path)
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 

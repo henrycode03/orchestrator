@@ -222,6 +222,23 @@ def test_normalize_command_rejects_malformed_shell_quoting(tmp_path):
         normalize_command("echo 'unterminated", project_dir)
 
 
+def test_normalize_command_repairs_unclosed_python_c_outer_quote(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+
+    command = (
+        'python -c "import importlib.util; '
+        "spec = importlib.util.spec_from_file_location('app_config', 'app_config.py'); "
+        "mod = importlib.util.module_from_spec(spec); "
+        "spec.loader.exec_module(mod); "
+        "assert mod.FEATURE_FLAG == True, 'FEATURE_FLAG is not True'"
+    )
+
+    normalized = normalize_command(command, project_dir)
+
+    assert normalized == f'{command}"'
+
+
 def test_normalize_command_accepts_python_heredoc(tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)

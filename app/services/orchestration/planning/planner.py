@@ -825,7 +825,48 @@ class PlannerService:
         return any(re.match(pattern, text) for pattern in empty_write_patterns)
 
     @staticmethod
+    def _step_is_readonly_inspection(step: Dict[str, Any]) -> bool:
+        ops = step.get("ops") or []
+        if isinstance(ops, list) and any(operation_has_file_op_path(op) for op in ops):
+            return False
+        commands = [
+            str(command or "").strip()
+            for command in (step.get("commands", []) or [])
+            if str(command or "").strip()
+        ]
+        if not commands:
+            return False
+        readonly_prefixes = (
+            "ls",
+            "cat",
+            "pwd",
+            "find",
+            "rg",
+            "grep",
+            "wc",
+            "head",
+            "tail",
+            "sed -n",
+        )
+        if not all(command.startswith(readonly_prefixes) for command in commands):
+            return False
+        description = str(step.get("description") or "").lower()
+        inspection_markers = (
+            "inspect",
+            "review",
+            "analyze",
+            "inventory",
+            "audit",
+            "list",
+            "current workspace",
+            "current project",
+        )
+        return any(marker in description for marker in inspection_markers)
+
+    @staticmethod
     def _step_is_implementation_heavy(step: Dict[str, Any]) -> bool:
+        if PlannerService._step_is_readonly_inspection(step):
+            return False
         expected_files = [
             str(path or "").strip()
             for path in (step.get("expected_files", []) or [])
