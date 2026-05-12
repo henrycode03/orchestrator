@@ -1792,7 +1792,7 @@ def __coerce_output_text(
     ctx.logger.info(
         "[ORCHESTRATION] Planning output type: %s, preview: %s",
         type(output_result),
-        str(output_result)[:300],
+        str(output_result)[:1500],
     )
     output_text = extract_structured_text(output_result)
     if not output_text.strip() and isinstance(output_result, dict):

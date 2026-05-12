@@ -1895,6 +1895,9 @@ def execute_step_loop(
             orchestration_state.abort_reason = f"Debug parse failed: {exc}"
             task.status = TaskStatus.FAILED
             task.error_message = str(exc)
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(

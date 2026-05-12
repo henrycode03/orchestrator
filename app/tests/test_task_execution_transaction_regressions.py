@@ -38,6 +38,59 @@ def _stub_retry_dispatch(monkeypatch, captured_kwargs: dict | None = None):
     monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
 
 
+def test_sync_task_execution_uses_terminal_task_state_over_stale_running_link(
+    db_session,
+):
+    from app.tasks.worker_support.execution_state import (
+        _sync_task_execution_from_task_state,
+    )
+
+    project = Project(name="Terminal Sync Project")
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(
+        project_id=project.id,
+        name="Terminal Sync Session",
+        status="running",
+        is_active=True,
+    )
+    db_session.add(session)
+    db_session.flush()
+    task = Task(
+        project_id=project.id,
+        title="Terminal sync task",
+        description="fail after debug parse",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add(task)
+    db_session.flush()
+    session_task = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(session_task)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(execution)
+    db_session.commit()
+
+    _sync_task_execution_from_task_state(
+        db_session,
+        execution.id,
+        task=task,
+        session_task_link=session_task,
+    )
+
+    db_session.refresh(execution)
+    assert execution.status == TaskStatus.FAILED
+    assert execution.completed_at is not None
+
+
 def test_task_retry_marks_attempt_failed_when_post_commit_dispatch_fails(
     authenticated_client, db_session, monkeypatch
 ):

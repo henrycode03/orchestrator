@@ -297,6 +297,27 @@ def test_phase8m_normalize_step_rejects_conflicting_replace_aliases(tmp_path):
         normalize_step(step, tmp_path, None, 1)
 
 
+def test_phase8o_contract_violation_reports_raw_op_keys(tmp_path):
+    step = _ops_only_step()
+    step["ops"] = [
+        {
+            "op": "replace_in_file",
+            "path": "./README.md",
+            "from_text": "draft",
+            "to_text": "ready",
+        },
+    ]
+
+    with pytest.raises(TaskOperationContractViolation) as exc_info:
+        normalize_step(step, tmp_path, None, 1)
+
+    message = str(exc_info.value)
+    assert "must contain keys" in message
+    assert "got raw keys" in message
+    assert "from_text" in message
+    assert "to_text" in message
+
+
 def test_phase8k_executor_runs_file_ops_in_order_and_reports_changed_files(tmp_path):
     (tmp_path / "README.md").write_text("Title\n", encoding="utf-8")
     tmp_dir = tmp_path / "tmp"
@@ -343,13 +364,14 @@ def test_phase8k_append_file_requires_existing_parent_directory(tmp_path):
     assert "parent directory does not exist" in result["output"]
 
 
-def test_phase8k_delete_file_rejects_missing_and_directory_targets(tmp_path):
+def test_phase8o_delete_file_accepts_missing_and_rejects_directory_targets(tmp_path):
     missing = ExecutorService.execute_file_ops(
         Path(tmp_path),
         [{"op": "delete_file", "path": "missing.txt"}],
     )
-    assert missing["success"] is False
-    assert "target does not exist" in missing["output"]
+    assert missing["success"] is True
+    assert missing["files_changed"] == []
+    assert "already absent" in missing["output"]
 
     (tmp_path / "src").mkdir()
     directory = ExecutorService.execute_file_ops(
@@ -358,6 +380,23 @@ def test_phase8k_delete_file_rejects_missing_and_directory_targets(tmp_path):
     )
     assert directory["success"] is False
     assert "target is not a file" in directory["output"]
+
+
+def test_phase8o_delete_file_is_idempotent_when_already_absent(tmp_path):
+    target = tmp_path / "scratch" / "remove-me.txt"
+    target.parent.mkdir()
+    target.write_text("remove me\n", encoding="utf-8")
+    operation = {"op": "delete_file", "path": "scratch/remove-me.txt"}
+
+    first = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
+    second = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
+
+    assert first["success"] is True
+    assert first["files_changed"] == ["scratch/remove-me.txt"]
+    assert second["success"] is True
+    assert second["files_changed"] == []
+    assert "already absent" in second["output"]
+    assert not target.exists()
 
 
 def test_phase8k_replace_in_file_requires_exactly_one_old_text(tmp_path):
@@ -386,6 +425,61 @@ def test_phase8k_replace_in_file_requires_exactly_one_old_text(tmp_path):
     )
     assert missing["success"] is False
     assert "not found" in missing["output"]
+
+
+def test_phase8o_replace_in_file_is_idempotent_when_already_applied(tmp_path):
+    target = tmp_path / "app_config.py"
+    target.write_text("DEBUG = False\n", encoding="utf-8")
+    operation = {
+        "op": "replace_in_file",
+        "path": "app_config.py",
+        "old": "DEBUG = False",
+        "new": "DEBUG = True",
+    }
+
+    first = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
+    second = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
+
+    assert first["success"] is True
+    assert first["files_changed"] == ["app_config.py"]
+    assert second["success"] is True
+    assert second["files_changed"] == []
+    assert "already applied" in second["output"]
+    assert target.read_text(encoding="utf-8") == "DEBUG = True\n"
+
+
+def test_phase8o_replace_in_file_still_fails_when_target_state_is_unproven(tmp_path):
+    target = tmp_path / "app_config.py"
+    target.write_text("DEBUG = None\n", encoding="utf-8")
+
+    missing_new = ExecutorService.execute_file_ops(
+        Path(tmp_path),
+        [
+            {
+                "op": "replace_in_file",
+                "path": "app_config.py",
+                "old": "DEBUG = False",
+                "new": "DEBUG = True",
+            }
+        ],
+    )
+    assert missing_new["success"] is False
+    assert "old text not found" in missing_new["output"]
+
+    target.write_text("DEBUG = True\nOTHER_DEBUG = True\n", encoding="utf-8")
+    ambiguous_new = ExecutorService.execute_file_ops(
+        Path(tmp_path),
+        [
+            {
+                "op": "replace_in_file",
+                "path": "app_config.py",
+                "old": "DEBUG = False",
+                "new": "DEBUG = True",
+            }
+        ],
+    )
+    assert ambiguous_new["success"] is False
+    assert "new text is ambiguous" in ambiguous_new["output"]
 
 
 def test_phase8k_executor_rejects_unsupported_op(tmp_path):

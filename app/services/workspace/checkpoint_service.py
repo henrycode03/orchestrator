@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from typing import Optional, Dict, Any, List
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,14 +41,18 @@ class CheckpointService:
         configured_dir = Path(settings.CHECKPOINT_DIR).expanduser()
         if not configured_dir.is_absolute():
             configured_dir = Path.cwd() / configured_dir
-        self.checkpoint_dir = configured_dir.resolve()
+        self._configured_checkpoint_dir = configured_dir.resolve()
+        self.checkpoint_dir = self._configured_checkpoint_dir
         # Ensure checkpoint directory exists
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def _candidate_checkpoint_roots(self) -> List[Path]:
         roots = [self.checkpoint_dir]
         legacy_dir = Path(self.LEGACY_CHECKPOINT_DIR)
-        if legacy_dir != self.checkpoint_dir:
+        if (
+            self.checkpoint_dir == getattr(self, "_configured_checkpoint_dir", None)
+            and legacy_dir != self.checkpoint_dir
+        ):
             try:
                 if legacy_dir.exists():
                     roots.append(legacy_dir)
@@ -81,11 +86,52 @@ class CheckpointService:
         """Get the file path for a specific checkpoint"""
         return str(self.checkpoint_dir / f"session_{session_id}_{checkpoint_name}.json")
 
+    def _checkpoint_owner_ids(self) -> Optional[tuple[int, int]]:
+        try:
+            stat_result = self.checkpoint_dir.stat()
+            return stat_result.st_uid, stat_result.st_gid
+        except OSError:
+            return None
+
+    def _normalize_checkpoint_file_ownership(self, path: Path) -> None:
+        owner_ids = self._checkpoint_owner_ids()
+        if owner_ids is None:
+            return
+        try:
+            os.chown(path, owner_ids[0], owner_ids[1])
+        except PermissionError:
+            return
+        except OSError:
+            logger.debug("Unable to normalize checkpoint ownership: %s", path)
+
+    def _write_checkpoint_json_atomic(
+        self, checkpoint_path: Path, payload: Dict[str, Any]
+    ) -> None:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path: Optional[Path] = None
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=checkpoint_path.parent,
+            prefix=f".{checkpoint_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, indent=2, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._normalize_checkpoint_file_ownership(temp_path)
+        temp_path.replace(checkpoint_path)
+        self._normalize_checkpoint_file_ownership(checkpoint_path)
+
     def _get_session_checkpoint_dir(self, session_id: int, create: bool = False) -> str:
         """Get the directory for all checkpoints of a session"""
         dir_path = self.checkpoint_dir / f"session_{session_id}"
         if create:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
+            self._normalize_checkpoint_file_ownership(dir_path)
         return str(dir_path)
 
     def _checkpoint_progress_score(self, data: Dict[str, Any]) -> int:
@@ -495,7 +541,9 @@ class CheckpointService:
             Checkpoint metadata including path and timestamp
         """
         try:
-            checkpoint_path = self._get_checkpoint_path(session_id, checkpoint_name)
+            checkpoint_path = Path(
+                self._get_checkpoint_path(session_id, checkpoint_name)
+            )
 
             # Create checkpoint data structure
             checkpoint_data = {
@@ -512,9 +560,7 @@ class CheckpointService:
                 },
             }
 
-            # Write to file
-            with open(checkpoint_path, "w") as f:
-                json.dump(checkpoint_data, f, indent=2, default=str)
+            self._write_checkpoint_json_atomic(checkpoint_path, checkpoint_data)
 
             # Log checkpoint creation
             self._log_checkpoint(
@@ -523,7 +569,7 @@ class CheckpointService:
 
             return {
                 "success": True,
-                "path": checkpoint_path,
+                "path": str(checkpoint_path),
                 "session_id": session_id,
                 "checkpoint_name": checkpoint_name,
                 "created_at": checkpoint_data["created_at"],

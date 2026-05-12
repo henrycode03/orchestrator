@@ -482,6 +482,7 @@ def normalize_file_ops(
             raise TaskOperationContractViolation(
                 f"{step_label} op {op_index} must be an object"
             )
+        raw_op_keys = list(operation.keys())
         operation = normalize_file_op_shape(operation)
         op_name = str(operation.get("op") or "").strip()
         if op_name not in SUPPORTED_FILE_OPS:
@@ -491,7 +492,8 @@ def normalize_file_ops(
         expected_keys = expected_file_op_keys(op_name)
         if set(operation.keys()) != expected_keys:
             raise TaskOperationContractViolation(
-                f"{step_label} op {op_index} must contain keys: {sorted(expected_keys)}"
+                f"{step_label} op {op_index} must contain keys: "
+                f"{sorted(expected_keys)}, got raw keys: {raw_op_keys}"
             )
         raw_path = str(operation.get("path") or "").strip()
         if not raw_path:

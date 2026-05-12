@@ -82,20 +82,22 @@ def _sync_task_execution_from_task_state(
     if not task_execution:
         return
 
-    current_status = (
-        getattr(session_task_link, "status", None)
-        or getattr(task, "status", None)
-        or task_execution.status
-    )
-    if task_execution.status in {
-        TaskStatus.DONE,
-        TaskStatus.FAILED,
-        TaskStatus.CANCELLED,
-    } and current_status not in {
-        TaskStatus.DONE,
-        TaskStatus.FAILED,
-        TaskStatus.CANCELLED,
-    }:
+    task_status = getattr(task, "status", None)
+    link_status = getattr(session_task_link, "status", None)
+    terminal_statuses = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}
+    if task_status in terminal_statuses:
+        current_status = task_status
+    else:
+        current_status = link_status or task_status or task_execution.status
+    if (
+        task_execution.status
+        in {
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+        and current_status not in terminal_statuses
+    ):
         return
     task_execution.status = current_status
     if getattr(session_task_link, "started_at", None) or getattr(

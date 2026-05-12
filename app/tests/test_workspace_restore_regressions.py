@@ -24,6 +24,32 @@ def test_workspace_restore_policy_only_allows_isolation_failures():
     assert not should_restore_workspace_on_failure("completion validation failed")
 
 
+def test_checkpoint_save_uses_atomic_file_and_leaves_no_temp_files(
+    db_session, tmp_path: Path
+):
+    checkpoint_service = CheckpointService(db_session)
+    checkpoint_service.checkpoint_dir = (tmp_path / "checkpoints").resolve()
+    checkpoint_service.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    result = checkpoint_service.save_checkpoint(
+        session_id=123,
+        checkpoint_name="autosave_latest",
+        context_data={"task_id": 456},
+        orchestration_state={"status": "EXECUTING", "plan": [{"step_number": 1}]},
+        current_step_index=1,
+        step_results=[{"status": "success"}],
+    )
+
+    checkpoint_path = Path(result["path"])
+    assert checkpoint_path.exists()
+    assert not list(checkpoint_service.checkpoint_dir.glob("*.tmp"))
+
+    loaded = checkpoint_service.load_checkpoint(123, "autosave_latest")
+    assert loaded["checkpoint_name"] == "autosave_latest"
+    assert loaded["context"]["task_id"] == 456
+    assert loaded["step_results"] == [{"status": "success"}]
+
+
 def test_restore_workspace_snapshot_preserves_existing_files_when_snapshot_is_empty(
     db_session, tmp_path: Path
 ):

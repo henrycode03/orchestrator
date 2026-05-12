@@ -380,11 +380,8 @@ class ExecutorService:
 
             if op_name == "delete_file":
                 if not target.exists():
-                    return {
-                        "success": False,
-                        "files_changed": files_changed,
-                        "output": f"delete_file target does not exist: {relative}",
-                    }
+                    output_lines.append(f"delete_file {relative} (already absent)")
+                    continue
                 if not target.is_file():
                     return {
                         "success": False,
@@ -464,6 +461,16 @@ class ExecutorService:
             original = target.read_text(encoding="utf-8")
             occurrence_count = original.count(old)
             if occurrence_count == 0:
+                already_applied_count = original.count(new) if new else 0
+                if already_applied_count == 1:
+                    output_lines.append(f"replace_in_file {relative} (already applied)")
+                    continue
+                if already_applied_count > 1:
+                    return {
+                        "success": False,
+                        "files_changed": files_changed,
+                        "output": f"replace_in_file old text not found and new text is ambiguous in {relative}: {already_applied_count} occurrences",
+                    }
                 return {
                     "success": False,
                     "files_changed": files_changed,
