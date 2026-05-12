@@ -336,6 +336,20 @@ def test_detect_placeholder_content_flags_broken_python_main_guard(tmp_path):
     )
 
 
+def test_detect_placeholder_content_accepts_single_quoted_python_main_guard(tmp_path):
+    entrypoint = tmp_path / "app.py"
+    entrypoint.write_text(
+        "if __name__ == '__main__':\n    print('ok')\n",
+        encoding="utf-8",
+    )
+
+    reasons = ValidatorService._detect_placeholder_content(entrypoint)
+
+    assert not any(
+        "broken Python __main__ entrypoint check" in reason for reason in reasons
+    )
+
+
 def _seed_finalize_ctx(db_session, tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()

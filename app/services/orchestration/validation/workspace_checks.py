@@ -121,7 +121,11 @@ def detect_placeholder_content(path: Path) -> List[str]:
         reasons.append(f"{path.name} still contains TODO or placeholder markers")
     if "notimplemented" in lowered or "raise notimplementederror" in lowered:
         reasons.append(f"{path.name} still contains not-implemented markers")
-    if "__main__" in content and 'if __name__ == "__main__"' not in content:
+    has_main_guard = re.search(
+        r"if\s+__name__\s*==\s*(['\"])__main__\1\s*:",
+        content,
+    )
+    if "__main__" in content and not has_main_guard:
         reasons.append(f"{path.name} has a broken Python __main__ entrypoint check")
     if path.suffix == ".py":
         try:
