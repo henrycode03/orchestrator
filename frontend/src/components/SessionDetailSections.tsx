@@ -160,6 +160,240 @@ const getDiagnosticReasons = (
   return Array.from(new Set(reasons)).slice(0, 5);
 };
 
+interface OperatorEvidence {
+  boundary: string;
+  operation?: string;
+  operations: OperationEvidence[];
+  targetPath?: string;
+  outcome: string;
+  reason?: string;
+  nextAction: string;
+}
+
+interface OperationEvidence {
+  op: string;
+  path?: string;
+  outcome?: string;
+}
+
+const FILE_OP_NAMES = ['replace_in_file', 'append_file', 'write_file', 'delete_file', 'mkdir'];
+
+const getStringValue = (
+  source: Record<string, unknown>,
+  keys: string[]
+): string | undefined => {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+};
+
+const humanizeEvidenceValue = (value: string): string =>
+  value.replace(/[_-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+const titleCaseEvidenceValue = (value: string): string =>
+  humanizeEvidenceValue(value).replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const detectOperation = (diagnostics: Record<string, unknown>, evidenceText: string) => {
+  const explicitOperation = getStringValue(diagnostics, [
+    'operation',
+    'op',
+    'op_name',
+    'structured_op',
+    'failed_op',
+  ]);
+  if (explicitOperation) return explicitOperation;
+  return FILE_OP_NAMES.find((name) => evidenceText.includes(name));
+};
+
+const detectBoundary = (diagnostics: Record<string, unknown>, evidenceText: string): string => {
+  const explicitBoundary = getStringValue(diagnostics, [
+    'boundary',
+    'failure_boundary',
+    'failure_class',
+    'contract_violation_type',
+  ]);
+  if (explicitBoundary) {
+    const normalizedBoundary = explicitBoundary.toLowerCase();
+    if (normalizedBoundary.includes('planning') && normalizedBoundary.includes('validation')) {
+      return 'Planning Validation';
+    }
+    if (normalizedBoundary.includes('completion') && normalizedBoundary.includes('repair')) {
+      return 'Completion Repair';
+    }
+    if (normalizedBoundary.includes('structured') || FILE_OP_NAMES.some((name) => normalizedBoundary.includes(name))) {
+      return 'Structured Operation';
+    }
+    if (normalizedBoundary.includes('workspace')) return 'Workspace Guard';
+    return titleCaseEvidenceValue(explicitBoundary);
+  }
+  if (evidenceText.includes('planning validation')) return 'Planning Validation';
+  if (evidenceText.includes('completion repair')) return 'Completion Repair';
+  if (evidenceText.includes('workspace_guard') || evidenceText.includes('workspace guard')) {
+    return 'Workspace Guard';
+  }
+  if (FILE_OP_NAMES.some((name) => evidenceText.includes(name))) {
+    return 'Structured Operation';
+  }
+  return 'Stopped Session Recovery';
+};
+
+const detectOutcome = (diagnostics: Record<string, unknown>, evidenceText: string): string => {
+  const explicitOutcome = getStringValue(diagnostics, ['outcome']);
+  if (explicitOutcome) return titleCaseEvidenceValue(explicitOutcome);
+  if (diagnostics.workspace_guard_blocked || evidenceText.includes('workspace guard')) {
+    return 'Blocked by workspace guard';
+  }
+  if (diagnostics.regex_fallback_applied || evidenceText.includes('regex replacement')) {
+    return 'Regex fallback applied';
+  }
+  if (diagnostics.already_applied || diagnostics.applied || evidenceText.includes('already applied')) {
+    return 'Already applied';
+  }
+  if (evidenceText.includes('repair_applied') || evidenceText.includes('replaced by repair')) {
+    return 'Replaced by repair';
+  }
+  if (evidenceText.includes('failed') || evidenceText.includes('not found')) {
+    return 'Failed';
+  }
+  return 'Needs operator decision';
+};
+
+const detectTargetPath = (diagnostics: Record<string, unknown>, evidenceText: string) => {
+  const explicitPath = getStringValue(diagnostics, ['target_path', 'path', 'file_path']);
+  if (explicitPath) return explicitPath;
+  const pathMatch =
+    evidenceText.match(/\bin\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/) ||
+    evidenceText.match(/\bpath[:=]\s*["']?([A-Za-z0-9_./-]+)/);
+  return pathMatch?.[1];
+};
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const extractOperationEvidence = (
+  details: Record<string, unknown>,
+  fallbackOperation?: string,
+  fallbackPath?: string,
+  fallbackOutcome?: string
+): OperationEvidence[] => {
+  const rawOperations = [
+    details.ops,
+    details.operations,
+    details.replacement_ops,
+    details.failed_ops,
+  ].find((value) => Array.isArray(value)) as unknown[] | undefined;
+  const singleOperation =
+    asRecord(details.failed_op) ||
+    asRecord(details.operation_detail) ||
+    asRecord(details.operation);
+  const operationRecords = rawOperations
+    ? rawOperations.map(asRecord).filter((value): value is Record<string, unknown> => Boolean(value))
+    : singleOperation
+      ? [singleOperation]
+      : [];
+
+  const operations: OperationEvidence[] = [];
+  operationRecords.forEach((operation) => {
+      const op = getStringValue(operation, ['op', 'operation', 'op_name', 'name']);
+      if (!op) return;
+      operations.push({
+        op,
+        path: getStringValue(operation, ['path', 'target_path', 'file_path']),
+        outcome: getStringValue(operation, ['outcome', 'status', 'result']),
+      });
+    });
+
+  if (operations.length > 0) {
+    return operations.slice(0, 3);
+  }
+  return fallbackOperation
+    ? [{ op: fallbackOperation, path: fallbackPath, outcome: fallbackOutcome }]
+    : [];
+};
+
+const getOperatorEvidence = (
+  summary: ExecutionFailureSummary,
+  canStartReplan: boolean,
+  replanStillOwnsFlow: boolean
+): OperatorEvidence => {
+  const diagnostics = (summary.diagnostics || {}) as Record<string, unknown>;
+  const reason = getStringValue(diagnostics, ['reason', 'message']) || summary.message;
+  const evidenceText = [
+    summary.summary,
+    reason,
+    JSON.stringify(diagnostics),
+  ].join(' ').toLowerCase();
+  const boundary = detectBoundary(diagnostics, evidenceText);
+  const operation = detectOperation(diagnostics, evidenceText);
+  const targetPath = detectTargetPath(diagnostics, evidenceText);
+  const outcome = detectOutcome(diagnostics, evidenceText);
+  const operations = extractOperationEvidence(diagnostics, operation, targetPath, outcome);
+  const nextAction = replanStillOwnsFlow
+    ? 'Open Project Architect'
+    : boundary === 'Workspace Guard'
+      ? 'Inspect workspace'
+      : canStartReplan
+        ? 'Send to Project Architect'
+        : 'Retry or inspect workspace';
+
+  return {
+    boundary,
+    operation,
+    operations,
+    targetPath,
+    outcome,
+    reason,
+    nextAction,
+  };
+};
+
+const getDecisionEventEvidence = (event: SessionDecisionEvent): OperatorEvidence | null => {
+  const details = event.details || {};
+  const evidenceText = [
+    event.title,
+    event.summary,
+    event.phase,
+    event.event_type,
+    event.status,
+    JSON.stringify(details),
+  ].join(' ').toLowerCase();
+
+  if (
+    event.severity !== 'error' &&
+    event.severity !== 'warning' &&
+    !FILE_OP_NAMES.some((name) => evidenceText.includes(name)) &&
+    !evidenceText.includes('planning validation') &&
+    !evidenceText.includes('completion repair') &&
+    !evidenceText.includes('workspace guard') &&
+    !evidenceText.includes('workspace_guard')
+  ) {
+    return null;
+  }
+
+  const boundary = detectBoundary(details, evidenceText);
+  const operation = detectOperation(details, evidenceText);
+  const targetPath = detectTargetPath(details, evidenceText);
+  const outcome = detectOutcome(details, evidenceText);
+
+  return {
+    boundary,
+    operation,
+    operations: extractOperationEvidence(details, operation, targetPath, outcome),
+    targetPath,
+    outcome,
+    reason: getStringValue(details, ['reason', 'message', 'error']) || event.summary,
+    nextAction: boundary === 'Workspace Guard'
+      ? 'Inspect workspace'
+      : 'Review recovery path',
+  };
+};
+
 const formatRunDuration = (session: Session): string => {
   if (!session.started_at) return 'Not started';
   const startedAt = new Date(session.started_at);
@@ -1020,6 +1254,7 @@ export function SessionTimelinePanel({
               .map((event) => {
                 const diagnosticBadges = getDiagnosticBadges(event.details);
                 const diagnosticReasons = getDiagnosticReasons(event.details);
+                const operatorEvidence = getDecisionEventEvidence(event);
 
                 return (
                   <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
@@ -1051,6 +1286,45 @@ export function SessionTimelinePanel({
                       </span>
                     </div>
                     <p className="mt-1 break-words text-slate-200">{event.summary}</p>
+                    {operatorEvidence && (
+                      <div className="mt-2 grid gap-2 rounded-md border border-orange-400/25 bg-orange-400/10 p-2 text-xs sm:grid-cols-2">
+                        <p className="break-words text-slate-300">
+                          <span className="text-slate-500">Boundary:</span>{' '}
+                          <span className="font-medium text-slate-100">{operatorEvidence.boundary}</span>
+                        </p>
+                        <p className="break-words text-slate-300">
+                          <span className="text-slate-500">Outcome:</span>{' '}
+                          <span className="font-medium text-slate-100">{operatorEvidence.outcome}</span>
+                        </p>
+                        {operatorEvidence.operation && (
+                          <p className="break-words font-mono text-slate-200">
+                            {operatorEvidence.operation}
+                          </p>
+                        )}
+                        {operatorEvidence.targetPath && (
+                          <p className="break-words font-mono text-slate-200">
+                            {operatorEvidence.targetPath}
+                          </p>
+                        )}
+                        <p className="break-words text-orange-200 sm:col-span-2">
+                          {operatorEvidence.nextAction}
+                        </p>
+                        {operatorEvidence.operations.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 sm:col-span-2">
+                            {operatorEvidence.operations.map((operation, index) => (
+                              <span
+                                key={`${operation.op}-${operation.path || 'no-path'}-${index}`}
+                                className="rounded-sm border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-1.5 py-0.5 font-mono text-xs text-slate-200"
+                              >
+                                {operation.op}
+                                {operation.path ? ` ${operation.path}` : ''}
+                                {operation.outcome ? ` (${humanizeEvidenceValue(operation.outcome)})` : ''}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {diagnosticBadges.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         {diagnosticBadges.map((badge) => (
@@ -1274,7 +1548,7 @@ export function SessionTasksPanel({
                   <button
                     onClick={() => onExecuteTask(task)}
                     disabled={task.status === 'running'}
-                    className="rounded-lg border border-emerald-500/70 bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-600 hover:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {task.status === 'done'
                       ? 'Run again in workflow session'
@@ -1888,6 +2162,7 @@ export function FailureSummaryPanel({
     !hasPriorReplan || ['failed', 'cancelled', 'canceled'].includes(replanStatus || '');
   const diagnosticBadges = getDiagnosticBadges(summary.diagnostics);
   const diagnosticReasons = getDiagnosticReasons(summary.diagnostics);
+  const operatorEvidence = getOperatorEvidence(summary, canStartReplan, replanStillOwnsFlow);
 
   return (
     <div className="space-y-4">
@@ -1966,6 +2241,60 @@ export function FailureSummaryPanel({
               </p>
             )}
           </div>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-slate-200">Operator evidence</p>
+          <span className="rounded-sm border border-orange-400/40 bg-orange-400/10 px-2 py-0.5 text-xs text-orange-200">
+            {operatorEvidence.nextAction}
+          </span>
+        </div>
+        <div className="grid gap-3 text-sm md:grid-cols-2">
+          <div>
+            <p className="text-xs text-slate-500">Boundary</p>
+            <p className="mt-1 font-medium text-slate-100">{operatorEvidence.boundary}</p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">Outcome</p>
+            <p className="mt-1 font-medium text-slate-100">{operatorEvidence.outcome}</p>
+          </div>
+          {operatorEvidence.operation && (
+            <div>
+              <p className="text-xs text-slate-500">Structured operation</p>
+              <p className="mt-1 font-mono text-sm text-slate-100">
+                {operatorEvidence.operation}
+              </p>
+            </div>
+          )}
+          {operatorEvidence.targetPath && (
+            <div>
+              <p className="text-xs text-slate-500">Target</p>
+              <p className="mt-1 break-words font-mono text-sm text-slate-100">
+                {operatorEvidence.targetPath}
+              </p>
+            </div>
+          )}
+        </div>
+        {operatorEvidence.operations.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {operatorEvidence.operations.map((operation, index) => (
+              <span
+                key={`${operation.op}-${operation.path || 'no-path'}-${index}`}
+                className="rounded-sm border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-2 py-1 font-mono text-xs text-slate-200"
+              >
+                {operation.op}
+                {operation.path ? ` ${operation.path}` : ''}
+                {operation.outcome ? ` (${humanizeEvidenceValue(operation.outcome)})` : ''}
+              </span>
+            ))}
+          </div>
+        )}
+        {operatorEvidence.reason && (
+          <p className="mt-3 break-words rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-xs text-slate-300">
+            {operatorEvidence.reason}
+          </p>
         )}
       </div>
 

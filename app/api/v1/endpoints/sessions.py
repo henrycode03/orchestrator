@@ -688,6 +688,7 @@ class RequestInterventionBody(BaseModel):
     task_id: Optional[int] = None
     context_snapshot: Optional[Dict[str, Any]] = None
     expires_in_minutes: int = 120
+    initiated_by: str = "human"
 
 
 class InterventionReplyBody(BaseModel):
@@ -724,6 +725,7 @@ async def request_human_intervention(
         task_id=body.task_id,
         context_snapshot=body.context_snapshot,
         expires_in_minutes=body.expires_in_minutes,
+        initiated_by=body.initiated_by,
     )
     req = _get_session_intervention_or_404(db, session_id, result["intervention_id"])
     payload = _serialize_intervention(req)

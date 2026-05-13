@@ -176,6 +176,25 @@ export interface ExecutionFailureSummary {
 
 export interface FailureDiagnostics {
   reason?: string;
+  boundary?: string;
+  failure_boundary?: string;
+  failure_class?: string;
+  operation?: string;
+  op?: string;
+  op_name?: string;
+  structured_op?: string;
+  target_path?: string;
+  path?: string;
+  outcome?: string;
+  applied?: boolean;
+  already_applied?: boolean;
+  regex_fallback_applied?: boolean;
+  workspace_guard_blocked?: boolean;
+  ops?: Array<Record<string, unknown>>;
+  operations?: Array<Record<string, unknown>>;
+  replacement_ops?: Array<Record<string, unknown>>;
+  failed_ops?: Array<Record<string, unknown>>;
+  failed_op?: Record<string, unknown>;
   contract_violation_type?: string;
   validation_reasons?: string[];
   contract_violations?: string[];

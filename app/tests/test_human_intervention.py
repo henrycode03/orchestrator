@@ -518,6 +518,27 @@ class TestInterventionAPIEndpoints:
             "Session 'api-hitl-session' is now waiting for human input"
         )
 
+    def test_request_intervention_can_seed_agent_initiated_prompt(
+        self, authenticated_client: TestClient, api_project_and_session: dict
+    ):
+        session_id = api_project_and_session["session_id"]
+        with (
+            patch(_REVOKE_PATH),
+            patch(_CHECKPOINT_PATH) as mock_cs,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            resp = authenticated_client.post(
+                f"/api/v1/sessions/{session_id}/request-intervention",
+                json={
+                    "intervention_type": "guidance",
+                    "prompt": "Need operator guidance",
+                    "initiated_by": "ai",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["initiated_by"] == "ai"
+
     def test_request_intervention_bad_type(
         self, authenticated_client: TestClient, api_project_and_session: dict
     ):
