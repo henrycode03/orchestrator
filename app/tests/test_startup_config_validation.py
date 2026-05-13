@@ -68,12 +68,14 @@ def test_settings_accepts_short_runtime_config_names():
         AGENT_MODEL="local",
         PLANNING_REPAIR_ENABLED=False,
         LANGFUSE_ENABLED=True,
+        WORKSPACE_REVIEW_POLICY="hold_all",
     )
 
     assert settings.AGENT_BACKEND == "local_openclaw"
     assert settings.AGENT_MODEL == "local"
     assert settings.PLANNING_REPAIR_ENABLED is False
     assert settings.LANGFUSE_ENABLED is True
+    assert settings.WORKSPACE_REVIEW_POLICY == "hold_all"
 
 
 def test_settings_keeps_legacy_orchestrator_env_aliases():
@@ -86,6 +88,7 @@ def test_settings_keeps_legacy_orchestrator_env_aliases():
         ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED=False,
         ORCHESTRATOR_LANGFUSE_ENABLED=True,
         ORCHESTRATOR_FORCE_INLINE_PLANNING=True,
+        ORCHESTRATOR_WORKSPACE_REVIEW_POLICY="auto_publish_all",
     )
 
     assert settings.AGENT_BACKEND == "openai_responses_api"
@@ -93,6 +96,16 @@ def test_settings_keeps_legacy_orchestrator_env_aliases():
     assert settings.PLANNING_REPAIR_ENABLED is False
     assert settings.LANGFUSE_ENABLED is True
     assert settings.INLINE_PLANNING is True
+    assert settings.WORKSPACE_REVIEW_POLICY == "auto_publish_all"
+
+
+def test_settings_rejects_unknown_workspace_review_policy():
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError, match="WORKSPACE_REVIEW_POLICY"):
+        Settings(_env_file=None, WORKSPACE_REVIEW_POLICY="always_merge")
 
 
 def test_validate_raises_on_default_secret_key(monkeypatch):

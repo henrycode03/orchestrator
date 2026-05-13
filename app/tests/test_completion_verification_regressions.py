@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 from types import SimpleNamespace
 
 from app.models import (
+    LogEntry,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -20,6 +22,7 @@ from app.services.orchestration.phases.completion_flow import (
     _execute_completion_verification,
     finalize_successful_task,
 )
+from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationState, StepResult
@@ -780,6 +783,94 @@ def _seed_finalize_ctx(db_session, tmp_path):
     return ctx, execution
 
 
+def _seed_legacy_finalize_ctx(db_session, tmp_path, *, task_subfolder="task-work"):
+    project_root = tmp_path / "legacy-project"
+    workspace_dir = project_root / task_subfolder
+    workspace_dir.mkdir(parents=True)
+    project = Project(name="Legacy Finalize", workspace_path=str(project_root))
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(
+        project_id=project.id,
+        name="Legacy Finalize Session",
+        status="running",
+        is_active=True,
+        execution_mode="manual",
+        instance_id="legacy-finalize-session",
+    )
+    task = Task(
+        project_id=project.id,
+        title="Legacy Finalize Task",
+        status=TaskStatus.RUNNING,
+        task_subfolder=task_subfolder,
+    )
+    db_session.add_all([session, task])
+    db_session.flush()
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+
+    state = OrchestrationState(
+        session_id=str(session.id),
+        task_description="Create project files",
+        project_name="Legacy Finalize",
+        task_id=task.id,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create files",
+                "commands": ["true"],
+                "verification": "test -d .",
+                "rollback": None,
+                "expected_files": [],
+            }
+        ],
+    )
+    state._project_dir_override = str(workspace_dir)
+    state.execution_results = [
+        StepResult(
+            step_number=1,
+            status="success",
+            output="created",
+            files_changed=[],
+        )
+    ]
+    task_service = TaskService(db_session)
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=link,
+        session_id=session.id,
+        task_id=task.id,
+        prompt="Create project files",
+        timeout_seconds=120,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=False,
+        orchestration_state=state,
+        runtime_service=_FakeRuntime(),
+        task_service=task_service,
+        logger=logging.getLogger("legacy-finalize-test"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=SimpleNamespace(),
+        task_execution_id=execution.id,
+        restore_workspace_snapshot_if_needed=lambda reason: None,
+    )
+    return ctx, execution, project_root, workspace_dir
+
+
 def test_final_verification_7f_gate_repairs_when_classifier_misses(
     db_session, tmp_path, monkeypatch
 ):
@@ -840,6 +931,241 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
     assert repair_calls[0].details["failure_class"] == "import_error"
     assert ctx.orchestration_state.debug_repair_task_execution_ids == []
     assert ctx.task.status == TaskStatus.DONE
+
+
+def test_auto_completion_stamps_change_set_metadata_on_trivial_publish(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    task_service = ctx.task_service
+    snapshot_key = workspace_snapshot_key(ctx.task_id, execution.id)
+    task_service.create_workspace_snapshot(
+        ctx.project,
+        workspace_dir,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=False,
+    )
+    (workspace_dir / "src").mkdir()
+    (workspace_dir / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={"expected_core_files": ["src/app.py"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_baseline_publish",
+        lambda **kwargs: ValidationVerdict(
+            stage="baseline_publish",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={},
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert (project_root / "src" / "app.py").exists()
+    publish_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_id == ctx.task_id)
+        .filter(LogEntry.message.like("[ORCHESTRATION] Published task workspace%"))
+        .one()
+    )
+    payload = json.loads(publish_log.log_metadata)
+    assert payload["workspace_review_policy"] == "hold_nontrivial"
+    assert payload["accepted_change_set"]["task_execution_id"] == execution.id
+    assert payload["accepted_change_set"]["change_set"]["added_files"] == ["src/app.py"]
+
+
+def test_auto_completion_holds_nontrivial_change_set_for_manual_review(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    task_service = ctx.task_service
+    (workspace_dir / "README.md").write_text("before\n", encoding="utf-8")
+    (workspace_dir / "old.md").write_text("old\n", encoding="utf-8")
+    snapshot_key = workspace_snapshot_key(ctx.task_id, execution.id)
+    task_service.create_workspace_snapshot(
+        ctx.project,
+        workspace_dir,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=False,
+    )
+    (workspace_dir / "README.md").write_text("after\n", encoding="utf-8")
+    (workspace_dir / "old.md").unlink()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="mutation",
+            reasons=[],
+            details={"expected_core_files": ["README.md"]},
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert not (project_root / "README.md").exists()
+    assert workspace_dir.exists()
+    assert ctx.task.workspace_status == "ready"
+    review_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_id == ctx.task_id)
+        .filter(
+            LogEntry.message == "[ORCHESTRATION] Held task workspace for manual review"
+        )
+        .one()
+    )
+    payload = json.loads(review_log.log_metadata)
+    assert payload["auto_publish_skipped"] is True
+    assert payload["reason"] == "nontrivial_change_set_review_required"
+    assert payload["workspace_review_policy"] == "hold_nontrivial"
+    assert "deleted_files" in payload["warning_flags"]
+
+
+def test_auto_publish_all_policy_publishes_nontrivial_change_set(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    task_service = ctx.task_service
+    (workspace_dir / "README.md").write_text("before\n", encoding="utf-8")
+    (workspace_dir / "old.md").write_text("old\n", encoding="utf-8")
+    snapshot_key = workspace_snapshot_key(ctx.task_id, execution.id)
+    task_service.create_workspace_snapshot(
+        ctx.project,
+        workspace_dir,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=False,
+    )
+    (workspace_dir / "README.md").write_text("after\n", encoding="utf-8")
+    (workspace_dir / "old.md").unlink()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.get_effective_workspace_review_policy",
+        lambda default_policy, db=None: "auto_publish_all",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="mutation",
+            reasons=[],
+            details={"expected_core_files": ["README.md"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_baseline_publish",
+        lambda **kwargs: ValidationVerdict(
+            stage="baseline_publish",
+            status="accepted",
+            profile="mutation",
+            reasons=[],
+            details={},
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "after\n"
+    assert not (project_root / "old.md").exists()
+    assert ctx.task.workspace_status == "promoted"
+    publish_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_id == ctx.task_id)
+        .filter(LogEntry.message.like("[ORCHESTRATION] Published task workspace%"))
+        .one()
+    )
+    payload = json.loads(publish_log.log_metadata)
+    assert payload["workspace_review_policy"] == "auto_publish_all"
+    assert (
+        "deleted_files" in payload["accepted_change_set"]["change_set"]["warning_flags"]
+    )
+
+
+def test_hold_all_policy_holds_trivial_change_set_for_manual_review(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    task_service = ctx.task_service
+    snapshot_key = workspace_snapshot_key(ctx.task_id, execution.id)
+    task_service.create_workspace_snapshot(
+        ctx.project,
+        workspace_dir,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=False,
+    )
+    (workspace_dir / "src").mkdir()
+    (workspace_dir / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.get_effective_workspace_review_policy",
+        lambda default_policy, db=None: "hold_all",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={"expected_core_files": ["src/app.py"]},
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert not (project_root / "src" / "app.py").exists()
+    assert workspace_dir.exists()
+    review_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_id == ctx.task_id)
+        .filter(
+            LogEntry.message == "[ORCHESTRATION] Held task workspace for manual review"
+        )
+        .one()
+    )
+    payload = json.loads(review_log.log_metadata)
+    assert payload["auto_publish_skipped"] is True
+    assert payload["workspace_review_policy"] == "hold_all"
+    assert payload["warning_flags"] == []
 
 
 def test_final_verification_repair_runs_with_prior_execution_debug_attempt(

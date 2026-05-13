@@ -63,13 +63,18 @@ export interface TaskExecutionChangeSetResponse {
   recorded_at: string | null;
 }
 
-export type TaskStatus = 'pending' | 'running' | 'failed' | 'done' | 'cancelled';
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "failed"
+  | "done"
+  | "cancelled";
 export type ExecutionProfile =
-  | 'full_lifecycle'
-  | 'execute_only'
-  | 'test_only'
-  | 'debug_only'
-  | 'review_only';
+  | "full_lifecycle"
+  | "execute_only"
+  | "test_only"
+  | "debug_only"
+  | "review_only";
 
 export interface Session {
   id: number;
@@ -78,7 +83,7 @@ export interface Session {
   description: string | null;
   is_active: boolean;
   status: SessionStatus;
-  execution_mode: 'automatic' | 'manual';
+  execution_mode: "automatic" | "manual";
   default_execution_profile: ExecutionProfile;
   last_alert_level?: string | null;
   last_alert_message?: string | null;
@@ -118,15 +123,15 @@ export interface PlannerTaskCandidate {
 }
 
 export type PlanningSessionStatus =
-  | 'active'
-  | 'waiting_for_input'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+  | "active"
+  | "waiting_for_input"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface PlanningMessage {
   id: number;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   prompt_id?: string | null;
   content: string;
   metadata_json?: Record<string, unknown> | null;
@@ -135,7 +140,12 @@ export interface PlanningMessage {
 
 export interface PlanningArtifact {
   id: number;
-  artifact_type: 'requirements' | 'design' | 'implementation_plan' | 'planner_markdown' | string;
+  artifact_type:
+    | "requirements"
+    | "design"
+    | "implementation_plan"
+    | "planner_markdown"
+    | string;
   filename: string;
   content: string;
   created_at: string;
@@ -169,18 +179,24 @@ export interface PlanningCommitPreview extends PlanningSession {
   tasks: Task[];
 }
 
-export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed' | 'awaiting_input';
+export type SessionStatus =
+  | "pending"
+  | "running"
+  | "paused"
+  | "stopped"
+  | "completed"
+  | "awaiting_input";
 
 export interface InterventionRequest {
   id: number;
   session_id: number;
   task_id: number | null;
   project_id: number;
-  intervention_type: 'guidance' | 'approval' | 'information';
-  initiated_by: 'ai' | 'human' | string;
+  intervention_type: "guidance" | "approval" | "information";
+  initiated_by: "ai" | "human" | string;
   prompt: string;
   context_snapshot: string | null;
-  status: 'pending' | 'replied' | 'approved' | 'denied' | 'expired';
+  status: "pending" | "replied" | "approved" | "denied" | "expired";
   operator_reply: string | null;
   operator_id: string | null;
   created_at: string;
@@ -287,7 +303,7 @@ export interface SortedLogsResponse {
   returned_logs: number;
   offset?: number;
   limit?: number;
-  sort_order: 'asc' | 'desc';
+  sort_order: "asc" | "desc";
   deduplicated: boolean;
   logs: LogEntry[];
   has_more?: boolean;
@@ -297,7 +313,7 @@ export interface TaskSortedLogsResponse {
   task_id: number;
   total_logs: number;
   returned_logs: number;
-  sort_order: 'asc' | 'desc';
+  sort_order: "asc" | "desc";
   deduplicated: boolean;
   logs: LogEntry[];
 }
@@ -341,7 +357,7 @@ export interface Checkpoint {
   resume_reason?: string | null;
   restore_fidelity?: {
     score: number;
-    status: 'high' | 'medium' | 'low';
+    status: "high" | "medium" | "low";
     summary: string;
     present_signals: string[];
     warnings: string[];
@@ -416,7 +432,7 @@ export interface CheckpointInspection {
   };
   restore_fidelity?: {
     score: number;
-    status: 'high' | 'medium' | 'low';
+    status: "high" | "medium" | "low";
     summary: string;
     present_signals: string[];
     warnings: string[];
@@ -440,14 +456,14 @@ export interface OrchestrationEvent {
 }
 
 export type SessionDecisionPhase =
-  | 'planning'
-  | 'validation'
-  | 'execution'
-  | 'failure'
-  | 'completion'
-  | 'system';
+  | "planning"
+  | "validation"
+  | "execution"
+  | "failure"
+  | "completion"
+  | "system";
 
-export type SessionDecisionSeverity = 'info' | 'warning' | 'error' | string;
+export type SessionDecisionSeverity = "info" | "warning" | "error" | string;
 
 export interface SessionDecisionEvent {
   id: string;
@@ -508,7 +524,7 @@ export interface SessionStateDiffResponse {
 }
 
 export interface ReplayDeterminism {
-  level: 'strong' | 'bounded' | 'degraded' | 'failed' | string;
+  level: "strong" | "bounded" | "degraded" | "failed" | string;
   artifact_gaps: number;
   workspace_reconstructable: boolean;
   notes: string[];
@@ -536,7 +552,7 @@ export interface SessionReplayResponse {
     artifacts: string[];
   };
   integrity: {
-    confidence: 'high' | 'medium' | 'low' | 'failed' | string;
+    confidence: "high" | "medium" | "low" | "failed" | string;
     event_count_read: number;
     event_count_applied: number;
     malformed_line_count: number;
@@ -591,7 +607,7 @@ export interface SessionDivergenceCompareResponse {
 export interface SessionDispatchWatchdogTask {
   task_id: number;
   task_title: string;
-  dispatch_state: 'queued' | 'claimed' | 'rejected' | 'unknown';
+  dispatch_state: "queued" | "claimed" | "rejected" | "unknown";
   queued_at?: string | null;
   claimed_at?: string | null;
   rejected_at?: string | null;
@@ -683,6 +699,11 @@ export interface AppSettings {
     };
     supported_backends: BackendDescriptor[];
     orchestration_policy_profile: string;
+    workspace_review_policy:
+      | "auto_publish_all"
+      | "hold_nontrivial"
+      | "hold_all"
+      | string;
     available_policy_profiles: PolicyProfile[];
     available_adaptation_profiles: Array<{
       name: string;

@@ -35,13 +35,16 @@ from app.services.workspace.system_settings import (
     AGENT_BACKEND_KEY,
     AGENT_MODEL_FAMILY_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
+    WORKSPACE_REVIEW_POLICY_KEY,
     WORKSPACE_ROOT_KEY,
     get_effective_adaptation_profile,
     get_effective_agent_backend,
     get_effective_agent_model_family,
     get_effective_mobile_gateway_key,
     get_effective_policy_profile,
+    get_effective_workspace_review_policy,
     get_effective_workspace_root,
+    normalize_workspace_review_policy,
     set_setting_value,
 )
 
@@ -105,6 +108,9 @@ def get_app_settings(
     )
     effective_adaptation_profile = get_effective_adaptation_profile(db=db)
     effective_policy_profile = get_effective_policy_profile(db=db)
+    effective_workspace_review_policy = get_effective_workspace_review_policy(
+        settings.WORKSPACE_REVIEW_POLICY, db=db
+    )
     backend = get_backend_descriptor(effective_backend_name)
     mobile_key, key_source = get_effective_mobile_gateway_key(
         settings.MOBILE_GATEWAY_API_KEY,
@@ -136,6 +142,7 @@ def get_app_settings(
             "orchestration_policy_profile": get_policy_profile(
                 effective_policy_profile
             ).name,
+            "workspace_review_policy": effective_workspace_review_policy,
             "available_policy_profiles": [
                 profile.to_dict() for profile in list_policy_profiles()
             ],
@@ -350,6 +357,31 @@ def update_system_settings(
             changes["orchestration_policy_profile"] = {
                 "from": previous_policy,
                 "to": profile.name,
+            }
+
+    if payload.workspace_review_policy is not None:
+        previous_review_policy = get_effective_workspace_review_policy(
+            settings.WORKSPACE_REVIEW_POLICY, db=db
+        )
+        try:
+            review_policy = normalize_workspace_review_policy(
+                payload.workspace_review_policy
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        set_setting_value(
+            db,
+            WORKSPACE_REVIEW_POLICY_KEY,
+            review_policy,
+            description="Operator-selected task workspace review policy",
+        )
+        if previous_review_policy != review_policy:
+            changes["workspace_review_policy"] = {
+                "from": previous_review_policy,
+                "to": review_policy,
             }
 
     _log_system_setting_change(db, current_user=current_user, changes=changes)

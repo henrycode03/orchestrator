@@ -27,6 +27,7 @@ LEGACY_ENV_ALIASES = {
     "ORCHESTRATOR_ADMIN_EMAILS": "ADMIN_EMAILS",
     "ORCHESTRATOR_MOBILE_BASE_URL": "MOBILE_BASE_URL",
     "ORCHESTRATOR_FORCE_INLINE_PLANNING": "INLINE_PLANNING",
+    "ORCHESTRATOR_WORKSPACE_REVIEW_POLICY": "WORKSPACE_REVIEW_POLICY",
 }
 
 
@@ -149,6 +150,18 @@ class Settings(BaseSettings):
     DEMO_MODE: bool = False  # Disabled (real execution enabled)
     ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
     INLINE_PLANNING: bool = False
+    WORKSPACE_REVIEW_POLICY: str = "hold_nontrivial"
+
+    @field_validator("WORKSPACE_REVIEW_POLICY")
+    @classmethod
+    def validate_workspace_review_policy(cls, value: str) -> str:
+        policy = str(value or "").strip() or "hold_nontrivial"
+        allowed = {"auto_publish_all", "hold_nontrivial", "hold_all"}
+        if policy not in allowed:
+            raise ValueError(
+                "WORKSPACE_REVIEW_POLICY must be one of: " + ", ".join(sorted(allowed))
+            )
+        return policy
 
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"

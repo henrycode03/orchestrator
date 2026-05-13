@@ -30,7 +30,10 @@ from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
 )
-from app.services.orchestration.execution.runtime import write_project_state_snapshot
+from app.services.orchestration.execution.runtime import (
+    workspace_snapshot_key,
+    write_project_state_snapshot,
+)
 from app.services.orchestration.execution.step_support import (
     coerce_execution_step_result,
 )
@@ -54,6 +57,7 @@ from app.services.orchestration.validation.parsing import (
     extract_structured_text,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.workspace.system_settings import get_effective_workspace_review_policy
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
     _augment_completion_verification_command,
@@ -1365,89 +1369,146 @@ def finalize_successful_task(
                         "reason": "completion_verification_failed",
                     }
 
+    task_change_set = None
+    if (
+        project
+        and task
+        and ctx.task_execution_id
+        and hasattr(task_service, "persist_task_execution_change_set")
+    ):
+        task_change_set = task_service.persist_task_execution_change_set(
+            project,
+            task,
+            session_id=session_id,
+            task_execution_id=ctx.task_execution_id,
+            snapshot_key=workspace_snapshot_key(task_id, ctx.task_execution_id),
+            target_dir=Path(orchestration_state.project_dir),
+            preserve_project_root_rules=runs_in_canonical_baseline,
+            status=TaskStatus.DONE.value,
+            commit=False,
+        )
+
+    nontrivial_change_flags = list((task_change_set or {}).get("warning_flags") or [])
+    workspace_review_policy = get_effective_workspace_review_policy(
+        settings.WORKSPACE_REVIEW_POLICY, db=db
+    )
+    should_hold_for_review = workspace_review_policy == "hold_all" or (
+        workspace_review_policy == "hold_nontrivial" and bool(nontrivial_change_flags)
+    )
     baseline_publish_result = None
     baseline_publish_validation = None
     if project and task.task_subfolder and not runs_in_canonical_baseline:
-        baseline_publish_result = task_service.auto_publish_task_into_baseline(
-            project, task
-        )
-        baseline_materialization = task_service.validate_task_baseline_materialization(
-            project, task
-        )
-        baseline_overview = task_service.validate_project_baseline(
-            project, current_task=task
-        )
-        baseline_publish_validation = ValidatorService.validate_baseline_publish(
-            validation_profile=validation_profile,
-            baseline_path=baseline_materialization.get("baseline_path") or "",
-            baseline_file_count=baseline_materialization.get("baseline_file_count", 0),
-            missing_task_expected_files=baseline_materialization.get(
-                "missing_expected_files", []
-            ),
-            missing_prior_expected_files=baseline_overview.get(
-                "missing_expected_files", []
-            ),
-            consistency_issues=baseline_materialization.get("consistency_issues", []),
-            consistency_details=baseline_materialization.get("consistency"),
-            relaxed_mode=orchestration_state.relaxed_mode,
-            validation_severity=ctx.validation_severity,
-        )
-        record_validation_verdict(
-            db,
-            session_id,
-            task_id,
-            orchestration_state,
-            baseline_publish_validation,
-        )
-        db.commit()
-        if baseline_publish_validation.warning:
+        if should_hold_for_review:
+            baseline_publish_result = {
+                "auto_publish_skipped": True,
+                "reason": "nontrivial_change_set_review_required",
+                "files_copied": 0,
+                "accepted_change_set": task_change_set,
+                "warning_flags": nontrivial_change_flags,
+                "workspace_review_policy": workspace_review_policy,
+            }
             emit_live(
                 "WARN",
-                "[ORCHESTRATION] Baseline publish passed with validator warnings",
+                "[ORCHESTRATION] Task change set recorded; holding workspace for manual review instead of auto-publishing",
                 metadata={
                     "phase": "baseline_publish",
-                    "validation_status": baseline_publish_validation.status,
-                    "reasons": baseline_publish_validation.reasons[:10],
-                    "relaxed_mode": orchestration_state.relaxed_mode,
+                    "reason": "nontrivial_change_set_review_required",
+                    "warning_flags": nontrivial_change_flags,
+                    "changed_count": (task_change_set or {}).get("changed_count", 0),
+                    "workspace_review_policy": workspace_review_policy,
                 },
             )
-
-        if not baseline_publish_validation.accepted:
-            baseline_error = "Baseline publish validation failed: " + "; ".join(
-                baseline_publish_validation.reasons[:5]
+        else:
+            baseline_publish_result = task_service.auto_publish_task_into_baseline(
+                project, task
             )
-            orchestration_state.status = OrchestrationStatus.ABORTED
-            orchestration_state.abort_reason = baseline_error
-            task.status = TaskStatus.FAILED
-            task.completed_at = datetime.now(UTC)
-            task.error_message = baseline_error
-            task.current_step = len(orchestration_state.plan)
-            task.workspace_status = "blocked"
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = task.completed_at
-            if session:
-                session.status = "paused"
-                session.is_active = False
-                set_session_alert(session, "error", baseline_error[:2000])
+            baseline_publish_result["workspace_review_policy"] = workspace_review_policy
+            if task_change_set:
+                baseline_publish_result["accepted_change_set"] = {
+                    "task_execution_id": ctx.task_execution_id,
+                    "change_set": task_change_set,
+                }
+            baseline_materialization = (
+                task_service.validate_task_baseline_materialization(project, task)
+            )
+            baseline_overview = task_service.validate_project_baseline(
+                project, current_task=task
+            )
+            baseline_publish_validation = ValidatorService.validate_baseline_publish(
+                validation_profile=validation_profile,
+                baseline_path=baseline_materialization.get("baseline_path") or "",
+                baseline_file_count=baseline_materialization.get(
+                    "baseline_file_count", 0
+                ),
+                missing_task_expected_files=baseline_materialization.get(
+                    "missing_expected_files", []
+                ),
+                missing_prior_expected_files=baseline_overview.get(
+                    "missing_expected_files", []
+                ),
+                consistency_issues=baseline_materialization.get(
+                    "consistency_issues", []
+                ),
+                consistency_details=baseline_materialization.get("consistency"),
+                relaxed_mode=orchestration_state.relaxed_mode,
+                validation_severity=ctx.validation_severity,
+            )
+            record_validation_verdict(
+                db,
+                session_id,
+                task_id,
+                orchestration_state,
+                baseline_publish_validation,
+            )
             db.commit()
-            emit_live(
-                "ERROR",
-                "[ORCHESTRATION] Baseline publish failed validation",
-                metadata={
-                    "phase": "baseline_publish",
-                    "validation_status": baseline_publish_validation.status,
-                    "reasons": baseline_publish_validation.reasons[:10],
-                },
-            )
-            save_orchestration_checkpoint_fn(
-                db, session_id, task_id, prompt, orchestration_state
-            )
-            write_project_state_snapshot_fn(db, project, task, session_id)
-            return {
-                "status": "failed",
-                "reason": "baseline_publish_validation_failed",
-            }
+            if baseline_publish_validation.warning:
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Baseline publish passed with validator warnings",
+                    metadata={
+                        "phase": "baseline_publish",
+                        "validation_status": baseline_publish_validation.status,
+                        "reasons": baseline_publish_validation.reasons[:10],
+                        "relaxed_mode": orchestration_state.relaxed_mode,
+                    },
+                )
+
+            if not baseline_publish_validation.accepted:
+                baseline_error = "Baseline publish validation failed: " + "; ".join(
+                    baseline_publish_validation.reasons[:5]
+                )
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = baseline_error
+                task.status = TaskStatus.FAILED
+                task.completed_at = datetime.now(UTC)
+                task.error_message = baseline_error
+                task.current_step = len(orchestration_state.plan)
+                task.workspace_status = "blocked"
+                if session_task_link:
+                    session_task_link.status = TaskStatus.FAILED
+                    session_task_link.completed_at = task.completed_at
+                if session:
+                    session.status = "paused"
+                    session.is_active = False
+                    set_session_alert(session, "error", baseline_error[:2000])
+                db.commit()
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Baseline publish failed validation",
+                    metadata={
+                        "phase": "baseline_publish",
+                        "validation_status": baseline_publish_validation.status,
+                        "reasons": baseline_publish_validation.reasons[:10],
+                    },
+                )
+                save_orchestration_checkpoint_fn(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
+                write_project_state_snapshot_fn(db, project, task, session_id)
+                return {
+                    "status": "failed",
+                    "reason": "baseline_publish_validation_failed",
+                }
 
         _run_evaluator(
             runtime_service=runtime_service,
@@ -1464,7 +1525,12 @@ def finalize_successful_task(
     task.summary = summary_result.get("output", "")[:2000]
     task.current_step = len(orchestration_state.plan)
     promoted_workspace_archive_result = None
-    if baseline_publish_result and project and task.task_subfolder:
+    if (
+        baseline_publish_result
+        and not baseline_publish_result.get("auto_publish_skipped")
+        and project
+        and task.task_subfolder
+    ):
         promoted_workspace_archive_result = (
             task_service.archive_promoted_task_workspace(project, task)
         )
@@ -1568,6 +1634,7 @@ def finalize_successful_task(
     )
 
     if baseline_publish_result:
+        publish_skipped = bool(baseline_publish_result.get("auto_publish_skipped"))
         db.add(
             LogEntry(
                 session_id=session_id,
@@ -1575,8 +1642,12 @@ def finalize_successful_task(
                 task_id=task_id,
                 level="INFO",
                 message=(
-                    "[ORCHESTRATION] Published task workspace into canonical project baseline "
-                    f"({baseline_publish_result.get('files_copied', 0)} files)"
+                    "[ORCHESTRATION] Held task workspace for manual review"
+                    if publish_skipped
+                    else (
+                        "[ORCHESTRATION] Published task workspace into canonical project baseline "
+                        f"({baseline_publish_result.get('files_copied', 0)} files)"
+                    )
                 ),
                 log_metadata=json.dumps(baseline_publish_result),
             )

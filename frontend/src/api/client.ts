@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios from "axios";
 import type {
   Project,
   Task,
@@ -30,29 +30,29 @@ import type {
   InterventionRequest,
   ExecutionFailureSummary,
   KnowledgeUsageResponse,
-} from '../types/api';
+} from "../types/api";
 
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
-  (import.meta.env.DEV ? '/api/v1' : 'http://localhost:8080/api/v1');
+  (import.meta.env.DEV ? "/api/v1" : "http://localhost:8080/api/v1");
 
 const getBrowserSafeHost = (host: string): string => {
   if (!host) {
     return host;
   }
 
-  const [hostname, ...portParts] = host.split(':');
-  const portSuffix = portParts.length > 0 ? `:${portParts.join(':')}` : '';
+  const [hostname, ...portParts] = host.split(":");
+  const portSuffix = portParts.length > 0 ? `:${portParts.join(":")}` : "";
 
   // 0.0.0.0 is valid bind address for servers, but not a stable browser target.
-  if (hostname === '0.0.0.0') {
-    const fallbackHost = window.location.hostname || '127.0.0.1';
+  if (hostname === "0.0.0.0") {
+    const fallbackHost = window.location.hostname || "127.0.0.1";
     return `${fallbackHost}${portSuffix}`;
   }
 
   // Firefox can prefer IPv6 for localhost during WebSocket connection attempts,
   // while local dev servers are commonly bound only on IPv4.
-  if (hostname === 'localhost') {
+  if (hostname === "localhost") {
     return `127.0.0.1${portSuffix}`;
   }
 
@@ -77,7 +77,7 @@ const getWebSocketHost = (): string => {
 
     // In local dev, a relative API base like "/api/v1" means the HTTP calls
     // are using the Vite proxy. WebSockets should target the backend directly.
-    return `${getBrowserSafeHost(window.location.hostname || '127.0.0.1')}:8080`;
+    return `${getBrowserSafeHost(window.location.hostname || "127.0.0.1")}:8080`;
   }
 
   // Keep WS host aligned with the API base URL when possible.
@@ -85,14 +85,14 @@ const getWebSocketHost = (): string => {
     const apiUrl = new URL(API_BASE_URL, window.location.origin);
     return getBrowserSafeHost(apiUrl.host);
   } catch {
-    return `${getBrowserSafeHost(window.location.hostname || '127.0.0.1')}:8080`;
+    return `${getBrowserSafeHost(window.location.hostname || "127.0.0.1")}:8080`;
   }
 };
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   headers: {
-    'Content-Type': 'application/json',
+    "Content-Type": "application/json",
   },
   timeout: 60000, // 60 second timeout for initial requests (page load, auth)
   withCredentials: true, // send httpOnly session cookie on every request
@@ -103,43 +103,43 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      window.location.href = '/login';
+      window.location.href = "/login";
     }
     return Promise.reject(error);
-  }
+  },
 );
 
 // Auth API
 export const authAPI = {
   login: (email: string, password: string) =>
-    apiClient.post<User>('/auth/session/login', { email, password }),
+    apiClient.post<User>("/auth/session/login", { email, password }),
 
-  logout: () =>
-    apiClient.post('/auth/session/logout'),
+  logout: () => apiClient.post("/auth/session/logout"),
 
   register: (email: string, password: string) =>
-    apiClient.post('/auth/register', { email, password }),
+    apiClient.post("/auth/register", { email, password }),
 
-  getMe: () => apiClient.get<User>('/auth/me'),
+  getMe: () => apiClient.get<User>("/auth/me"),
 
-  createApiKey: (name: string) =>
-    apiClient.post('/auth/api-keys', { name }),
+  createApiKey: (name: string) => apiClient.post("/auth/api-keys", { name }),
 
-  getApiKeys: () => apiClient.get<Array<{ id: number; name: string; created_at: string }>>('/auth/api-keys'),
+  getApiKeys: () =>
+    apiClient.get<Array<{ id: number; name: string; created_at: string }>>(
+      "/auth/api-keys",
+    ),
 
-  revokeApiKey: (id: number) =>
-    apiClient.delete(`/auth/api-keys/${id}`),
+  revokeApiKey: (id: number) => apiClient.delete(`/auth/api-keys/${id}`),
 
   getWsTicket: () =>
-    apiClient.post<{ ticket: string; expires_at: string }>('/auth/ws-ticket'),
+    apiClient.post<{ ticket: string; expires_at: string }>("/auth/ws-ticket"),
 };
 
 export const settingsAPI = {
-  get: () => apiClient.get<AppSettings>('/settings'),
+  get: () => apiClient.get<AppSettings>("/settings"),
   updateProfile: (data: { name?: string | null }) =>
-    apiClient.patch<AppSettings>('/settings/profile', data),
+    apiClient.patch<AppSettings>("/settings/profile", data),
   changePassword: (data: { current_password: string; new_password: string }) =>
-    apiClient.post('/settings/password', data),
+    apiClient.post("/settings/password", data),
   updateSystem: (data: {
     workspace_root?: string;
     mobile_api_key?: string;
@@ -148,26 +148,35 @@ export const settingsAPI = {
     agent_model_family?: string;
     agent_adaptation_profile?: string;
     orchestration_policy_profile?: string;
-  }) => apiClient.patch<AppSettings>('/settings/system', data),
-  revealMobileSecret: () => apiClient.get('/settings/mobile-secret'),
+    workspace_review_policy?: string;
+  }) => apiClient.patch<AppSettings>("/settings/system", data),
+  revealMobileSecret: () => apiClient.get("/settings/mobile-secret"),
 };
 
 // Projects API
 export const projectsAPI = {
-  getAll: () => apiClient.get<Project[]>('/projects'),
+  getAll: () => apiClient.get<Project[]>("/projects"),
 
   getById: (id: number) => apiClient.get<Project>(`/projects/${id}`),
 
-  create: (data: { name: string; description?: string; project_rules?: string; github_url?: string; branch?: string; workspace_path?: string }) =>
-    apiClient.post<Project>('/projects', data),
+  create: (data: {
+    name: string;
+    description?: string;
+    project_rules?: string;
+    github_url?: string;
+    branch?: string;
+    workspace_path?: string;
+  }) => apiClient.post<Project>("/projects", data),
 
   update: (id: number, data: Partial<Project>) =>
     apiClient.put<Project>(`/projects/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/projects/${id}`),
 
-  getSessions: (projectId: number) => apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
-  getPlans: (projectId: number) => apiClient.get<Plan[]>(`/projects/${projectId}/plans`),
+  getSessions: (projectId: number) =>
+    apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
+  getPlans: (projectId: number) =>
+    apiClient.get<Plan[]>(`/projects/${projectId}/plans`),
   getWorkspaceOverview: (projectId: number) =>
     apiClient.get<{
       project_id: number;
@@ -233,7 +242,11 @@ export const projectsAPI = {
       baseline_path: string;
       promoted_task_count: number;
       files_copied: number;
-      applied_tasks: Array<{ task_id: number; title: string; files_copied: number }>;
+      applied_tasks: Array<{
+        task_id: number;
+        title: string;
+        files_copied: number;
+      }>;
     }>(`/projects/${projectId}/baseline/rebuild`),
   cleanupWorkspaces: (
     projectId: number,
@@ -242,7 +255,7 @@ export const projectsAPI = {
       include_ready?: boolean;
       include_changes_requested?: boolean;
       include_blocked?: boolean;
-    }
+    },
   ) =>
     apiClient.post<{
       project_id: number;
@@ -251,15 +264,25 @@ export const projectsAPI = {
       archive_root: string;
       candidate_count: number;
       deleted_count: number;
-      candidates: Array<{ task_id: number; title: string; task_subfolder: string; archive_path: string }>;
-      deleted: Array<{ task_id: number; title: string; task_subfolder: string; archive_path: string }>;
+      candidates: Array<{
+        task_id: number;
+        title: string;
+        task_subfolder: string;
+        archive_path: string;
+      }>;
+      deleted: Array<{
+        task_id: number;
+        title: string;
+        task_subfolder: string;
+        archive_path: string;
+      }>;
     }>(`/projects/${projectId}/workspace-cleanup`, options || {}),
   restoreWorkspaceArchive: (
     projectId: number,
     data: {
       task_id: number;
       archive_path: string;
-    }
+    },
   ) =>
     apiClient.post<{
       project_id: number;
@@ -278,34 +301,45 @@ export const projectsAPI = {
     limit?: number,
     level?: string,
     search?: string,
-    order: 'asc' | 'desc' = 'desc'
+    order: "asc" | "desc" = "desc",
   ) => {
     const params = new URLSearchParams();
-    if (limit) params.append('limit', limit.toString());
-    if (level) params.append('level', level);
-    if (search) params.append('search', search);
-    params.append('order', order);
-    
-    return apiClient.get<ProjectLogsResponse>(`/projects/${projectId}/logs?${params.toString()}`);
+    if (limit) params.append("limit", limit.toString());
+    if (level) params.append("level", level);
+    if (search) params.append("search", search);
+    params.append("order", order);
+
+    return apiClient.get<ProjectLogsResponse>(
+      `/projects/${projectId}/logs?${params.toString()}`,
+    );
   },
 
   // WebSocket logs stream for project — fetches a short-lived ticket first
   getLogsStream: async (projectId: number) => {
     const { data } = await authAPI.getWsTicket();
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const apiHost = getWebSocketHost();
     return new WebSocket(
-      `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream?ticket=${data.ticket}`
+      `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream?ticket=${data.ticket}`,
     );
   },
 };
 
 export const plannerAPI = {
-  generate: (data: { project_id: number; requirement: string; source_brain?: string }) =>
-    apiClient.post<{ plan: Plan; tasks_preview: PlannerTaskCandidate[] }>('/planner/generate', data),
+  generate: (data: {
+    project_id: number;
+    requirement: string;
+    source_brain?: string;
+  }) =>
+    apiClient.post<{ plan: Plan; tasks_preview: PlannerTaskCandidate[] }>(
+      "/planner/generate",
+      data,
+    ),
 
   parse: (markdown: string) =>
-    apiClient.post<{ tasks: PlannerTaskCandidate[] }>('/planner/parse', { markdown }),
+    apiClient.post<{ tasks: PlannerTaskCandidate[] }>("/planner/parse", {
+      markdown,
+    }),
 
   batchCreateTasks: (
     projectId: number,
@@ -316,8 +350,12 @@ export const plannerAPI = {
       requirement?: string;
       source_brain?: string;
       tasks: PlannerTaskCandidate[];
-    }
-  ) => apiClient.post<{ plan: Plan | null; tasks: Task[] }>(`/projects/${projectId}/batch-tasks`, data),
+    },
+  ) =>
+    apiClient.post<{ plan: Plan | null; tasks: Task[] }>(
+      `/projects/${projectId}/batch-tasks`,
+      data,
+    ),
 
   deletePlan: (projectId: number, planId: number) =>
     apiClient.delete(`/projects/${projectId}/plans/${planId}`),
@@ -331,24 +369,30 @@ export const plannerAPI = {
       markdown?: string;
       source_brain?: string;
       status?: string;
-    }
+    },
   ) => apiClient.put<Plan>(`/projects/${projectId}/plans/${planId}`, data),
 };
 
 export const planningAPI = {
   list: (projectId?: number) =>
-    apiClient.get<PlanningSessionSummary[]>('/planning/sessions', {
+    apiClient.get<PlanningSessionSummary[]>("/planning/sessions", {
       params: projectId ? { project_id: projectId } : undefined,
     }),
 
-  start: (data: { project_id: number; prompt: string; source_brain?: string; skip_clarification?: boolean }) =>
-    apiClient.post<PlanningSession>('/planning/sessions', data),
+  start: (data: {
+    project_id: number;
+    prompt: string;
+    source_brain?: string;
+    skip_clarification?: boolean;
+  }) => apiClient.post<PlanningSession>("/planning/sessions", data),
 
   get: (sessionId: number) =>
     apiClient.get<PlanningSession>(`/planning/sessions/${sessionId}`),
 
   respond: (sessionId: number, response: string) =>
-    apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/respond`, { response }),
+    apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/respond`, {
+      response,
+    }),
 
   cancel: (sessionId: number) =>
     apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/cancel`),
@@ -361,18 +405,30 @@ export const planningAPI = {
 
   commit: (
     sessionId: number,
-    data?: { selected_tasks?: PlannerTaskCandidate[]; planner_markdown?: string }
-  ) => apiClient.post<PlanningCommitPreview>(`/planning/sessions/${sessionId}/commit`, data || {}),
+    data?: {
+      selected_tasks?: PlannerTaskCandidate[];
+      planner_markdown?: string;
+    },
+  ) =>
+    apiClient.post<PlanningCommitPreview>(
+      `/planning/sessions/${sessionId}/commit`,
+      data || {},
+    ),
 };
 
 // Tasks API
 export const tasksAPI = {
-  getAll: () => apiClient.get<Task[]>('/tasks'),
+  getAll: () => apiClient.get<Task[]>("/tasks"),
 
-  create: (data: { project_id: number; title: string; description?: string; priority?: number }) =>
-    apiClient.post<Task>('/tasks', data),
+  create: (data: {
+    project_id: number;
+    title: string;
+    description?: string;
+    priority?: number;
+  }) => apiClient.post<Task>("/tasks", data),
 
-  getByProject: (projectId: number) => apiClient.get<Task[]>(`/projects/${projectId}/tasks`),
+  getByProject: (projectId: number) =>
+    apiClient.get<Task[]>(`/projects/${projectId}/tasks`),
 
   getById: (id: number) => apiClient.get<Task>(`/tasks/${id}`),
 
@@ -384,9 +440,9 @@ export const tasksAPI = {
     id: number,
     data?: {
       session_id?: number;
-      execution_scope?: 'workflow_session' | 'new_session';
+      execution_scope?: "workflow_session" | "new_session";
       create_new_session?: boolean;
-    }
+    },
   ) => apiClient.post(`/tasks/${id}/retry`, data || {}),
   promoteWorkspace: (id: number, note?: string) =>
     apiClient.post<Task>(`/tasks/${id}/promote`, { note }),
@@ -394,8 +450,10 @@ export const tasksAPI = {
     apiClient.post<Task>(`/tasks/${id}/request-changes`, { note }),
   getChangeSet: (id: number) =>
     apiClient.get<TaskExecutionChangeSetResponse>(`/tasks/${id}/change-set`),
-  rejectChangeSet: (id: number, data?: { task_execution_id?: number; note?: string }) =>
-    apiClient.post(`/tasks/${id}/change-set/reject`, data || {}),
+  rejectChangeSet: (
+    id: number,
+    data?: { task_execution_id?: number; note?: string },
+  ) => apiClient.post(`/tasks/${id}/change-set/reject`, data || {}),
 
   start: (id: number) => apiClient.post(`/tasks/${id}/start`),
 
@@ -410,7 +468,7 @@ export const tasksAPI = {
       task_id?: number;
       log_timeout_minutes?: number;
       monitor_logs?: boolean;
-    }
+    },
   ) =>
     apiClient.post(`/sessions/${sessionId}/execute`, data, {
       timeout: 600000, // 10 minutes for task execution (OpenClaw CLI can take a while for complex tasks)
@@ -419,33 +477,43 @@ export const tasksAPI = {
   // Get sorted logs for a task
   getSortedLogs: (
     id: number,
-    order: 'asc' | 'desc' = 'desc',
+    order: "asc" | "desc" = "desc",
     deduplicate: boolean = true,
     level?: string,
     limit?: number,
-    offset: number = 0
+    offset: number = 0,
   ) => {
     const params = new URLSearchParams();
-    params.append('order', order);
-    params.append('deduplicate', deduplicate.toString());
-    if (level) params.append('level', level);
-    if (limit) params.append('limit', limit.toString());
-    params.append('offset', offset.toString());
-    
-    return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`, {
-      timeout: 60000, // 1 minute - much faster with database sorting + pagination
-    });
+    params.append("order", order);
+    params.append("deduplicate", deduplicate.toString());
+    if (level) params.append("level", level);
+    if (limit) params.append("limit", limit.toString());
+    params.append("offset", offset.toString());
+
+    return apiClient.get<TaskSortedLogsResponse>(
+      `/tasks/${id}/logs/sorted?${params.toString()}`,
+      {
+        timeout: 60000, // 1 minute - much faster with database sorting + pagination
+      },
+    );
   },
 };
 
 // Sessions API
 export const sessionsAPI = {
-  getAll: (params?: SessionFilters) => apiClient.get<Session[]>('/sessions', { params }),
+  getAll: (params?: SessionFilters) =>
+    apiClient.get<Session[]>("/sessions", { params }),
 
-  create: (data: { project_id: number; name: string; description?: string; execution_mode?: 'automatic' | 'manual'; default_execution_profile?: ExecutionProfile }) =>
-    apiClient.post<Session>('/sessions', data),
+  create: (data: {
+    project_id: number;
+    name: string;
+    description?: string;
+    execution_mode?: "automatic" | "manual";
+    default_execution_profile?: ExecutionProfile;
+  }) => apiClient.post<Session>("/sessions", data),
 
-  getByProject: (projectId: number) => apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
+  getByProject: (projectId: number) =>
+    apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
 
   getById: (id: number) => apiClient.get<Session>(`/sessions/${id}`),
 
@@ -457,8 +525,8 @@ export const sessionsAPI = {
   // Lifecycle endpoints
   start: (id: number) => apiClient.post(`/sessions/${id}/start`),
 
-  stop: (id: number, force?: boolean) => 
-    apiClient.post(`/sessions/${id}/stop`, undefined, { 
+  stop: (id: number, force?: boolean) =>
+    apiClient.post(`/sessions/${id}/stop`, undefined, {
       params: { force },
       timeout: 120000, // 2 minutes for session stop (may take time to terminate OpenClaw CLI)
     }),
@@ -470,22 +538,45 @@ export const sessionsAPI = {
   refreshTasks: (id: number) =>
     apiClient.post<{
       session_id: number;
-      execution_mode: 'automatic' | 'manual';
-      counts: { total: number; pending: number; running: number; done: number; failed: number };
-      queued_task?: { task_id: number; task_name: string; celery_id: string; plan_position?: number | null } | null;
+      execution_mode: "automatic" | "manual";
+      counts: {
+        total: number;
+        pending: number;
+        running: number;
+        done: number;
+        failed: number;
+      };
+      queued_task?: {
+        task_id: number;
+        task_name: string;
+        celery_id: string;
+        plan_position?: number | null;
+      } | null;
     }>(`/sessions/${id}/refresh-tasks`),
 
   runTask: (sessionId: number, taskId: number) =>
     apiClient.post<{
       status: string;
       session_id: number;
-      execution_mode: 'automatic' | 'manual';
-      queued_task: { task_id: number; task_name: string; celery_id: string; plan_position?: number | null };
+      execution_mode: "automatic" | "manual";
+      queued_task: {
+        task_id: number;
+        task_name: string;
+        celery_id: string;
+        plan_position?: number | null;
+      };
     }>(`/sessions/${sessionId}/tasks/${taskId}/run`),
 
   // Overwrite protection endpoints
-  checkOverwrites: (sessionId: number, data: { project_id: number; task_subfolder: string; planned_files?: string[] }) =>
-    apiClient.post<{ 
+  checkOverwrites: (
+    sessionId: number,
+    data: {
+      project_id: number;
+      task_subfolder: string;
+      planned_files?: string[];
+    },
+  ) =>
+    apiClient.post<{
       safe_to_proceed: boolean;
       workspace_exists: boolean;
       file_count: number;
@@ -495,7 +586,7 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/check-overwrites`, data),
 
   createBackup: (sessionId: number) =>
-    apiClient.post<{ 
+    apiClient.post<{
       success: boolean;
       backup_path?: string;
       files_backed_up?: number;
@@ -507,14 +598,14 @@ export const sessionsAPI = {
 
   // Checkpoint management endpoints
   saveCheckpoint: (sessionId: number) =>
-    apiClient.post<{ 
+    apiClient.post<{
       success: boolean;
       session_id: number;
       message: string;
     }>(`/sessions/${sessionId}/checkpoint/save`),
 
   listCheckpoints: (sessionId: number) =>
-    apiClient.get<{ 
+    apiClient.get<{
       session_id: number;
       total_count: number;
       recommended_checkpoint_name?: string | null;
@@ -522,18 +613,18 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/checkpoints`),
 
   loadCheckpoint: (sessionId: number, checkpointName?: string) =>
-    apiClient.post<{ 
+    apiClient.post<{
       success: boolean;
       session_key: string;
       message: string;
       session_id: number;
     }>(`/sessions/${sessionId}/checkpoint/load`, undefined, {
-      params: { checkpoint_name: checkpointName || '' },
+      params: { checkpoint_name: checkpointName || "" },
     }),
 
   inspectCheckpoint: (sessionId: number, checkpointName: string) =>
     apiClient.get<CheckpointInspection>(
-      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`
+      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`,
     ),
 
   getTaskEvents: (sessionId: number, taskId: number, eventType?: string) =>
@@ -547,7 +638,7 @@ export const sessionsAPI = {
 
   getDecisionTimeline: (sessionId: number) =>
     apiClient.get<SessionDecisionTimelineResponse>(
-      `/sessions/${sessionId}/decision-timeline`
+      `/sessions/${sessionId}/decision-timeline`,
     ),
 
   getReplay: (
@@ -559,7 +650,7 @@ export const sessionsAPI = {
       timestamp?: string;
       snapshot_index?: number;
       checkpoint_name?: string;
-    }
+    },
   ) =>
     apiClient.get<SessionReplayResponse>(`/sessions/${sessionId}/replay`, {
       params,
@@ -567,7 +658,11 @@ export const sessionsAPI = {
 
   getSessionDiff: (
     sessionId: number,
-    params?: { task_id?: number; from_checkpoint?: number; to_checkpoint?: number }
+    params?: {
+      task_id?: number;
+      from_checkpoint?: number;
+      to_checkpoint?: number;
+    },
   ) =>
     apiClient.get<SessionStateDiffResponse>(`/sessions/${sessionId}/diff`, {
       params,
@@ -578,7 +673,7 @@ export const sessionsAPI = {
       `/sessions/${sessionId}/compare-divergence`,
       {
         params: { limit },
-      }
+      },
     ),
 
   getSessionDispatchWatchdog: (sessionId: number, syncAlert: boolean = true) =>
@@ -586,79 +681,108 @@ export const sessionsAPI = {
       `/sessions/${sessionId}/dispatch-watchdog`,
       {
         params: { sync_alert: syncAlert },
-      }
+      },
     ),
 
   replayCheckpoint: (sessionId: number, checkpointName: string) =>
-    apiClient.post<{ 
+    apiClient.post<{
       success: boolean;
       session_key: string;
       message: string;
       session_id: number;
       replay_requested: boolean;
     }>(
-      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}/replay`
+      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}/replay`,
     ),
 
   deleteCheckpoint: (sessionId: number, checkpointName: string) =>
-    apiClient.delete<{ 
+    apiClient.delete<{
       success: boolean;
       message: string;
-    }>(`/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`),
+    }>(
+      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`,
+    ),
 
-  cleanupCheckpoints: (sessionId: number, keepLatest?: number, maxAgeHours?: number) =>
-    apiClient.post<{ 
+  cleanupCheckpoints: (
+    sessionId: number,
+    keepLatest?: number,
+    maxAgeHours?: number,
+  ) =>
+    apiClient.post<{
       success: boolean;
       deleted_count: number;
       kept_count: number;
-    }>(`/sessions/${sessionId}/checkpoint/cleanup`, undefined, { 
+    }>(`/sessions/${sessionId}/checkpoint/cleanup`, undefined, {
       params: {
         keep_latest: keepLatest || 3,
         max_age_hours: maxAgeHours || 24,
-      }
+      },
     }),
 
   startSession: (id: number, taskDescription: string) =>
-  apiClient.post(`/sessions/${id}/start`, { task_description: taskDescription }),
+    apiClient.post(`/sessions/${id}/start`, {
+      task_description: taskDescription,
+    }),
   startOpenClaw: (id: number, taskDescription: string) =>
-  apiClient.post(`/sessions/${id}/start`, { task_description: taskDescription }),
+    apiClient.post(`/sessions/${id}/start`, {
+      task_description: taskDescription,
+    }),
 
-  execute: (id: number, data: { task: string; timeout_seconds?: number; task_id?: number }) =>
-    apiClient.post(`/sessions/${id}/execute`, data),
+  execute: (
+    id: number,
+    data: { task: string; timeout_seconds?: number; task_id?: number },
+  ) => apiClient.post(`/sessions/${id}/execute`, data),
 
   generateSteps: (data: { task_name: string; description: string }) =>
-    apiClient.post<Array<{ title: string; description: string }>>('/generate-steps', data),
+    apiClient.post<Array<{ title: string; description: string }>>(
+      "/generate-steps",
+      data,
+    ),
 
   getLogs: (id: number) =>
     apiClient.get<{ logs: LogEntry[]; total: number }>(`/sessions/${id}/logs`),
 
-  getTools: (id: number) => apiClient.get<Array<{ id: number; tool_name: string; parameters: string; result: string; executed_at: string }>>(`/sessions/${id}/tools`),
+  getTools: (id: number) =>
+    apiClient.get<
+      Array<{
+        id: number;
+        tool_name: string;
+        parameters: string;
+        result: string;
+        executed_at: string;
+      }>
+    >(`/sessions/${id}/tools`),
 
-  getStatistics: (id: number) => apiClient.get<SessionStatistics>(`/sessions/${id}/statistics`),
+  getStatistics: (id: number) =>
+    apiClient.get<SessionStatistics>(`/sessions/${id}/statistics`),
 
-  trackTool: (id: number, data: { tool_name: string; parameters: string; result: string }) =>
-    apiClient.post(`/sessions/${id}/tools/track`, data),
+  trackTool: (
+    id: number,
+    data: { tool_name: string; parameters: string; result: string },
+  ) => apiClient.post(`/sessions/${id}/tools/track`, data),
 
   getPromptTemplate: (id: number, templateName: string) =>
-    apiClient.get<{ template: string; variables: string[] }>(`/sessions/${id}/prompts/${templateName}`),
+    apiClient.get<{ template: string; variables: string[] }>(
+      `/sessions/${id}/prompts/${templateName}`,
+    ),
 
   // WebSocket status stream — fetches a short-lived ticket first
   getStatusStream: async (id: number) => {
     const { data } = await authAPI.getWsTicket();
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const apiHost = getWebSocketHost();
     return new WebSocket(
-      `${protocol}//${apiHost}/api/v1/sessions/${id}/status?ticket=${data.ticket}`
+      `${protocol}//${apiHost}/api/v1/sessions/${id}/status?ticket=${data.ticket}`,
     );
   },
 
   // WebSocket logs stream — fetches a short-lived ticket first
   getLogsStream: async (id: number) => {
     const { data } = await authAPI.getWsTicket();
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const apiHost = getWebSocketHost();
     return new WebSocket(
-      `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream?ticket=${data.ticket}`
+      `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream?ticket=${data.ticket}`,
     );
   },
 
@@ -671,12 +795,16 @@ export const sessionsAPI = {
       task_id?: number;
       context_snapshot?: Record<string, unknown>;
       expires_in_minutes?: number;
-    }
-  ) => apiClient.post<InterventionRequest>(`/sessions/${sessionId}/request-intervention`, data),
+    },
+  ) =>
+    apiClient.post<InterventionRequest>(
+      `/sessions/${sessionId}/request-intervention`,
+      data,
+    ),
 
   addOperatorGuidance: (
     sessionId: number,
-    data: { guidance: string; task_id?: number }
+    data: { guidance: string; task_id?: number },
   ) =>
     apiClient.post<{
       session_id: number;
@@ -687,66 +815,90 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/operator-guidance`, data),
 
   listInterventions: (sessionId: number, pendingOnly?: boolean) =>
-    apiClient.get<{ session_id: number; interventions: InterventionRequest[]; total: number }>(
-      `/sessions/${sessionId}/interventions`,
-      { params: pendingOnly !== undefined ? { pending_only: pendingOnly } : undefined }
-    ),
+    apiClient.get<{
+      session_id: number;
+      interventions: InterventionRequest[];
+      total: number;
+    }>(`/sessions/${sessionId}/interventions`, {
+      params:
+        pendingOnly !== undefined ? { pending_only: pendingOnly } : undefined,
+    }),
 
-  replyToIntervention: (sessionId: number, interventionId: number, data: { reply: string }) =>
+  replyToIntervention: (
+    sessionId: number,
+    interventionId: number,
+    data: { reply: string },
+  ) =>
     apiClient.post<InterventionRequest>(
       `/sessions/${sessionId}/interventions/${interventionId}/reply`,
-      data
+      data,
     ),
 
   approveIntervention: (sessionId: number, interventionId: number) =>
     apiClient.post<InterventionRequest>(
-      `/sessions/${sessionId}/interventions/${interventionId}/approve`
+      `/sessions/${sessionId}/interventions/${interventionId}/approve`,
     ),
 
-  denyIntervention: (sessionId: number, interventionId: number, data?: { reason?: string }) =>
+  denyIntervention: (
+    sessionId: number,
+    interventionId: number,
+    data?: { reason?: string },
+  ) =>
     apiClient.post<InterventionRequest>(
       `/sessions/${sessionId}/interventions/${interventionId}/deny`,
-      data || {}
+      data || {},
     ),
 
   // Replan flow endpoints
   getFailureSummary: (sessionId: number) =>
-    apiClient.get<ExecutionFailureSummary>(`/sessions/${sessionId}/failure-summary`, {
-      timeout: 120000, // LLM summary generation can take up to 2 min
-    }),
-
-  submitOperatorFeedback: (sessionId: number, feedback: string) =>
-    apiClient.post<ExecutionFailureSummary>(`/sessions/${sessionId}/operator-feedback`, { feedback }),
-
-  replanSession: (sessionId: number) =>
-    apiClient.post<{ planning_session_id: number; session_id: number; message: string }>(
-      `/sessions/${sessionId}/replan`
+    apiClient.get<ExecutionFailureSummary>(
+      `/sessions/${sessionId}/failure-summary`,
+      {
+        timeout: 120000, // LLM summary generation can take up to 2 min
+      },
     ),
 
+  submitOperatorFeedback: (sessionId: number, feedback: string) =>
+    apiClient.post<ExecutionFailureSummary>(
+      `/sessions/${sessionId}/operator-feedback`,
+      { feedback },
+    ),
+
+  replanSession: (sessionId: number) =>
+    apiClient.post<{
+      planning_session_id: number;
+      session_id: number;
+      message: string;
+    }>(`/sessions/${sessionId}/replan`),
+
   getKnowledgeUsage: (sessionId: number) =>
-    apiClient.get<KnowledgeUsageResponse>(`/sessions/${sessionId}/knowledge-usage`),
+    apiClient.get<KnowledgeUsageResponse>(
+      `/sessions/${sessionId}/knowledge-usage`,
+    ),
 
   // Get sorted logs (with sorting and deduplication options)
   getSortedLogs: (
     id: number,
-    order: 'asc' | 'desc' = 'desc',
+    order: "asc" | "desc" = "desc",
     deduplicate: boolean = true,
     level?: string,
     limit?: number,
-    offset: number = 0
+    offset: number = 0,
   ) => {
     const params = new URLSearchParams();
-    params.append('order', order);
-    params.append('deduplicate', deduplicate.toString());
-    if (level) params.append('level', level);
-    if (limit) params.append('limit', limit.toString());
-    params.append('offset', offset.toString());
-    
-    return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`, {
-      timeout: 60000, // 1 minute - much faster with database sorting + pagination
-    });
-  },
+    params.append("order", order);
+    params.append("deduplicate", deduplicate.toString());
+    if (level) params.append("level", level);
+    if (limit) params.append("limit", limit.toString());
+    params.append("offset", offset.toString());
 
+    return apiClient.get<SortedLogsResponse>(
+      `/sessions/${id}/logs/sorted?${params.toString()}`,
+      {
+        timeout: 60000, // 1 minute - much faster with database sorting + pagination
+      },
+    );
+  },
 };
 
 export const api = apiClient;

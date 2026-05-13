@@ -1838,31 +1838,6 @@ export default function SessionDetail() {
     setCheckpointActionIntent('resume');
   };
 
-  const refreshTasksForSession = useCallback(async () => {
-    if (!sessionId || !session) return;
-    try {
-      const [refreshRes, tasksRes, updatedSession] = await Promise.all([
-        sessionsAPI.refreshTasks(Number(sessionId)),
-        tasksAPI.getByProject(session.project_id),
-        sessionsAPI.getById(Number(sessionId)),
-      ]);
-      setTasks(tasksRes.data || []);
-      setSession(updatedSession.data);
-      await loadStateDiff(Number(sessionId), tasksRes.data || []);
-      if (refreshRes.data.queued_task) {
-        pushTimelineEvent(
-          `Queued next task: ${refreshRes.data.queued_task.task_name}`,
-          'INFO'
-        );
-      } else {
-        pushTimelineEvent('Session task state refreshed', 'INFO');
-      }
-    } catch (error) {
-      console.error('Failed to refresh session tasks:', error);
-      alert('Failed to refresh session tasks');
-    }
-  }, [loadStateDiff, pushTimelineEvent, session, sessionId]);
-
   const handleExecuteTask = useCallback(async (task: Task) => {
     if (!sessionId) return;
     try {
@@ -2437,7 +2412,6 @@ export default function SessionDetail() {
             actionButtons={getActionButtons()}
             formatDateTime={formatDateTime}
             onExecuteTask={handleExecuteTask}
-            onRefreshTasks={refreshTasksForSession}
             session={session}
             tasks={tasks}
           />
@@ -2451,7 +2425,6 @@ export default function SessionDetail() {
             onInspectCheckpoint={inspectCheckpoint}
             onModeChange={handleExecutionModeChange}
             onReplayCheckpoint={replayCheckpoint}
-            onRefreshTasks={refreshTasksForSession}
             session={session}
           />
         )}

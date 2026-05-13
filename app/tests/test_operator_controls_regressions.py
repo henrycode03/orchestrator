@@ -10,6 +10,7 @@ from app.services.workspace.system_settings import (
     ADAPTATION_PROFILE_KEY,
     AGENT_BACKEND_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
+    WORKSPACE_REVIEW_POLICY_KEY,
     set_setting_value,
 )
 
@@ -20,6 +21,7 @@ def test_settings_can_persist_operator_backend_and_policy_profile(
     set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
     set_setting_value(db_session, ADAPTATION_PROFILE_KEY, "openclaw_default")
     set_setting_value(db_session, ORCHESTRATION_POLICY_PROFILE_KEY, "balanced")
+    set_setting_value(db_session, WORKSPACE_REVIEW_POLICY_KEY, "hold_nontrivial")
 
     response = authenticated_client.patch(
         "/api/v1/settings/system",
@@ -27,6 +29,7 @@ def test_settings_can_persist_operator_backend_and_policy_profile(
             "agent_backend": "local_openclaw",
             "agent_adaptation_profile": "openclaw_default",
             "orchestration_policy_profile": "strict",
+            "workspace_review_policy": "hold_all",
         },
     )
 
@@ -35,6 +38,7 @@ def test_settings_can_persist_operator_backend_and_policy_profile(
     assert payload["system"]["agent_backend"] == "local_openclaw"
     assert payload["system"]["agent_adaptation_profile"] == "openclaw_default"
     assert payload["system"]["orchestration_policy_profile"] == "strict"
+    assert payload["system"]["workspace_review_policy"] == "hold_all"
     assert payload["system"]["supported_backends"]
     assert payload["system"]["available_policy_profiles"]
     assert payload["system"]["available_adaptation_profiles"]
@@ -50,6 +54,18 @@ def test_settings_can_persist_operator_backend_and_policy_profile(
     metadata = json.loads(audit_entry.log_metadata or "{}")
     assert metadata["event_type"] == "system_settings_updated"
     assert metadata["changes"]["orchestration_policy_profile"]["to"] == "strict"
+    assert metadata["changes"]["workspace_review_policy"]["to"] == "hold_all"
+
+
+def test_settings_reject_unknown_workspace_review_policy(authenticated_client):
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "workspace_review_policy": "always_merge",
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_settings_reject_mismatched_backend_and_adaptation_profile(

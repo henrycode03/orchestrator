@@ -17,6 +17,18 @@ AGENT_BACKEND_KEY = "orchestrator_agent_backend"
 AGENT_MODEL_FAMILY_KEY = "orchestrator_agent_model_family"
 ADAPTATION_PROFILE_KEY = "orchestrator_adaptation_profile"
 ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
+WORKSPACE_REVIEW_POLICY_KEY = "workspace_review_policy"
+WORKSPACE_REVIEW_POLICIES = {"auto_publish_all", "hold_nontrivial", "hold_all"}
+
+
+def normalize_workspace_review_policy(value: Optional[str]) -> str:
+    policy = str(value or "").strip() or "hold_nontrivial"
+    if policy not in WORKSPACE_REVIEW_POLICIES:
+        raise ValueError(
+            "workspace_review_policy must be one of: "
+            + ", ".join(sorted(WORKSPACE_REVIEW_POLICIES))
+        )
+    return policy
 
 
 def _is_missing_system_settings_table(exc: OperationalError) -> bool:
@@ -124,3 +136,12 @@ def get_effective_policy_profile(
         )
         or default_profile
     )
+
+
+def get_effective_workspace_review_policy(
+    default_policy: str = "hold_nontrivial", db: Optional[Session] = None
+) -> str:
+    policy = get_setting_value_runtime(
+        WORKSPACE_REVIEW_POLICY_KEY, default_policy, db=db
+    )
+    return normalize_workspace_review_policy(policy)

@@ -46,6 +46,7 @@ type TimelineEventType =
   | 'error'
   | 'status'
   | 'info';
+type TimelineEventImportance = 'primary' | 'secondary';
 
 export interface TimelineEvent {
   id: string;
@@ -53,6 +54,7 @@ export interface TimelineEvent {
   type: TimelineEventType;
   title: string;
   detail: string;
+  importance?: TimelineEventImportance;
 }
 
 export interface TimelineSpan {
@@ -1124,6 +1126,98 @@ export function SessionTimelinePanel({
   offTrackMoment = null,
   repairGenealogy = [],
 }: SessionTimelinePanelProps) {
+  const getTimelineImportance = (event: TimelineEvent): TimelineEventImportance => {
+    if (event.importance) return event.importance;
+    const text = `${event.title} ${event.detail}`.toLowerCase();
+    if (
+      event.type === 'error' ||
+      text.includes('failed') ||
+      text.includes('waiting for input') ||
+      text.includes('off-track') ||
+      text.includes('divergence') ||
+      text.includes('intent gap') ||
+      text.includes('plan revised') ||
+      text.includes('retry entered')
+    ) {
+      return 'primary';
+    }
+    if (
+      event.type === 'task' ||
+      event.type === 'planning' ||
+      event.type === 'summarizing' ||
+      text.includes('phase started') ||
+      text.includes('phase finished')
+    ) {
+      return 'primary';
+    }
+    if (
+      text.includes('tool invoked') ||
+      text.includes('checkpoint saved') ||
+      text.includes('health score') ||
+      text.includes('evaluator result') ||
+      text.includes('reasoning artifact') ||
+      text.includes('workspace preserved') ||
+      text.includes('workspace restore skipped') ||
+      event.type === 'info'
+    ) {
+      return 'secondary';
+    }
+    return 'secondary';
+  };
+
+  const orderedTimelineEvents = timelineEvents.slice().reverse();
+  const primaryTimelineEvents = orderedTimelineEvents
+    .filter((event) => getTimelineImportance(event) === 'primary')
+    .slice(0, 12);
+  const secondaryTimelineEvents = orderedTimelineEvents
+    .filter((event) => getTimelineImportance(event) === 'secondary')
+    .slice(0, 16);
+  const renderTimelineEvent = (
+    event: TimelineEvent,
+    density: 'normal' | 'compact' = 'normal'
+  ) => (
+    <div
+      key={event.id}
+      className={cn(
+        'min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)]',
+        density === 'compact' ? 'p-2' : 'p-3'
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span
+          className={cn(
+            'break-words text-xs font-medium uppercase',
+            event.type === 'error' && 'text-red-400',
+            event.type === 'planning' && 'text-violet-400',
+            event.type === 'executing' && 'text-blue-400',
+            event.type === 'debugging' && 'text-amber-400',
+            event.type === 'revising_plan' && 'text-fuchsia-400',
+            event.type === 'summarizing' && 'text-teal-400',
+            event.type === 'checkpoint' && 'text-emerald-400',
+            event.type === 'validation' && 'text-lime-400',
+            event.type === 'repair' && 'text-orange-400',
+            event.type === 'task' && 'text-primary-300',
+            event.type === 'status' && 'text-cyan-400',
+            event.type === 'info' && 'text-slate-300'
+          )}
+        >
+          {event.title}
+        </span>
+        <span className="text-xs text-slate-400">
+          {formatDateTime(event.at)}
+        </span>
+      </div>
+      <p
+        className={cn(
+          'mt-1 break-words text-slate-200',
+          density === 'compact' && 'text-xs text-slate-300'
+        )}
+      >
+        {event.detail}
+      </p>
+    </div>
+  );
+
   return (
     <div className="min-w-0 space-y-4 overflow-x-hidden">
       {(offTrackMoment || repairGenealogy.length > 0) && (
@@ -1368,100 +1462,105 @@ export function SessionTimelinePanel({
       </div>
 
       <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-white">Causal Spans</h3>
-          <span className="text-xs text-slate-400">{timelineSpans.length} spans</span>
-        </div>
-        {timelineSpans.length === 0 ? (
-          <p className="text-sm text-slate-400">
-            Span grouping appears when parent-linked orchestration events are present.
-          </p>
-        ) : (
-          <div className="max-h-56 space-y-2 overflow-y-auto">
-            {timelineSpans.slice().reverse().map((span) => (
-              <div key={span.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        'text-xs font-medium uppercase',
-                        span.lane === 'reasoning' && 'text-violet-400',
-                        span.lane === 'tool' && 'text-primary-300',
-                        span.lane === 'workspace' && 'text-emerald-400',
-                        span.lane === 'validation' && 'text-lime-400',
-                        span.lane === 'system' && 'text-cyan-400'
-                      )}
-                    >
-                      {span.lane}
-                    </span>
-                    <span
-                      className={cn(
-                        'text-xs font-medium',
-                        span.status === 'healthy' && 'text-emerald-400',
-                        span.status === 'warning' && 'text-amber-400',
-                        span.status === 'error' && 'text-red-400'
-                      )}
-                    >
-                      {span.status}
-                    </span>
-                  </div>
-                  <span className="text-xs text-slate-400">{formatDateTime(span.started_at)}</span>
-                </div>
-                <p className="mt-2 break-words text-sm font-medium text-slate-200">{span.title}</p>
-                <p className="mt-1 break-words text-sm text-slate-300">{span.summary}</p>
-                <p className="mt-1 text-xs text-slate-400">{span.event_count} linked events</p>
-              </div>
-            ))}
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Execution Timeline</h3>
+            <p className="mt-0.5 text-xs text-slate-400">
+              Major milestones first, work details second.
+            </p>
           </div>
-        )}
-      </div>
-
-      <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-white">Execution Timeline</h3>
           <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
         </div>
-        <div className="max-h-56 space-y-2 overflow-y-auto text-sm">
+        <div className="space-y-4 text-sm">
           {timelineEvents.length === 0 ? (
             <p className="text-slate-500">
               No timeline events yet. Start/execute a task to see progress milestones.
             </p>
           ) : (
-            timelineEvents
-              .slice()
-              .reverse()
-              .map((event) => (
-                <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-2">
-                  <div className="flex items-center justify-between">
-                    <span
-                      className={cn(
-                        'break-words text-xs font-medium uppercase',
-                        event.type === 'error' && 'text-red-400',
-                        event.type === 'planning' && 'text-violet-400',
-                        event.type === 'executing' && 'text-blue-400',
-                        event.type === 'debugging' && 'text-amber-400',
-                        event.type === 'revising_plan' && 'text-fuchsia-400',
-                        event.type === 'summarizing' && 'text-teal-400',
-                        event.type === 'checkpoint' && 'text-emerald-400',
-                        event.type === 'validation' && 'text-lime-400',
-                        event.type === 'repair' && 'text-orange-400',
-                        event.type === 'task' && 'text-primary-300',
-                        event.type === 'status' && 'text-cyan-400',
-                        event.type === 'info' && 'text-slate-300'
-                      )}
-                    >
-                      {event.title}
-                    </span>
-                    <span className="text-xs text-slate-400">
-                      {formatDateTime(event.at)}
-                    </span>
-                  </div>
-                  <p className="mt-1 break-words text-slate-200">{event.detail}</p>
+            <>
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h4 className="text-xs font-semibold uppercase text-slate-300">Milestones</h4>
+                  <span className="text-xs text-slate-500">{primaryTimelineEvents.length}</span>
                 </div>
-              ))
+                <div className="max-h-72 space-y-2 overflow-y-auto">
+                  {primaryTimelineEvents.length === 0 ? (
+                    <p className="text-xs text-slate-500">No major milestone events yet.</p>
+                  ) : (
+                    primaryTimelineEvents.map((event) => renderTimelineEvent(event))
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h4 className="text-xs font-semibold uppercase text-slate-300">Work Details</h4>
+                  <span className="text-xs text-slate-500">{secondaryTimelineEvents.length}</span>
+                </div>
+                <div className="max-h-64 space-y-2 overflow-y-auto">
+                  {secondaryTimelineEvents.length === 0 ? (
+                    <p className="text-xs text-slate-500">No secondary work details yet.</p>
+                  ) : (
+                    secondaryTimelineEvents.map((event) =>
+                      renderTimelineEvent(event, 'compact')
+                    )
+                  )}
+                </div>
+              </div>
+            </>
           )}
         </div>
       </div>
+
+      <details className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-white hover:text-slate-200">
+          Causal Spans <span className="text-xs font-normal text-slate-400">({timelineSpans.length})</span>
+        </summary>
+        <div className="mt-3">
+          {timelineSpans.length === 0 ? (
+            <p className="text-sm text-slate-400">
+              Span grouping appears when parent-linked orchestration events are present.
+            </p>
+          ) : (
+            <div className="max-h-56 space-y-2 overflow-y-auto">
+              {timelineSpans.slice().reverse().map((span) => (
+                <div key={span.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          'text-xs font-medium uppercase',
+                          span.lane === 'reasoning' && 'text-violet-400',
+                          span.lane === 'tool' && 'text-primary-300',
+                          span.lane === 'workspace' && 'text-emerald-400',
+                          span.lane === 'validation' && 'text-lime-400',
+                          span.lane === 'system' && 'text-cyan-400'
+                        )}
+                      >
+                        {span.lane}
+                      </span>
+                      <span
+                        className={cn(
+                          'text-xs font-medium',
+                          span.status === 'healthy' && 'text-emerald-400',
+                          span.status === 'warning' && 'text-amber-400',
+                          span.status === 'error' && 'text-red-400'
+                        )}
+                      >
+                        {span.status}
+                      </span>
+                    </div>
+                    <span className="text-xs text-slate-400">{formatDateTime(span.started_at)}</span>
+                  </div>
+                  <p className="mt-2 break-words text-sm font-medium text-slate-200">{span.title}</p>
+                  <p className="mt-1 break-words text-sm text-slate-300">{span.summary}</p>
+                  <p className="mt-1 text-xs text-slate-400">{span.event_count} linked events</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1470,7 +1569,6 @@ interface SessionTasksPanelProps {
   actionButtons: ReactNode;
   formatDateTime: (value?: string | null) => string;
   onExecuteTask?: (task: Task) => void;
-  onRefreshTasks?: () => void;
   session: Session;
   tasks: Task[];
 }
@@ -1479,7 +1577,6 @@ export function SessionTasksPanel({
   actionButtons,
   formatDateTime,
   onExecuteTask,
-  onRefreshTasks,
   session,
   tasks,
 }: SessionTasksPanelProps) {
@@ -1497,14 +1594,6 @@ export function SessionTasksPanel({
           <p className="mb-2 text-sm text-blue-400">
             Session is not running. Start the session to execute tasks automatically or enter manual mode and run tasks one by one.
           </p>
-          {onRefreshTasks && (
-            <button
-              onClick={onRefreshTasks}
-              className="rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-sm text-white transition-colors hover:bg-[color:var(--oc-action-hover)]"
-            >
-              Refresh Task View
-            </button>
-          )}
         </div>
       )}
 
@@ -1591,7 +1680,6 @@ interface SessionSettingsPanelProps {
   onInspectCheckpoint?: (checkpointName: string) => void;
   onModeChange?: (mode: 'automatic' | 'manual') => void;
   onReplayCheckpoint?: (checkpointName: string) => void;
-  onRefreshTasks?: () => void;
   session: Session;
 }
 
@@ -1602,7 +1690,6 @@ export function SessionSettingsPanel({
   onInspectCheckpoint,
   onModeChange,
   onReplayCheckpoint,
-  onRefreshTasks,
   session,
 }: SessionSettingsPanelProps) {
   return (
@@ -1632,14 +1719,6 @@ export function SessionSettingsPanel({
           >
             Manual
           </button>
-          {onRefreshTasks && (
-            <button
-              onClick={onRefreshTasks}
-              className="ml-auto rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
-            >
-              Refresh Tasks
-            </button>
-          )}
         </div>
       </div>
       <div className="rounded-xl border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
@@ -2072,9 +2151,11 @@ export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
   if (phaseKeys.length === 0) return null;
 
   return (
-    <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-      <h3 className="mb-3 text-sm font-semibold text-slate-200">Knowledge References Used</h3>
-      <div className="space-y-4">
+    <details className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+      <summary className="cursor-pointer text-sm font-semibold text-slate-200 hover:text-white">
+        Knowledge References Used <span className="text-xs font-normal text-slate-400">({phaseKeys.length} phases)</span>
+      </summary>
+      <div className="mt-4 space-y-4">
         {phaseKeys.map((phase) => (
           <div key={phase}>
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400 capitalize">
@@ -2116,7 +2197,7 @@ export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
           </div>
         ))}
       </div>
-    </div>
+    </details>
   );
 }
 

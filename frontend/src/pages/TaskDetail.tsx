@@ -238,6 +238,13 @@ function TaskDetail() {
   }, [editForm.steps]);
   const promotedWorkspace = task?.workspace_status === 'promoted';
   const latestChangeSet = changeSet?.change_set || null;
+  const heldForReview = Boolean(
+    task?.status === 'done' &&
+      task?.workspace_status === 'ready' &&
+      latestChangeSet &&
+      latestChangeSet.changed_count > 0 &&
+      latestChangeSet.warning_flags.length > 0
+  );
   const renderChangeSetFiles = (label: string, files: string[]) => {
     if (!files.length) return null;
     return (
@@ -502,6 +509,14 @@ function TaskDetail() {
                   Promoted {new Date(task.promoted_at).toLocaleString()}
                 </p>
               )}
+              {heldForReview && (
+                <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+                  <p className="text-sm font-medium text-amber-200">Held for review</p>
+                  <p className="mt-1 text-xs text-amber-100/80">
+                    Auto-publish was skipped because this task produced a nontrivial change set. Promote it, request changes, or reject and restore after review.
+                  </p>
+                </div>
+              )}
               <div className="mt-4 flex flex-wrap gap-2">
                 {task.status !== 'running' && (
                   <div className="flex items-center overflow-hidden rounded-md border border-primary-500/40">
@@ -550,7 +565,7 @@ function TaskDetail() {
                   <div>
                     <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
                       <FileWarning className="h-4 w-4 text-amber-300" />
-                      Workspace Change Set
+                      {heldForReview ? 'Held Change Set' : 'Workspace Change Set'}
                     </h3>
                     <p className="mt-1 text-xs text-slate-500">
                       Execution {latestChangeSet.task_execution_id} · {latestChangeSet.changed_count} changed file{latestChangeSet.changed_count === 1 ? '' : 's'}

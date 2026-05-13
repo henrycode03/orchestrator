@@ -366,6 +366,20 @@ class SystemSettingsUpdateRequest(BaseModel):
     agent_model_family: Optional[str] = None
     agent_adaptation_profile: Optional[str] = None
     orchestration_policy_profile: Optional[str] = None
+    workspace_review_policy: Optional[str] = None
+
+    @field_validator("workspace_review_policy")
+    @classmethod
+    def validate_workspace_review_policy(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        policy = value.strip()
+        allowed = {"auto_publish_all", "hold_nontrivial", "hold_all"}
+        if policy not in allowed:
+            raise ValueError(
+                "workspace_review_policy must be one of: " + ", ".join(sorted(allowed))
+            )
+        return policy
 
 
 class AccountSettingsResponse(BaseModel):
@@ -387,6 +401,7 @@ class SystemSettingsResponse(BaseModel):
     backend_health: dict[str, Any]
     supported_backends: list[dict[str, Any]] = []
     orchestration_policy_profile: str
+    workspace_review_policy: str
     available_policy_profiles: list[dict[str, Any]] = []
     available_adaptation_profiles: list[dict[str, Any]] = []
 

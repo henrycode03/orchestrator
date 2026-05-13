@@ -15,7 +15,8 @@ import {
   Activity,
   Clock,
   Plus,
-  MoreHorizontal
+  MoreHorizontal,
+  RotateCcw
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState } from '../components/ui';
@@ -73,12 +74,13 @@ function ProjectDetail() {
     }>;
     ready_task_ids: number[];
   } | null>(null);
-  const initialTab = (['sessions', 'tasks', 'planner'] as const).includes(
-    searchParams.get('tab') as 'sessions' | 'tasks' | 'planner'
+  type ProjectTab = 'sessions' | 'tasks' | 'planner' | 'review';
+  const initialTab = (['sessions', 'tasks', 'planner', 'review'] as const).includes(
+    searchParams.get('tab') as ProjectTab
   )
-    ? (searchParams.get('tab') as 'sessions' | 'tasks' | 'planner')
+    ? (searchParams.get('tab') as ProjectTab)
     : 'tasks';
-  const [activeTab, setActiveTab] = useState<'sessions' | 'tasks' | 'planner'>(initialTab);
+  const [activeTab, setActiveTab] = useState<ProjectTab>(initialTab);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -105,6 +107,7 @@ function ProjectDetail() {
   const [requestChangesNote, setRequestChangesNote] = useState('');
   const [requestChangesRerun, setRequestChangesRerun] = useState(true);
   const [requestChangesSubmitting, setRequestChangesSubmitting] = useState(false);
+  const [rejectingChangeSetTaskId, setRejectingChangeSetTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -362,6 +365,30 @@ function ProjectDetail() {
     } catch (error) {
       console.error('Failed to restore archived workspace:', error);
       alert('Failed to restore archived workspace. Please try again.');
+    }
+  };
+
+  const handleRejectChangeSet = async (taskId: number, taskExecutionId?: number | null) => {
+    if (!id) return;
+    const note = window.prompt('Reason for rejecting this candidate change set:', 'needs review');
+    if (note === null) return;
+    try {
+      setRejectingChangeSetTaskId(taskId);
+      await tasksAPI.rejectChangeSet(taskId, {
+        task_execution_id: taskExecutionId || undefined,
+        note: note.trim() || 'operator_rejected_change_set',
+      });
+      const [tasksRes, workspaceRes] = await Promise.all([
+        tasksAPI.getByProject(Number(id)),
+        projectsAPI.getWorkspaceOverview(Number(id)),
+      ]);
+      setTasks(tasksRes.data);
+      setWorkspaceOverview(workspaceRes.data);
+    } catch (error) {
+      console.error('Failed to reject change set:', error);
+      alert('Failed to reject and restore the change set. Please try again.');
+    } finally {
+      setRejectingChangeSetTaskId(null);
     }
   };
 
@@ -780,13 +807,17 @@ function ProjectDetail() {
       <div className="flex gap-0 border-b border-[color:var(--oc-border-soft)]">
         {[
           { key: 'tasks', label: 'Tasks' },
+          {
+            key: 'review',
+            label: pendingChangeSets.length > 0 ? `Review (${pendingChangeSets.length})` : 'Review',
+          },
           { key: 'planner', label: 'Project Architect' },
           { key: 'sessions', label: 'Runs' },
         ].map((tab) => (
           <button
             key={tab.key}
             type="button"
-            onClick={() => setActiveTab(tab.key as 'sessions' | 'tasks' | 'planner')}
+            onClick={() => setActiveTab(tab.key as ProjectTab)}
             className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === tab.key
                 ? 'text-white border-primary-500'
@@ -807,6 +838,117 @@ function ProjectDetail() {
             setActiveTab('tasks');
           }}
         />
+      )}
+
+      {/* Review Queue Tab */}
+      {activeTab === 'review' && (
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-sm font-medium text-white">Review Queue</h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Nontrivial task change sets held for operator review.
+            </p>
+          </div>
+          {pendingChangeSets.length === 0 ? (
+            <EmptyState
+              icon={FileText}
+              title="No pending change sets"
+              description="Nontrivial task outputs will appear here when they need review."
+            />
+          ) : (
+            <div className="grid gap-3">
+              {pendingChangeSets.map((item) => {
+                const reviewTask = tasks.find((task) => task.id === item.task_id) || null;
+                const canPromote = Boolean(
+                  reviewTask?.status === 'done' &&
+                    reviewTask?.task_subfolder &&
+                    reviewTask?.workspace_status !== 'promoted'
+                );
+                const canRequestChanges = Boolean(
+                  reviewTask?.task_subfolder && reviewTask?.workspace_status !== 'promoted'
+                );
+                return (
+                <div
+                  key={`${item.task_id}-${item.task_execution_id || 'latest'}`}
+                  className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <Link
+                        to={`/projects/${project.id}/tasks/${item.task_id}`}
+                        className="truncate text-sm font-medium text-slate-100 hover:text-primary-200"
+                      >
+                        {item.title}
+                      </Link>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Execution {item.task_execution_id || 'latest'} · {formatWorkspaceStatus(item.workspace_status)}
+                      </p>
+                    </div>
+                    <div className="flex gap-2 text-xs">
+                      <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-emerald-200">
+                        +{item.change_set.added_count}
+                      </span>
+                      <span className="rounded-md border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-sky-200">
+                        ~{item.change_set.modified_count}
+                      </span>
+                      <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-red-200">
+                        -{item.change_set.deleted_count}
+                      </span>
+                    </div>
+                  </div>
+                  {item.change_set.warning_flags.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {item.change_set.warning_flags.map((flag) => (
+                        <span
+                          key={`${item.task_id}-${flag}`}
+                          className="rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200"
+                        >
+                          {flag.replace(/_/g, ' ')}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Link
+                      to={`/projects/${project.id}/tasks/${item.task_id}`}
+                      className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
+                    >
+                      Open task review
+                    </Link>
+                    {canPromote && reviewTask && (
+                      <button
+                        type="button"
+                        onClick={() => openPromoteTask(reviewTask)}
+                        className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/15"
+                      >
+                        Promote
+                      </button>
+                    )}
+                    {canRequestChanges && reviewTask && (
+                      <button
+                        type="button"
+                        onClick={() => openRequestChanges(reviewTask)}
+                        className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200 transition-colors hover:bg-amber-500/15"
+                      >
+                        Request Changes
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleRejectChangeSet(item.task_id, item.task_execution_id)}
+                      disabled={rejectingChangeSetTaskId === item.task_id}
+                      className="flex items-center gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      {rejectingChangeSetTaskId === item.task_id ? 'Restoring...' : 'Reject & Restore'}
+                    </button>
+                  </div>
+                </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Sessions Tab */}
