@@ -101,6 +101,7 @@ function ProjectDetail() {
   const [rebuildingBaseline, setRebuildingBaseline] = useState(false);
   const [cleaningWorkspaces, setCleaningWorkspaces] = useState(false);
   const [promoteTask, setPromoteTask] = useState<Task | null>(null);
+  const [promoteTaskExecutionId, setPromoteTaskExecutionId] = useState<number | null>(null);
   const [promotionNote, setPromotionNote] = useState('');
   const [promotingWorkspace, setPromotingWorkspace] = useState(false);
   const [requestChangesTask, setRequestChangesTask] = useState<Task | null>(null);
@@ -235,8 +236,10 @@ function ProjectDetail() {
     workspaceOverview?.audit?.retained_task_workspaces.find((item) => item.task_id === task.id)
       ?.baseline_diff || null;
 
-  const openPromoteTask = (task: Task) => {
+  const openPromoteTask = (task: Task, taskExecutionId?: number | null) => {
+    const pendingChangeSet = pendingChangeSets.find((item) => item.task_id === task.id);
     setPromoteTask(task);
+    setPromoteTaskExecutionId(taskExecutionId || pendingChangeSet?.task_execution_id || null);
     setPromotionNote(task.promotion_note || '');
   };
 
@@ -246,7 +249,10 @@ function ProjectDetail() {
       setPromotingWorkspace(true);
       const response = await tasksAPI.promoteWorkspace(
         promoteTask.id,
-        promotionNote.trim() || undefined
+        {
+          note: promotionNote.trim() || undefined,
+          task_execution_id: promoteTaskExecutionId || undefined,
+        }
       );
       setTasks((current) =>
         current.map((item) => (item.id === promoteTask.id ? response.data : item))
@@ -254,6 +260,7 @@ function ProjectDetail() {
       const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
       setWorkspaceOverview(workspaceResponse.data || null);
       setPromoteTask(null);
+      setPromoteTaskExecutionId(null);
     } catch (error) {
       console.error('Failed to promote task workspace:', error);
       alert('Failed to promote task workspace. Please try again.');
@@ -918,7 +925,7 @@ function ProjectDetail() {
                     {canPromote && reviewTask && (
                       <button
                         type="button"
-                        onClick={() => openPromoteTask(reviewTask)}
+                        onClick={() => openPromoteTask(reviewTask, item.task_execution_id)}
                         className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/15"
                       >
                         Promote
@@ -1286,6 +1293,11 @@ function ProjectDetail() {
                         ? `${diff.added_count} added, ${diff.modified_count} modified`
                         : 'No baseline diff data available for this workspace'}
                     </p>
+                    {promoteTaskExecutionId && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        Accepting execution {promoteTaskExecutionId}
+                      </p>
+                    )}
                     {changedFiles.length > 0 && (
                       <div className="mt-3 max-h-40 overflow-y-auto rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-shell)]">
                         {changedFiles.slice(0, 20).map((item) => (
@@ -1317,7 +1329,10 @@ function ProjectDetail() {
                   <div className="flex gap-2 pt-1">
                     <button
                       type="button"
-                      onClick={() => setPromoteTask(null)}
+                      onClick={() => {
+                        setPromoteTask(null);
+                        setPromoteTaskExecutionId(null);
+                      }}
                       disabled={promotingWorkspace}
                       className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:opacity-50"
                     >

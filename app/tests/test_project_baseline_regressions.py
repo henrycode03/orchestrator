@@ -261,6 +261,16 @@ def test_reject_task_execution_change_set_archives_candidate_and_restores_snapsh
     (project_root / "README.md").write_text("candidate\n", encoding="utf-8")
     (project_root / "keep.txt").unlink()
     (project_root / "new.txt").write_text("candidate file\n", encoding="utf-8")
+    preserved_snapshot_marker = (
+        project_root / ".openclaw" / "auto-snapshots" / "manual-sentinel"
+    )
+    preserved_snapshot_marker.mkdir(parents=True)
+    (preserved_snapshot_marker / "marker.txt").write_text(
+        "snapshot history\n", encoding="utf-8"
+    )
+    preserved_archive = project_root / ".openclaw" / "rejected-change-archive" / "prior"
+    preserved_archive.mkdir(parents=True)
+    (preserved_archive / "manifest.json").write_text("{}", encoding="utf-8")
     task_service.persist_task_execution_change_set(
         project,
         task,
@@ -283,6 +293,10 @@ def test_reject_task_execution_change_set_archives_candidate_and_restores_snapsh
     assert (project_root / "keep.txt").read_text(encoding="utf-8") == "keep\n"
     assert not (project_root / "new.txt").exists()
     assert ".openclaw/" in (project_root / ".gitignore").read_text(encoding="utf-8")
+    assert (preserved_snapshot_marker / "marker.txt").read_text(
+        encoding="utf-8"
+    ) == "snapshot history\n"
+    assert (preserved_archive / "manifest.json").exists()
 
     archive_dir = Path(result["archive_path"])
     assert (archive_dir / "README.md").read_text(encoding="utf-8") == "candidate\n"
@@ -545,7 +559,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/promote",
-        json={"note": "accepted"},
+        json={"note": "accepted", "task_execution_id": execution.id},
     )
 
     assert response.status_code == 200

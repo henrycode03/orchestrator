@@ -102,7 +102,11 @@ class ProjectIsolationService:
         if not project:
             raise ProjectIsolationError(f"Project {project_id} not found")
 
-        return resolve_project_workspace_path(project.workspace_path, project.name)
+        return resolve_project_workspace_path(
+            project.workspace_path,
+            project.name,
+            db=self.db,
+        )
 
     def validate_path(
         self, project_id: int, requested_path: str, allow_relative: bool = True

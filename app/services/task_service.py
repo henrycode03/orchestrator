@@ -121,7 +121,11 @@ class TaskService:
             if nested_candidate.exists():
                 return nested_candidate.resolve()
             return explicit_path
-        return resolve_project_workspace_path(project.workspace_path, project.name)
+        return resolve_project_workspace_path(
+            project.workspace_path,
+            project.name,
+            db=self.db,
+        )
 
     def ensure_project_gitignore_guard(self, project: Project) -> dict[str, Any]:
         """Ensure project-local runtime state is ignored by Git."""

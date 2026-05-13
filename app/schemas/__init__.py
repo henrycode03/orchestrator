@@ -75,6 +75,7 @@ class TaskUpdate(BaseModel):
 
 class TaskPromotionRequest(BaseModel):
     note: Optional[str] = None
+    task_execution_id: Optional[int] = None
 
 
 class TaskResponse(TaskBase):

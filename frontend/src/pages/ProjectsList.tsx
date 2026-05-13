@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { projectsAPI } from '../api/client';
-import type { Project } from '../types/api';
+import { projectsAPI, tasksAPI } from '../api/client';
+import type { Project, Task } from '../types/api';
 import {
   GitBranch,
   Plus,
@@ -9,9 +9,13 @@ import {
   XCircle,
   ExternalLink,
   Search,
+  AlertTriangle,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, Skeleton } from '../components/ui';
+
+const taskNeedsReview = (task: Task): boolean =>
+  task.workspace_status === 'ready' || task.workspace_status === 'changes_requested';
 
 function ProjectsList() {
   const navigate = useNavigate();
@@ -26,10 +30,7 @@ function ProjectsList() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [updatingProject, setUpdatingProject] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-
-  useEffect(() => {
-    fetchProjects();
-  }, []);
+  const [reviewCounts, setReviewCounts] = useState<Record<number, number>>({});
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,16 +79,29 @@ function ProjectsList() {
     }
   };
 
-  const fetchProjects = async () => {
+  const fetchProjects = useCallback(async () => {
     try {
-      const response = await projectsAPI.getAll();
-      setProjects(response.data);
+      const [projectsResponse, tasksResponse] = await Promise.all([
+        projectsAPI.getAll(),
+        tasksAPI.getAll(),
+      ]);
+      setProjects(projectsResponse.data);
+      const counts: Record<number, number> = {};
+      (tasksResponse.data || []).forEach((task) => {
+        if (!taskNeedsReview(task)) return;
+        counts[task.project_id] = (counts[task.project_id] || 0) + 1;
+      });
+      setReviewCounts(counts);
     } catch (error) {
       console.error('Failed to fetch projects:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
 
   
 
@@ -330,6 +344,12 @@ function ProjectsList() {
                   </span>
                   <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
                 </div>
+                {reviewCounts[project.id] > 0 && (
+                  <div className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-200">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    {reviewCounts[project.id]} need review
+                  </div>
+                )}
               </div>
             ))}
           </div>

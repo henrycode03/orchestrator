@@ -95,6 +95,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def isolated_workspace_root(monkeypatch, tmp_path):
+    workspace_root = tmp_path / "workspace-root"
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(workspace_root))
+    return workspace_root
+
+
+@pytest.fixture(autouse=True)
 def reset_runtime_flags():
     original_force_inline = settings.INLINE_PLANNING
     original_keypair_flag = settings.ALLOW_TEST_KEYPAIR_ENDPOINT
@@ -152,7 +159,10 @@ def db_session_factory():
 
 
 @pytest.fixture
-def db_session(db_session_factory) -> Generator[Session, None, None]:
+def db_session(
+    db_session_factory,
+    isolated_workspace_root,
+) -> Generator[Session, None, None]:
     db = db_session_factory()
     try:
         yield db
@@ -161,7 +171,10 @@ def db_session(db_session_factory) -> Generator[Session, None, None]:
 
 
 @pytest.fixture
-def api_app(db_session_factory) -> Generator[FastAPI, None, None]:
+def api_app(
+    db_session_factory,
+    isolated_workspace_root,
+) -> Generator[FastAPI, None, None]:
     app = FastAPI()
     app.include_router(api_router, prefix="/api/v1")
 

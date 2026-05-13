@@ -878,6 +878,11 @@ def reject_latest_task_change_set(
     change_set = TaskService(db).get_task_execution_change_set(
         task_execution_id=task_execution_id
     )
+    if change_set and change_set.get("task_id") not in {None, task_id}:
+        raise HTTPException(
+            status_code=409,
+            detail="Change set belongs to a different task",
+        )
     snapshot_key = (
         str(change_set.get("snapshot_key"))
         if change_set and change_set.get("snapshot_key")
@@ -1009,8 +1014,20 @@ def promote_task_workspace(
     task.promotion_note = (payload.note or "").strip() or None
     task.updated_at = datetime.now(UTC)
     task_service = TaskService(db)
+    accepted_change_set = (
+        task_service.get_task_execution_change_set(
+            task_execution_id=payload.task_execution_id
+        )
+        if payload.task_execution_id is not None
+        else task_service.get_latest_task_change_set_for_task(task.id)
+    )
+    if accepted_change_set:
+        if accepted_change_set.get("task_id") not in {None, task.id}:
+            raise HTTPException(
+                status_code=409,
+                detail="Change set belongs to a different task",
+            )
     baseline_result = task_service.promote_task_into_baseline(project, task)
-    accepted_change_set = task_service.get_latest_task_change_set_for_task(task.id)
     if accepted_change_set:
         baseline_result["accepted_change_set"] = accepted_change_set
     promoted_workspace_archive_result = task_service.archive_promoted_task_workspace(

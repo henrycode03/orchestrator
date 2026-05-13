@@ -120,7 +120,10 @@ function TaskDetail() {
     const note = window.prompt('Optional promotion note for this workspace:', task.promotion_note || '');
     if (note === null) return;
     try {
-      await tasksAPI.promoteWorkspace(task.id, note || undefined);
+      await tasksAPI.promoteWorkspace(task.id, {
+        note: note || undefined,
+        task_execution_id: changeSet?.task_execution_id || undefined,
+      });
       await fetchTask();
     } catch (error) {
       console.error('Failed to promote task workspace:', error);

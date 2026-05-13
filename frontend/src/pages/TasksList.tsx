@@ -5,20 +5,25 @@ import type { Task, Project } from '@/types/api';
 import { 
   Search,
   ListTodo,
-  GitBranch
+  GitBranch,
+  AlertTriangle
 } from 'lucide-react';
 import { StatusBadge, LoadingSpinner, EmptyState } from '@/components/ui';
 
-type TaskStatusFilter = 'all' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+type TaskStatusFilter = 'all' | 'review' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 
 const statusFilters: Array<{ key: TaskStatusFilter; label: string }> = [
   { key: 'all', label: 'All' },
+  { key: 'review', label: 'Review' },
   { key: 'failed', label: 'Failed' },
   { key: 'pending', label: 'Pending' },
   { key: 'running', label: 'Running' },
   { key: 'done', label: 'Done' },
   { key: 'cancelled', label: 'Cancelled' },
 ];
+
+const taskNeedsReview = (task: Task): boolean =>
+  task.workspace_status === 'ready' || task.workspace_status === 'changes_requested';
 
 function TasksList() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -61,7 +66,9 @@ function TasksList() {
       task.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       task.description?.toLowerCase().includes(searchQuery.toLowerCase());
     
-    const matchesStatus = statusFilter === 'all' || task.status === statusFilter;
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'review' ? taskNeedsReview(task) : task.status === statusFilter);
     
     return matchesSearch && matchesStatus;
   });
@@ -104,6 +111,8 @@ function TasksList() {
           const count =
             filter.key === 'all'
               ? tasks.length
+              : filter.key === 'review'
+                ? tasks.filter(taskNeedsReview).length
               : tasks.filter((task) => task.status === filter.key).length;
           return (
             <button
@@ -145,9 +154,17 @@ function TasksList() {
                 className="flex items-center gap-4 px-4 py-3 hover:bg-[color:var(--oc-surface-raised)] transition-colors group"
               >
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">
-                    {task.title}
-                  </p>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <p className="min-w-0 text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">
+                      {task.title}
+                    </p>
+                    {taskNeedsReview(task) && (
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-200">
+                        <AlertTriangle className="h-3 w-3" />
+                        Needs review
+                      </span>
+                    )}
+                  </div>
                   {task.description && (
                     <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">
                       {task.description}
