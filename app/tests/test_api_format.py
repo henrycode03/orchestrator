@@ -1,5 +1,7 @@
 """Regression tests for current API response contracts."""
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -53,6 +55,27 @@ def test_project_create_and_detail_contract(authenticated_client):
     assert detail["name"] == project["name"]
     assert "description" in detail
     assert "updated_at" in detail
+
+
+def test_project_create_writes_guard_to_isolated_test_workspace(
+    authenticated_client,
+    isolated_workspace_root: Path,
+):
+    create_response = authenticated_client.post(
+        "/api/v1/projects",
+        json={
+            "name": "API Isolated Workspace Project",
+            "description": "Verify test workspaces do not leak into the real vault",
+        },
+    )
+
+    assert create_response.status_code == 201
+    project = create_response.json()
+    project_root = isolated_workspace_root / project["workspace_path"]
+    gitignore = project_root / ".gitignore"
+
+    assert gitignore.exists()
+    assert "# BEGIN OpenClaw workspace guard" in gitignore.read_text(encoding="utf-8")
 
 
 def test_missing_project_returns_detail_message(authenticated_client):

@@ -337,9 +337,9 @@ def _shape_project_context(
     max_chars: int,
 ) -> str:
     sections = [
+        ("Workspace truth", _trim_text(workspace_summary, max_chars // 2)),
         ("Project context", _trim_text(base_context, max_chars // 2)),
         ("Operator guidance", _trim_text(operator_guidance, max_chars // 4)),
-        ("Workspace truth", _trim_text(workspace_summary, max_chars // 2)),
         ("Recent orchestration history", _trim_text(recent_history, max_chars // 4)),
         ("Recent validation history", _trim_text(validation_history, max_chars // 4)),
     ]
@@ -466,7 +466,7 @@ def assemble_planning_prompt(
         validation_history=_condense_dict_events(
             ctx.orchestration_state.validation_history, max_entries=3
         ),
-        max_chars=350,
+        max_chars=300,
     )
     raw_prompt = PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,

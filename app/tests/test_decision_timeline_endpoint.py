@@ -22,6 +22,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
+from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
 
 
 def _make_project(db, *, workspace_path: str):
@@ -174,6 +175,68 @@ def test_decision_timeline_empty_session(authenticated_client, db_session):
             "completion": 0,
         }
         assert body["truncated"] is False
+
+
+def test_decision_timeline_includes_workspace_change_set_logs(
+    authenticated_client,
+    db_session,
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project, status="pending")
+        task = Task(
+            project_id=project.id,
+            title="Capture governance change set",
+            status=TaskStatus.DONE,
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.DONE,
+        )
+        db_session.add(execution)
+        db_session.commit()
+        db_session.refresh(execution)
+        db_session.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=task.id,
+                task_execution_id=execution.id,
+                level="INFO",
+                message=TASK_CHANGE_SET_LOG_MESSAGE,
+                log_metadata=json.dumps(
+                    {
+                        "task_execution_id": execution.id,
+                        "task_id": task.id,
+                        "changed_count": 3,
+                        "added_files": ["src/app.py"],
+                        "modified_files": ["README.md"],
+                        "deleted_files": ["old.md"],
+                        "warning_flags": ["deleted_files"],
+                    }
+                ),
+            )
+        )
+        db_session.commit()
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["counts"]["completion"] == 1
+        event = body["events"][0]
+        assert event["source"] == "workspace_change_set_log"
+        assert event["phase"] == "completion"
+        assert event["event_type"] == "workspace_change_set_captured"
+        assert event["task_id"] == task.id
+        assert event["details"]["changed_count"] == 3
+        assert event["details"]["warning_flags"] == ["deleted_files"]
 
 
 def test_decision_timeline_unknown_and_deleted_session(

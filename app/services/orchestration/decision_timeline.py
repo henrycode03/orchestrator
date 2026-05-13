@@ -29,6 +29,7 @@ from app.models import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
 
 from .events.event_types import EventType
 from .persistence import read_orchestration_events
@@ -99,6 +100,7 @@ def get_session_decision_timeline_payload(
             knowledge_by_task_phase=knowledge_by_task_phase,
         )
     )
+    events.extend(_build_workspace_change_set_events(db, session_id=session_id))
     events.extend(
         _build_terminal_failure_events(
             db,
@@ -287,6 +289,77 @@ def _build_intervention_events(
                 ],
                 "intervention_id": req.id,
                 "details": details,
+            }
+        )
+    return events
+
+
+def _build_workspace_change_set_events(
+    db: Session,
+    *,
+    session_id: int,
+) -> List[Dict[str, Any]]:
+    rows = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+        )
+        .order_by(LogEntry.created_at.asc(), LogEntry.id.asc())
+        .all()
+    )
+    events: List[Dict[str, Any]] = []
+    for entry in rows:
+        try:
+            metadata = json.loads(entry.log_metadata or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        changed_count = _coerce_optional_int(metadata.get("changed_count")) or 0
+        warning_flags = metadata.get("warning_flags")
+        if not isinstance(warning_flags, list):
+            warning_flags = []
+        added_files = metadata.get("added_files")
+        modified_files = metadata.get("modified_files")
+        deleted_files = metadata.get("deleted_files")
+        details = {
+            "task_execution_id": entry.task_execution_id
+            or _coerce_optional_int(metadata.get("task_execution_id")),
+            "task_id": entry.task_id or _coerce_optional_int(metadata.get("task_id")),
+            "log_id": entry.id,
+            "changed_count": changed_count,
+            "added_files": added_files if isinstance(added_files, list) else [],
+            "modified_files": (
+                modified_files if isinstance(modified_files, list) else []
+            ),
+            "deleted_files": deleted_files if isinstance(deleted_files, list) else [],
+            "warning_flags": warning_flags,
+        }
+
+        events.append(
+            {
+                "id": f"workspace-change-set-log-{entry.id}",
+                "session_id": session_id,
+                "task_id": details["task_id"],
+                "timestamp": _serialize_dt(entry.created_at),
+                "phase": "completion",
+                "event_type": "workspace_change_set_captured",
+                "decision_type": "workspace_governance",
+                "title": "Workspace Change Set Captured",
+                "summary": (
+                    f"Captured {changed_count} changed file"
+                    f"{'' if changed_count == 1 else 's'} for review."
+                ),
+                "status": "captured",
+                "severity": "warning" if warning_flags else "info",
+                "source": "workspace_change_set_log",
+                "parent_event_id": None,
+                "related_event_ids": [],
+                "knowledge_usage_ids": [],
+                "intervention_id": None,
+                "details": _bounded_details(details),
             }
         )
     return events
@@ -993,6 +1066,11 @@ def _bounded_details(details: Dict[str, Any]) -> Dict[str, Any]:
         "missing_verification_steps",
         "snapshot_path",
         "target_path",
+        "changed_count",
+        "added_files",
+        "modified_files",
+        "deleted_files",
+        "warning_flags",
     }
     bounded: Dict[str, Any] = {}
     for key in allowed:
