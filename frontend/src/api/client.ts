@@ -30,6 +30,7 @@ import type {
   InterventionRequest,
   ExecutionFailureSummary,
   KnowledgeUsageResponse,
+  ChangeSetReviewDecision,
 } from "../types/api";
 
 const API_BASE_URL =
@@ -232,6 +233,7 @@ export const projectsAPI = {
           deleted_files: string[];
           warning_flags: string[];
         };
+        review_decision?: ChangeSetReviewDecision;
       }>;
       ready_task_ids: number[];
     }>(`/projects/${projectId}/workspace-overview`),

@@ -605,6 +605,33 @@ class TaskService:
             flags.append("scaffold_or_test_surface_changed")
         return sorted(set(flags))
 
+    def change_set_review_decision(
+        self,
+        change_set: Optional[dict[str, Any]],
+        *,
+        workspace_review_policy: str,
+    ) -> dict[str, Any]:
+        payload = change_set or {}
+        warning_flags = list(payload.get("warning_flags") or [])
+        changed_count = int(payload.get("changed_count") or 0)
+        held_for_review = workspace_review_policy == "hold_all" or (
+            workspace_review_policy == "hold_nontrivial" and bool(warning_flags)
+        )
+        reason = None
+        if held_for_review:
+            reason = (
+                "hold_all_review_required"
+                if workspace_review_policy == "hold_all"
+                else "nontrivial_change_set_review_required"
+            )
+        return {
+            "workspace_review_policy": workspace_review_policy,
+            "held_for_review": held_for_review,
+            "reason": reason,
+            "changed_count": changed_count,
+            "warning_flags": warning_flags,
+        }
+
     def build_task_execution_change_set(
         self,
         project: Project,

@@ -241,12 +241,12 @@ function TaskDetail() {
   }, [editForm.steps]);
   const promotedWorkspace = task?.workspace_status === 'promoted';
   const latestChangeSet = changeSet?.change_set || null;
+  const reviewDecision = changeSet?.review_decision || null;
   const heldForReview = Boolean(
     task?.status === 'done' &&
       task?.workspace_status === 'ready' &&
       latestChangeSet &&
-      latestChangeSet.changed_count > 0 &&
-      latestChangeSet.warning_flags.length > 0
+      reviewDecision?.held_for_review
   );
   const renderChangeSetFiles = (label: string, files: string[]) => {
     if (!files.length) return null;
@@ -516,7 +516,8 @@ function TaskDetail() {
                 <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
                   <p className="text-sm font-medium text-amber-200">Held for review</p>
                   <p className="mt-1 text-xs text-amber-100/80">
-                    Auto-publish was skipped because this task produced a nontrivial change set. Promote it, request changes, or reject and restore after review.
+                    Backend review policy {reviewDecision?.workspace_review_policy || 'unknown'} held this change set{reviewDecision?.reason ? `: ${reviewDecision.reason.replace(/_/g, ' ')}` : ''}.
+                    Promote it, request changes, or reject and restore after review.
                   </p>
                 </div>
               )}

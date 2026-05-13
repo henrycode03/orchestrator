@@ -13,7 +13,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
+from app.models import Task, TaskStatus, Project, LogEntry, SessionTask, TaskExecution
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.dependencies import get_current_active_user
 from app.services.agents.agent_runtime import create_agent_runtime
@@ -28,12 +28,12 @@ from app.services.authz import project_access_filter
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import (
     create_task_execution,
-    executions_for_task,
 )
 from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
+    get_effective_workspace_review_policy,
 )
 from app.config import settings
 
@@ -167,6 +167,30 @@ def _build_request_changes_repair_prompt(
         ]
     )
     return "\n".join(sections).strip()
+
+
+def _change_set_has_changes(change_set: Optional[dict]) -> bool:
+    payload = (change_set or {}).get("change_set") or change_set or {}
+    return int(payload.get("changed_count") or 0) > 0
+
+
+def _validate_task_execution_for_change_set(
+    db: Session,
+    *,
+    task: Task,
+    task_execution_id: int,
+) -> TaskExecution:
+    task_execution = (
+        db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
+    )
+    if not task_execution:
+        raise HTTPException(status_code=404, detail="Task execution not found")
+    if task_execution.task_id != task.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Task execution belongs to a different task",
+        )
+    return task_execution
 
 
 def _queue_task_retry(
@@ -834,10 +858,18 @@ def get_latest_task_change_set(task_id: int, db: Session = Depends(get_db)):
         change_set = json.loads(entry.log_metadata or "{}")
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Recorded change set is invalid")
+    review_decision = TaskService(db).change_set_review_decision(
+        change_set,
+        workspace_review_policy=get_effective_workspace_review_policy(
+            settings.WORKSPACE_REVIEW_POLICY,
+            db=db,
+        ),
+    )
     return {
         "task_id": task_id,
         "task_execution_id": entry.task_execution_id,
         "change_set": change_set,
+        "review_decision": review_decision,
         "recorded_at": entry.created_at.isoformat() if entry.created_at else None,
     }
 
@@ -859,26 +891,26 @@ def reject_latest_task_change_set(
     payload = payload or TaskChangeSetRejectRequest()
     task_execution_id = payload.task_execution_id
     if task_execution_id is None:
-        entry = (
-            db.query(LogEntry)
-            .filter(
-                LogEntry.task_id == task_id,
-                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
-            )
-            .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
-            .first()
+        raise HTTPException(
+            status_code=400,
+            detail="task_execution_id is required to reject and restore a change set",
         )
-        task_execution_id = entry.task_execution_id if entry else None
-    if task_execution_id is None:
-        latest_execution = executions_for_task(db, task_id)[-1:]
-        task_execution_id = latest_execution[0].id if latest_execution else None
-    if task_execution_id is None:
-        raise HTTPException(status_code=404, detail="No task execution found")
 
-    change_set = TaskService(db).get_task_execution_change_set(
+    _validate_task_execution_for_change_set(
+        db,
+        task=task,
+        task_execution_id=task_execution_id,
+    )
+    task_service = TaskService(db)
+    change_set = task_service.get_task_execution_change_set(
         task_execution_id=task_execution_id
     )
-    if change_set and change_set.get("task_id") not in {None, task_id}:
+    if not change_set:
+        raise HTTPException(
+            status_code=404,
+            detail="No change set recorded for task_execution_id",
+        )
+    if change_set.get("task_id") not in {None, task_id}:
         raise HTTPException(
             status_code=409,
             detail="Change set belongs to a different task",
@@ -888,7 +920,7 @@ def reject_latest_task_change_set(
         if change_set and change_set.get("snapshot_key")
         else workspace_snapshot_key(task_id, task_execution_id)
     )
-    result = TaskService(db).reject_task_execution_change_set(
+    result = task_service.reject_task_execution_change_set(
         project,
         task,
         task_execution_id=task_execution_id,
@@ -932,6 +964,10 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
         if getattr(task, "workspace_status", None) == "promoted"
     ]
     pending_change_sets = []
+    workspace_review_policy = get_effective_workspace_review_policy(
+        settings.WORKSPACE_REVIEW_POLICY,
+        db=db,
+    )
     for task in tasks:
         latest_change_set = task_service.get_latest_task_change_set_for_task(task.id)
         if not latest_change_set:
@@ -947,6 +983,10 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
                 "task_execution_id": latest_change_set.get("task_execution_id"),
                 "recorded_at": latest_change_set.get("recorded_at"),
                 "change_set": change_set_payload,
+                "review_decision": task_service.change_set_review_decision(
+                    change_set_payload,
+                    workspace_review_policy=workspace_review_policy,
+                ),
             }
         )
 
@@ -1009,24 +1049,55 @@ def promote_task_workspace(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    task.workspace_status = "promoted"
-    task.promoted_at = datetime.now(UTC)
-    task.promotion_note = (payload.note or "").strip() or None
-    task.updated_at = datetime.now(UTC)
     task_service = TaskService(db)
-    accepted_change_set = (
-        task_service.get_task_execution_change_set(
+    latest_change_set = task_service.get_latest_task_change_set_for_task(task.id)
+    if payload.task_execution_id is None and _change_set_has_changes(latest_change_set):
+        raise HTTPException(
+            status_code=400,
+            detail="task_execution_id is required to promote a recorded change set",
+        )
+
+    accepted_change_set = None
+    if payload.task_execution_id is not None:
+        _validate_task_execution_for_change_set(
+            db,
+            task=task,
+            task_execution_id=payload.task_execution_id,
+        )
+        if (
+            _change_set_has_changes(latest_change_set)
+            and latest_change_set.get("task_execution_id") != payload.task_execution_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="task_execution_id does not match the latest pending change set",
+            )
+        accepted_change_set = task_service.get_task_execution_change_set(
             task_execution_id=payload.task_execution_id
         )
-        if payload.task_execution_id is not None
-        else task_service.get_latest_task_change_set_for_task(task.id)
-    )
-    if accepted_change_set:
+        if not accepted_change_set:
+            raise HTTPException(
+                status_code=404,
+                detail="No change set recorded for task_execution_id",
+            )
         if accepted_change_set.get("task_id") not in {None, task.id}:
             raise HTTPException(
                 status_code=409,
                 detail="Change set belongs to a different task",
             )
+        if accepted_change_set.get("task_execution_id") not in {
+            None,
+            payload.task_execution_id,
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="Change set task_execution_id does not match request",
+            )
+
+    task.workspace_status = "promoted"
+    task.promoted_at = datetime.now(UTC)
+    task.promotion_note = (payload.note or "").strip() or None
+    task.updated_at = datetime.now(UTC)
     baseline_result = task_service.promote_task_into_baseline(project, task)
     if accepted_change_set:
         baseline_result["accepted_change_set"] = accepted_change_set

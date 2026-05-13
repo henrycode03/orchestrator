@@ -1392,16 +1392,39 @@ def finalize_successful_task(
     workspace_review_policy = get_effective_workspace_review_policy(
         settings.WORKSPACE_REVIEW_POLICY, db=db
     )
-    should_hold_for_review = workspace_review_policy == "hold_all" or (
-        workspace_review_policy == "hold_nontrivial" and bool(nontrivial_change_flags)
-    )
+    if hasattr(task_service, "change_set_review_decision"):
+        review_decision = task_service.change_set_review_decision(
+            task_change_set,
+            workspace_review_policy=workspace_review_policy,
+        )
+    else:
+        held_for_review = workspace_review_policy == "hold_all" or (
+            workspace_review_policy == "hold_nontrivial"
+            and bool(nontrivial_change_flags)
+        )
+        review_decision = {
+            "workspace_review_policy": workspace_review_policy,
+            "held_for_review": held_for_review,
+            "reason": (
+                "hold_all_review_required"
+                if workspace_review_policy == "hold_all"
+                else (
+                    "nontrivial_change_set_review_required" if held_for_review else None
+                )
+            ),
+            "changed_count": int((task_change_set or {}).get("changed_count") or 0),
+            "warning_flags": nontrivial_change_flags,
+        }
+    should_hold_for_review = bool(review_decision["held_for_review"])
     baseline_publish_result = None
     baseline_publish_validation = None
     if project and task.task_subfolder and not runs_in_canonical_baseline:
         if should_hold_for_review:
             baseline_publish_result = {
                 "auto_publish_skipped": True,
-                "reason": "nontrivial_change_set_review_required",
+                "reason": review_decision["reason"],
+                "held_for_review": True,
+                "review_decision": review_decision,
                 "files_copied": 0,
                 "accepted_change_set": task_change_set,
                 "warning_flags": nontrivial_change_flags,
@@ -1412,7 +1435,8 @@ def finalize_successful_task(
                 "[ORCHESTRATION] Task change set recorded; holding workspace for manual review instead of auto-publishing",
                 metadata={
                     "phase": "baseline_publish",
-                    "reason": "nontrivial_change_set_review_required",
+                    "reason": review_decision["reason"],
+                    "held_for_review": True,
                     "warning_flags": nontrivial_change_flags,
                     "changed_count": (task_change_set or {}).get("changed_count", 0),
                     "workspace_review_policy": workspace_review_policy,
@@ -1423,6 +1447,8 @@ def finalize_successful_task(
                 project, task
             )
             baseline_publish_result["workspace_review_policy"] = workspace_review_policy
+            baseline_publish_result["held_for_review"] = False
+            baseline_publish_result["review_decision"] = review_decision
             if task_change_set:
                 baseline_publish_result["accepted_change_set"] = {
                     "task_execution_id": ctx.task_execution_id,

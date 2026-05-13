@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
-import type { Project, Task, Session } from '../types/api';
+import type { ChangeSetReviewDecision, Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
 import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
 import {
@@ -71,6 +71,7 @@ function ProjectDetail() {
         deleted_files: string[];
         warning_flags: string[];
       };
+      review_decision?: ChangeSetReviewDecision;
     }>;
     ready_task_ids: number[];
   } | null>(null);
@@ -853,7 +854,7 @@ function ProjectDetail() {
           <div>
             <h2 className="text-sm font-medium text-white">Review Queue</h2>
             <p className="mt-1 text-xs text-slate-500">
-              Nontrivial task change sets held for operator review.
+              Task change sets held by backend review policy.
             </p>
           </div>
           {pendingChangeSets.length === 0 ? (
@@ -890,6 +891,11 @@ function ProjectDetail() {
                       <p className="mt-1 text-xs text-slate-500">
                         Execution {item.task_execution_id || 'latest'} · {formatWorkspaceStatus(item.workspace_status)}
                       </p>
+                      {item.review_decision?.reason && (
+                        <p className="mt-1 text-xs text-amber-300">
+                          {item.review_decision.reason.replace(/_/g, ' ')}
+                        </p>
+                      )}
                     </div>
                     <div className="flex gap-2 text-xs">
                       <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-emerald-200">
@@ -1156,6 +1162,7 @@ function ProjectDetail() {
                             </div>
                             <p className="mt-1 text-xs text-slate-500">
                               +{item.change_set.added_count} / ~{item.change_set.modified_count} / -{item.change_set.deleted_count}
+                              {item.review_decision?.reason ? ` · ${item.review_decision.reason.replace(/_/g, ' ')}` : ''}
                             </p>
                           </Link>
                         ))}

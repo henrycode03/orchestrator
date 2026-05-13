@@ -56,10 +56,19 @@ export interface TaskExecutionChangeSet {
   warning_flags: string[];
 }
 
+export interface ChangeSetReviewDecision {
+  workspace_review_policy: string;
+  held_for_review: boolean;
+  reason: string | null;
+  changed_count: number;
+  warning_flags: string[];
+}
+
 export interface TaskExecutionChangeSetResponse {
   task_id: number;
   task_execution_id: number | null;
   change_set: TaskExecutionChangeSet;
+  review_decision?: ChangeSetReviewDecision;
   recorded_at: string | null;
 }
 

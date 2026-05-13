@@ -373,6 +373,8 @@ def test_change_set_endpoints_show_and_reject_recorded_candidate(
     assert body["task_execution_id"] == execution.id
     assert body["change_set"]["added_files"] == ["notes.md"]
     assert body["change_set"]["modified_files"] == ["README.md"]
+    assert body["review_decision"]["changed_count"] == 2
+    assert "workspace_review_policy" in body["review_decision"]
 
     overview_response = authenticated_client.get(
         f"/api/v1/projects/{project.id}/workspace-overview"
@@ -382,6 +384,7 @@ def test_change_set_endpoints_show_and_reject_recorded_candidate(
     pending_change_sets = overview_response.json()["pending_change_sets"]
     assert pending_change_sets[0]["task_id"] == task.id
     assert pending_change_sets[0]["change_set"]["changed_count"] == 2
+    assert pending_change_sets[0]["review_decision"]["changed_count"] == 2
 
     reject_response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/change-set/reject",
@@ -395,6 +398,41 @@ def test_change_set_endpoints_show_and_reject_recorded_candidate(
     assert not (project_root / "notes.md").exists()
     db_session.refresh(task)
     assert task.workspace_status == "changes_requested"
+
+
+def test_change_set_reject_requires_explicit_task_execution_id(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "reject-explicit-execution"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="reject-explicit-execution",
+        workspace_path=str(project_root),
+    )
+    task = Task(
+        project_id=1,
+        title="Reject explicit execution",
+        description="Review candidate",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-reject-explicit",
+    )
+    db_session.add(project)
+    db_session.flush()
+    task.project_id = project.id
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/change-set/reject",
+        json={"note": "no implicit latest"},
+    )
+
+    assert response.status_code == 400
+    assert "task_execution_id is required" in response.json()["detail"]
 
 
 def test_rebuild_project_baseline_preserves_project_gitignore_guard(
@@ -584,6 +622,255 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
         ]
         == execution.id
     )
+
+
+def test_manual_promote_endpoint_requires_execution_id_for_recorded_change_set(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "manual-promote-requires-id"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="manual-promote-requires-id",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-manual"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("manual", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Manual promote requires id",
+        description="Accepted manually",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-manual",
+    )
+    session = SessionModel(project_id=project.id, name="manual-promote-session")
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            level="INFO",
+            message=TASK_CHANGE_SET_LOG_MESSAGE,
+            log_metadata=json.dumps(
+                {
+                    "schema": "openclaw.task_execution_change_set.v1",
+                    "task_id": task.id,
+                    "task_execution_id": execution.id,
+                    "changed_count": 1,
+                    "added_files": ["README.md"],
+                    "modified_files": [],
+                    "deleted_files": [],
+                    "warning_flags": [],
+                }
+            ),
+        )
+    )
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/promote",
+        json={"note": "accepted"},
+    )
+
+    assert response.status_code == 400
+    assert "task_execution_id is required" in response.json()["detail"]
+    db_session.refresh(task)
+    assert task.workspace_status == "ready"
+    assert task_dir.exists()
+
+
+def test_manual_promote_endpoint_rejects_stale_task_execution_id(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "manual-promote-stale-id"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="manual-promote-stale-id",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-manual"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("manual", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Manual promote stale id",
+        description="Accepted manually",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-manual",
+    )
+    session = SessionModel(project_id=project.id, name="manual-promote-session")
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+    first_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    latest_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=2,
+        status=TaskStatus.DONE,
+    )
+    db_session.add_all([first_execution, latest_execution])
+    db_session.commit()
+    db_session.refresh(first_execution)
+    db_session.refresh(latest_execution)
+
+    for execution, filename in (
+        (first_execution, "old.md"),
+        (latest_execution, "latest.md"),
+    ):
+        db_session.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=task.id,
+                task_execution_id=execution.id,
+                level="INFO",
+                message=TASK_CHANGE_SET_LOG_MESSAGE,
+                log_metadata=json.dumps(
+                    {
+                        "schema": "openclaw.task_execution_change_set.v1",
+                        "task_id": task.id,
+                        "task_execution_id": execution.id,
+                        "changed_count": 1,
+                        "added_files": [filename],
+                        "modified_files": [],
+                        "deleted_files": [],
+                        "warning_flags": [],
+                    }
+                ),
+            )
+        )
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/promote",
+        json={"note": "accepted", "task_execution_id": first_execution.id},
+    )
+
+    assert response.status_code == 409
+    assert "latest pending change set" in response.json()["detail"]
+    db_session.refresh(task)
+    assert task.workspace_status == "ready"
+    assert task_dir.exists()
+
+
+def test_change_set_actions_reject_task_execution_id_from_another_task(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-cross-task"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="change-set-cross-task",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="Target task",
+        description="Review candidate",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-target",
+    )
+    other_task = Task(
+        project_id=project.id,
+        title="Other task",
+        description="Wrong candidate",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-other",
+    )
+    session = SessionModel(project_id=project.id, name="cross-task-session")
+    db_session.add_all([task, other_task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(other_task)
+    db_session.refresh(session)
+
+    other_execution = TaskExecution(
+        session_id=session.id,
+        task_id=other_task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(other_execution)
+    db_session.commit()
+    db_session.refresh(other_execution)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=other_task.id,
+            task_execution_id=other_execution.id,
+            level="INFO",
+            message=TASK_CHANGE_SET_LOG_MESSAGE,
+            log_metadata=json.dumps(
+                {
+                    "schema": "openclaw.task_execution_change_set.v1",
+                    "task_id": other_task.id,
+                    "task_execution_id": other_execution.id,
+                    "changed_count": 1,
+                    "added_files": ["wrong.md"],
+                    "modified_files": [],
+                    "deleted_files": [],
+                    "warning_flags": [],
+                }
+            ),
+        )
+    )
+    db_session.commit()
+
+    promote_response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/promote",
+        json={"note": "accepted", "task_execution_id": other_execution.id},
+    )
+    reject_response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/change-set/reject",
+        json={"task_execution_id": other_execution.id, "note": "wrong task"},
+    )
+
+    assert promote_response.status_code == 409
+    assert "different task" in promote_response.json()["detail"]
+    assert reject_response.status_code == 409
+    assert "different task" in reject_response.json()["detail"]
+    db_session.refresh(task)
+    assert task.workspace_status == "ready"
 
 
 def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
