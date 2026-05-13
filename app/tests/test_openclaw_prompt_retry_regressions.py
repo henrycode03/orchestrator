@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
+from app.config import settings
 from app.services.agents.openclaw_service import OpenClawSessionService
 
 
@@ -38,6 +39,8 @@ def _seed_service_models(db_session):
 def test_execute_task_retries_context_overflow_with_compact_prompt(
     db_session, monkeypatch
 ):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "local")
     session, task = _seed_service_models(db_session)
     service = OpenClawSessionService(
         db_session, session.id, task.id, use_demo_mode=False

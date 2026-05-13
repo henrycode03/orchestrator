@@ -59,6 +59,115 @@ def test_rebuild_project_baseline_uses_only_promoted_workspaces(
     assert not (project_root / "unreviewed.txt").exists()
 
 
+def test_project_gitignore_guard_creates_runtime_exclusions(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "gitignore-guard"
+    project = Project(
+        name="gitignore-guard",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    result = TaskService(db_session).ensure_project_gitignore_guard(project)
+
+    gitignore = project_root / ".gitignore"
+    assert result["changed"] is True
+    assert gitignore.exists()
+    contents = gitignore.read_text(encoding="utf-8")
+    assert "# BEGIN OpenClaw workspace guard" in contents
+    assert ".openclaw/" in contents
+    assert "node_modules/" in contents
+    assert "__pycache__/" in contents
+
+
+def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "gitignore-preserve"
+    project_root.mkdir(parents=True)
+    gitignore = project_root / ".gitignore"
+    gitignore.write_text("dist/\n.env\n", encoding="utf-8")
+    project = Project(
+        name="gitignore-preserve",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_service = TaskService(db_session)
+    first = task_service.ensure_project_gitignore_guard(project)
+    second = task_service.ensure_project_gitignore_guard(project)
+
+    contents = gitignore.read_text(encoding="utf-8")
+    assert first["changed"] is True
+    assert second["changed"] is False
+    assert contents.startswith("dist/\n.env\n")
+    assert contents.count("# BEGIN OpenClaw workspace guard") == 1
+    assert contents.count(".openclaw/") == 1
+
+
+def test_promoted_workspace_archive_removes_visible_task_folder_but_preserves_rebuild_source(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "promoted-archive"
+    project_root.mkdir(parents=True)
+
+    project = Project(
+        name="promoted-archive",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-accepted"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("accepted", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Accepted task",
+        description="Accepted work",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-accepted",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    task_service = TaskService(db_session)
+    task_service.promote_task_into_baseline(project, task)
+    archive_result = task_service.archive_promoted_task_workspace(project, task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    assert archive_result["archived"] is True
+    assert not task_dir.exists()
+    archived_dir = Path(archive_result["archive_path"])
+    assert archived_dir.exists()
+    assert task.task_subfolder.startswith(".openclaw/promoted-workspace-archive/")
+    assert task.workspace_status == "promoted"
+    assert task.promoted_at is not None
+
+    audit = task_service.audit_project_workspace_shape(project)
+    assert audit["retained_task_workspace_count"] == 0
+    assert audit["duplicated_scaffold_artifacts"] == {}
+
+    (project_root / "README.md").unlink()
+    result = task_service.rebuild_project_baseline(project)
+
+    assert result["promoted_task_count"] == 1
+    assert result["files_copied"] == 1
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted"
+
+
 def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
     db_session,
     tmp_path: Path,
@@ -443,6 +552,93 @@ def test_workspace_cleanup_endpoint_deletes_when_explicitly_requested(
     db_session.refresh(blocked_task)
     assert blocked_task.task_subfolder is None
     assert blocked_task.workspace_status == "not_created"
+
+
+def test_workspace_archive_restore_endpoint_restores_archived_workspace(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "restore-archive"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="restore-archive",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    blocked_dir = project_root / "task-blocked"
+    blocked_dir.mkdir()
+    (blocked_dir / "artifact.txt").write_text("blocked", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Blocked task",
+        description="Failed",
+        status=TaskStatus.FAILED,
+        workspace_status="blocked",
+        task_subfolder="task-blocked",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    cleanup_response = authenticated_client.post(
+        f"/api/v1/projects/{project.id}/workspace-cleanup",
+        json={"dry_run": False},
+    )
+    assert cleanup_response.status_code == 200
+    archive_path = cleanup_response.json()["deleted"][0]["archive_path"]
+
+    restore_response = authenticated_client.post(
+        f"/api/v1/projects/{project.id}/workspace-archive/restore",
+        json={"task_id": task.id, "archive_path": archive_path},
+    )
+
+    assert restore_response.status_code == 200
+    body = restore_response.json()
+    restored_dir = Path(body["workspace_path"])
+    assert restored_dir.exists()
+    assert (restored_dir / "artifact.txt").read_text(encoding="utf-8") == "blocked"
+    db_session.refresh(task)
+    assert task.task_subfolder == restored_dir.name
+    assert task.workspace_status == "blocked"
+
+
+def test_workspace_archive_restore_rejects_archive_outside_project(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "restore-archive-guard"
+    project_root.mkdir(parents=True)
+    outside_archive = tmp_path / "outside-archive"
+    outside_archive.mkdir()
+    project = Project(
+        name="restore-archive-guard",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+    task = Task(
+        project_id=project.id,
+        title="No workspace",
+        description="Failed",
+        status=TaskStatus.FAILED,
+        workspace_status="not_created",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/v1/projects/{project.id}/workspace-archive/restore",
+        json={"task_id": task.id, "archive_path": str(outside_archive)},
+    )
+
+    assert response.status_code == 409
+    assert "outside this project's workspace archive" in response.json()["detail"]
 
 
 def test_changes_requested_new_session_retry_archives_old_workspace(

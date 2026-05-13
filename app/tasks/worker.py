@@ -433,6 +433,8 @@ def execute_orchestration_task(
 
         is_resume_execution = bool(resume_checkpoint_name)
         task_service = TaskService(db)
+        if project:
+            task_service.ensure_project_gitignore_guard(project)
         if runs_in_canonical_baseline and project and not is_resume_execution:
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)

@@ -1463,7 +1463,16 @@ def finalize_successful_task(
     task.error_message = None
     task.summary = summary_result.get("output", "")[:2000]
     task.current_step = len(orchestration_state.plan)
-    task.workspace_status = "ready" if task.task_subfolder else "not_created"
+    promoted_workspace_archive_result = None
+    if baseline_publish_result and project and task.task_subfolder:
+        promoted_workspace_archive_result = (
+            task_service.archive_promoted_task_workspace(project, task)
+        )
+        baseline_publish_result["promoted_workspace_archive_result"] = (
+            promoted_workspace_archive_result
+        )
+    else:
+        task.workspace_status = "ready" if task.task_subfolder else "not_created"
     if session_task_link:
         session_task_link.status = TaskStatus.DONE
         session_task_link.completed_at = task.completed_at
@@ -1554,6 +1563,7 @@ def finalize_successful_task(
             "phase": "completed",
             "steps": len(orchestration_state.plan),
             "baseline_publish_result": baseline_publish_result,
+            "promoted_workspace_archive_result": promoted_workspace_archive_result,
         },
     )
 

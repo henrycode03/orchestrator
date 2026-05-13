@@ -24,6 +24,10 @@ function TaskDetail() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [allowCurrentStepEdit, setAllowCurrentStepEdit] = useState(false);
   const [runInNewSession, setRunInNewSession] = useState(false);
+  const [requestChangesOpen, setRequestChangesOpen] = useState(false);
+  const [requestChangesNote, setRequestChangesNote] = useState('');
+  const [requestChangesRerun, setRequestChangesRerun] = useState(true);
+  const [requestChangesSubmitting, setRequestChangesSubmitting] = useState(false);
   const [editForm, setEditForm] = useState({
     title: '',
     description: '',
@@ -112,19 +116,28 @@ function TaskDetail() {
     }
   };
 
-  const handleRequestChanges = async () => {
+  const openRequestChanges = () => {
     if (!task) return;
-    const note = window.prompt('Describe what still needs to change before promotion:', task.promotion_note || '');
-    if (!note) return;
+    setRequestChangesNote(task.promotion_note || '');
+    setRequestChangesRerun(true);
+    setRequestChangesOpen(true);
+  };
+
+  const submitRequestChanges = async () => {
+    if (!task || !requestChangesNote.trim()) return;
     try {
-      await tasksAPI.requestWorkspaceChanges(task.id, note);
-      if (window.confirm('Queue a new isolated repair run for this task now?')) {
+      setRequestChangesSubmitting(true);
+      await tasksAPI.requestWorkspaceChanges(task.id, requestChangesNote.trim());
+      if (requestChangesRerun) {
         await tasksAPI.retry(task.id, { execution_scope: 'new_session', create_new_session: true });
       }
       await fetchTask();
+      setRequestChangesOpen(false);
     } catch (error) {
       console.error('Failed to request workspace changes:', error);
       setSaveError('Failed to mark workspace as needing changes');
+    } finally {
+      setRequestChangesSubmitting(false);
     }
   };
 
@@ -142,6 +155,37 @@ function TaskDetail() {
       setSaveError('Failed to queue the task for another run');
     }
   };
+
+  const extractArchivePath = (targetTask: Task) => {
+    const match = (targetTask.promotion_note || '').match(
+      /Archived (?:retained|previous) workspace(?: for repair rerun)? at (.+?)(?:\n|$)/
+    );
+    return match?.[1]?.trim() || null;
+  };
+
+  const handleRestoreArchivedWorkspace = async () => {
+    if (!task) return;
+    const archivePath = extractArchivePath(task);
+    if (!archivePath) {
+      setSaveError('No archived workspace path was found for this task.');
+      return;
+    }
+    try {
+      setSaveError(null);
+      await projectsAPI.restoreWorkspaceArchive(task.project_id, {
+        task_id: task.id,
+        archive_path: archivePath,
+      });
+      await fetchTask();
+    } catch (error) {
+      console.error('Failed to restore archived workspace:', error);
+      setSaveError('Failed to restore archived workspace');
+    }
+  };
+
+  const isArchivedPromotedWorkspace = (targetTask: Task) =>
+    targetTask.workspace_status === 'promoted' &&
+    (targetTask.task_subfolder || '').startsWith('.openclaw/promoted-workspace-archive/');
 
   const stepsJsonState = useMemo(() => {
     if (!editForm.steps.trim()) {
@@ -395,7 +439,7 @@ function TaskDetail() {
                 <span className="rounded-full border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-3 py-1 text-xs capitalize text-slate-200">
                   Workspace: {String(task.workspace_status || 'not_created').replace(/_/g, ' ')}
                 </span>
-                {task.task_subfolder && (
+                {task.task_subfolder && !isArchivedPromotedWorkspace(task) && (
                   <span className="rounded-full border border-[color:var(--oc-border-soft)] px-3 py-1 text-xs text-slate-400">
                     {task.task_subfolder}
                   </span>
@@ -439,8 +483,13 @@ function TaskDetail() {
                   </Button>
                 )}
                 {task.task_subfolder && task.workspace_status !== 'promoted' && (
-                  <Button size="sm" variant="outline" onClick={handleRequestChanges}>
+                  <Button size="sm" variant="outline" onClick={openRequestChanges}>
                     Request Changes
+                  </Button>
+                )}
+                {!task.task_subfolder && extractArchivePath(task) && (
+                  <Button size="sm" variant="outline" onClick={handleRestoreArchivedWorkspace}>
+                    Restore Archived Workspace
                   </Button>
                 )}
               </div>
@@ -495,6 +544,54 @@ function TaskDetail() {
           </div>
         )}
       </div>
+      {requestChangesOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white">Request Changes</h3>
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Change request
+                </label>
+                <TextArea
+                  value={requestChangesNote}
+                  onChange={(event) => setRequestChangesNote(event.target.value)}
+                  className="min-h-[120px] bg-[color:var(--oc-surface-deep)] border-[color:var(--oc-border-soft)]"
+                  placeholder="Describe what must change before this workspace can be promoted."
+                />
+              </div>
+              <label className="flex items-start gap-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3 text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={requestChangesRerun}
+                  onChange={(event) => setRequestChangesRerun(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-[color:var(--oc-border)] bg-[color:var(--oc-shell)]"
+                />
+                <span>Queue a new isolated repair run after saving this request.</span>
+              </label>
+              <div className="flex gap-2 pt-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => setRequestChangesOpen(false)}
+                  disabled={requestChangesSubmitting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  className="flex-1"
+                  onClick={submitRequestChanges}
+                  disabled={!requestChangesNote.trim() || requestChangesSubmitting}
+                >
+                  {requestChangesSubmitting ? 'Saving...' : 'Save Request'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

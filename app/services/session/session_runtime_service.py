@@ -181,6 +181,7 @@ def ensure_task_workspace(
     project_workspace_path = Path(
         resolve_project_workspace_path(project.workspace_path, project.name)
     )
+    TaskService(db).ensure_project_gitignore_guard(project)
     orchestration_state._workspace_path_override = str(project_workspace_path)
 
     if task.task_subfolder:

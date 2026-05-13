@@ -46,6 +46,8 @@ function ProjectDetail() {
         baseline_diff: {
           added_count: number;
           modified_count: number;
+          added_files?: string[];
+          modified_files?: string[];
         };
       }>;
       duplicated_scaffold_artifacts: Record<string, number>;
@@ -80,6 +82,13 @@ function ProjectDetail() {
   const [savingProjectMeta, setSavingProjectMeta] = useState(false);
   const [rebuildingBaseline, setRebuildingBaseline] = useState(false);
   const [cleaningWorkspaces, setCleaningWorkspaces] = useState(false);
+  const [promoteTask, setPromoteTask] = useState<Task | null>(null);
+  const [promotionNote, setPromotionNote] = useState('');
+  const [promotingWorkspace, setPromotingWorkspace] = useState(false);
+  const [requestChangesTask, setRequestChangesTask] = useState<Task | null>(null);
+  const [requestChangesNote, setRequestChangesNote] = useState('');
+  const [requestChangesRerun, setRequestChangesRerun] = useState(true);
+  const [requestChangesSubmitting, setRequestChangesSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -187,35 +196,76 @@ function ProjectDetail() {
         0
       )
     : 0;
+  const extractArchivePath = (task: Task) => {
+    const match = (task.promotion_note || '').match(
+      /Archived (?:retained|previous) workspace(?: for repair rerun)? at (.+?)(?:\n|$)/
+    );
+    return match?.[1]?.trim() || null;
+  };
 
-  const handlePromoteTask = async (task: Task) => {
-    const note = window.prompt('Optional promotion note for this task workspace:', task.promotion_note || '');
-    if (note === null) return;
+  const isArchivedPromotedWorkspace = (task: Task) =>
+    task.workspace_status === 'promoted' &&
+    (task.task_subfolder || '').startsWith('.openclaw/promoted-workspace-archive/');
+
+  const getTaskWorkspaceDiff = (task: Task) =>
+    workspaceOverview?.audit?.retained_task_workspaces.find((item) => item.task_id === task.id)
+      ?.baseline_diff || null;
+
+  const openPromoteTask = (task: Task) => {
+    setPromoteTask(task);
+    setPromotionNote(task.promotion_note || '');
+  };
+
+  const submitPromoteTask = async () => {
+    if (!promoteTask || !id) return;
     try {
-      const response = await tasksAPI.promoteWorkspace(task.id, note || undefined);
-      setTasks((current) => current.map((item) => (item.id === task.id ? response.data : item)));
+      setPromotingWorkspace(true);
+      const response = await tasksAPI.promoteWorkspace(
+        promoteTask.id,
+        promotionNote.trim() || undefined
+      );
+      setTasks((current) =>
+        current.map((item) => (item.id === promoteTask.id ? response.data : item))
+      );
       const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
       setWorkspaceOverview(workspaceResponse.data || null);
+      setPromoteTask(null);
     } catch (error) {
       console.error('Failed to promote task workspace:', error);
       alert('Failed to promote task workspace. Please try again.');
+    } finally {
+      setPromotingWorkspace(false);
     }
   };
 
-  const handleRequestChanges = async (task: Task) => {
-    const note = window.prompt('Describe what still needs to change before promotion:', task.promotion_note || '');
-    if (!note) return;
+  const openRequestChanges = (task: Task) => {
+    setRequestChangesTask(task);
+    setRequestChangesNote(task.promotion_note || '');
+    setRequestChangesRerun(true);
+  };
+
+  const submitRequestChanges = async () => {
+    if (!requestChangesTask || !id || !requestChangesNote.trim()) return;
     try {
-      const response = await tasksAPI.requestWorkspaceChanges(task.id, note);
-      if (window.confirm('Queue a new isolated repair run for this task now?')) {
-        await tasksAPI.retry(task.id, { execution_scope: 'new_session', create_new_session: true });
+      setRequestChangesSubmitting(true);
+      const response = await tasksAPI.requestWorkspaceChanges(
+        requestChangesTask.id,
+        requestChangesNote.trim()
+      );
+      if (requestChangesRerun) {
+        await tasksAPI.retry(requestChangesTask.id, { execution_scope: 'new_session', create_new_session: true });
       }
-      setTasks((current) => current.map((item) => (item.id === task.id ? response.data : item)));
+      setTasks((current) =>
+        current.map((item) => (item.id === requestChangesTask.id ? response.data : item))
+      );
       const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
       setWorkspaceOverview(workspaceResponse.data || null);
+      setRequestChangesTask(null);
     } catch (error) {
       console.error('Failed to mark task workspace for changes:', error);
       alert('Failed to update workspace review state. Please try again.');
+    } finally {
+      setRequestChangesSubmitting(false);
     }
   };
 
@@ -267,6 +317,30 @@ function ProjectDetail() {
       alert('Failed to clean up retained workspaces. Please try again.');
     } finally {
       setCleaningWorkspaces(false);
+    }
+  };
+
+  const handleRestoreArchivedWorkspace = async (task: Task) => {
+    if (!id) return;
+    const archivePath = extractArchivePath(task);
+    if (!archivePath) {
+      alert('No archived workspace path was found for this task.');
+      return;
+    }
+    try {
+      await projectsAPI.restoreWorkspaceArchive(Number(id), {
+        task_id: task.id,
+        archive_path: archivePath,
+      });
+      const [tasksRes, workspaceRes] = await Promise.all([
+        tasksAPI.getByProject(Number(id)),
+        projectsAPI.getWorkspaceOverview(Number(id)),
+      ]);
+      setTasks(tasksRes.data);
+      setWorkspaceOverview(workspaceRes.data);
+    } catch (error) {
+      console.error('Failed to restore archived workspace:', error);
+      alert('Failed to restore archived workspace. Please try again.');
     }
   };
 
@@ -905,7 +979,7 @@ function ProjectDetail() {
                             <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize ${getWorkspaceBadgeClass(task.workspace_status)}`}>
                               {formatWorkspaceStatus(task.workspace_status)}
                             </span>
-                            {task.task_subfolder && (
+                            {task.task_subfolder && !isArchivedPromotedWorkspace(task) && (
                               <span className="rounded-full border border-[color:var(--oc-border)] px-2.5 py-0.5 text-xs text-slate-400">
                                 {task.task_subfolder}
                               </span>
@@ -950,7 +1024,7 @@ function ProjectDetail() {
                             )}
                             {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                               <button
-                                onClick={() => handlePromoteTask(task)}
+                                onClick={() => openPromoteTask(task)}
                                 className="w-full rounded-md px-2.5 py-2 text-left text-xs text-emerald-300 transition-colors hover:bg-emerald-950/40"
                               >
                                 Promote workspace
@@ -958,10 +1032,18 @@ function ProjectDetail() {
                             )}
                             {task.task_subfolder && task.workspace_status !== 'promoted' && (
                               <button
-                                onClick={() => handleRequestChanges(task)}
+                                onClick={() => openRequestChanges(task)}
                                 className="w-full rounded-md px-2.5 py-2 text-left text-xs text-amber-300 transition-colors hover:bg-amber-950/40"
                               >
                                 Request changes
+                              </button>
+                            )}
+                            {!task.task_subfolder && extractArchivePath(task) && (
+                              <button
+                                onClick={() => handleRestoreArchivedWorkspace(task)}
+                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-primary-300 transition-colors hover:bg-primary-950/40"
+                              >
+                                Restore archived workspace
                               </button>
                             )}
                             <button
@@ -985,6 +1067,129 @@ function ProjectDetail() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Promote Workspace Modal */}
+      {promoteTask && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white">Promote Workspace</h3>
+            {(() => {
+              const diff = getTaskWorkspaceDiff(promoteTask);
+              const changedFiles = [
+                ...(diff?.added_files || []).map((path) => ({ path, type: 'Added' })),
+                ...(diff?.modified_files || []).map((path) => ({ path, type: 'Modified' })),
+              ];
+              return (
+                <div className="mt-4 space-y-4">
+                  <div className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Pending diff</p>
+                    <p className="mt-1 text-sm text-slate-300">
+                      {diff
+                        ? `${diff.added_count} added, ${diff.modified_count} modified`
+                        : 'No baseline diff data available for this workspace'}
+                    </p>
+                    {changedFiles.length > 0 && (
+                      <div className="mt-3 max-h-40 overflow-y-auto rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-shell)]">
+                        {changedFiles.slice(0, 20).map((item) => (
+                          <div
+                            key={`${item.type}-${item.path}`}
+                            className="flex items-center gap-2 border-b border-[color:var(--oc-border-soft)] px-3 py-1.5 last:border-b-0"
+                          >
+                            <span className="w-16 text-[11px] uppercase tracking-wide text-slate-500">
+                              {item.type}
+                            </span>
+                            <span className="truncate font-mono text-xs text-slate-300">{item.path}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                      Promotion note
+                    </label>
+                    <textarea
+                      value={promotionNote}
+                      onChange={(event) => setPromotionNote(event.target.value)}
+                      rows={3}
+                      className="w-full resize-none rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
+                      placeholder="Optional note for this promoted workspace."
+                    />
+                  </div>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setPromoteTask(null)}
+                      disabled={promotingWorkspace}
+                      className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={submitPromoteTask}
+                      disabled={promotingWorkspace}
+                      className="flex-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                    >
+                      {promotingWorkspace ? 'Promoting...' : 'Promote Workspace'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Request Changes Modal */}
+      {requestChangesTask && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white">Request Changes</h3>
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Change request
+                </label>
+                <textarea
+                  value={requestChangesNote}
+                  onChange={(event) => setRequestChangesNote(event.target.value)}
+                  rows={5}
+                  className="w-full resize-y rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
+                  placeholder="Describe what must change before this workspace can be promoted."
+                />
+              </div>
+              <label className="flex items-start gap-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3 text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={requestChangesRerun}
+                  onChange={(event) => setRequestChangesRerun(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-[color:var(--oc-border)] bg-[color:var(--oc-shell)]"
+                />
+                <span>Queue a new isolated repair run after saving this request.</span>
+              </label>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setRequestChangesTask(null)}
+                  disabled={requestChangesSubmitting}
+                  className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={submitRequestChanges}
+                  disabled={!requestChangesNote.trim() || requestChangesSubmitting}
+                  className="flex-1 rounded-md border border-amber-500/30 bg-amber-500/15 px-3 py-2 text-sm text-amber-200 transition-colors hover:bg-amber-500/20 disabled:opacity-50"
+                >
+                  {requestChangesSubmitting ? 'Saving...' : 'Save Request'}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

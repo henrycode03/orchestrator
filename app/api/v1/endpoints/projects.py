@@ -43,6 +43,11 @@ class WorkspaceCleanupRequest(BaseModel):
     include_blocked: bool = True
 
 
+class WorkspaceArchiveRestoreRequest(BaseModel):
+    task_id: int
+    archive_path: str
+
+
 @router.post(
     "/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED
 )
@@ -62,6 +67,7 @@ def create_project(
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
+    TaskService(db).ensure_project_gitignore_guard(db_project)
     return db_project
 
 
@@ -227,6 +233,38 @@ def cleanup_project_task_workspaces(
     }
 
 
+@router.post("/projects/{project_id}/workspace-archive/restore")
+def restore_project_task_workspace_archive(
+    project_id: int,
+    payload: WorkspaceArchiveRestoreRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Restore an archived task workspace after operator review."""
+    project = get_project_for_user(db, project_id, current_user)
+    task = (
+        db.query(Task)
+        .filter(Task.id == payload.task_id, Task.project_id == project.id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    try:
+        result = TaskService(db).restore_archived_task_workspace(
+            project,
+            task,
+            archive_path=payload.archive_path,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        **result,
+    }
+
+
 @router.put("/projects/{project_id}", response_model=ProjectResponse)
 def update_project(
     project_id: int,
@@ -251,6 +289,7 @@ def update_project(
 
     db.commit()
     db.refresh(db_project)
+    TaskService(db).ensure_project_gitignore_guard(db_project)
     return db_project
 
 

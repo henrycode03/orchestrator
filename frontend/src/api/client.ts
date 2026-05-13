@@ -236,6 +236,23 @@ export const projectsAPI = {
       candidates: Array<{ task_id: number; title: string; task_subfolder: string; archive_path: string }>;
       deleted: Array<{ task_id: number; title: string; task_subfolder: string; archive_path: string }>;
     }>(`/projects/${projectId}/workspace-cleanup`, options || {}),
+  restoreWorkspaceArchive: (
+    projectId: number,
+    data: {
+      task_id: number;
+      archive_path: string;
+    }
+  ) =>
+    apiClient.post<{
+      project_id: number;
+      project_name: string;
+      restored: boolean;
+      task_id: number;
+      archive_path: string;
+      workspace_path: string;
+      task_subfolder: string;
+      workspace_status: string;
+    }>(`/projects/${projectId}/workspace-archive/restore`, data),
 
   // Get logs for a project (filters by project_id, not session_id)
   getLogs: (

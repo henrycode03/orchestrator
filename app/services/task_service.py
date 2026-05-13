@@ -25,9 +25,20 @@ HYDRATION_EXCLUDED_NAMES = {
     "site-packages",
     "venv",
 }
+PROJECT_GITIGNORE_GUARD_START = "# BEGIN OpenClaw workspace guard"
+PROJECT_GITIGNORE_GUARD_END = "# END OpenClaw workspace guard"
+PROJECT_GITIGNORE_GUARD_LINES = [
+    ".openclaw/",
+    "__pycache__/",
+    "node_modules/",
+    ".venv/",
+    "venv/",
+    ".pytest_cache/",
+]
 TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
 AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
+PROMOTED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/promoted-workspace-archive"
 WORKSPACE_AUDIT_SCAFFOLD_NAMES = {
     ".openclaw",
     "__pycache__",
@@ -85,6 +96,52 @@ class TaskService:
                 return nested_candidate.resolve()
             return explicit_path
         return resolve_project_workspace_path(project.workspace_path, project.name)
+
+    def ensure_project_gitignore_guard(self, project: Project) -> dict[str, Any]:
+        """Ensure project-local runtime state is ignored by Git."""
+        project_root = self.get_project_root(project).resolve()
+        project_root.mkdir(parents=True, exist_ok=True)
+        gitignore_path = project_root / ".gitignore"
+        existing = (
+            gitignore_path.read_text(encoding="utf-8")
+            if gitignore_path.exists()
+            else ""
+        )
+        guard_block = "\n".join(
+            [
+                PROJECT_GITIGNORE_GUARD_START,
+                *PROJECT_GITIGNORE_GUARD_LINES,
+                PROJECT_GITIGNORE_GUARD_END,
+            ]
+        )
+        pattern = re.compile(
+            rf"{re.escape(PROJECT_GITIGNORE_GUARD_START)}.*?{re.escape(PROJECT_GITIGNORE_GUARD_END)}",
+            re.DOTALL,
+        )
+        if pattern.search(existing):
+            updated = pattern.sub(guard_block, existing)
+        else:
+            normalized_existing = existing.rstrip()
+            updated = (
+                f"{normalized_existing}\n\n{guard_block}\n"
+                if normalized_existing
+                else f"{guard_block}\n"
+            )
+
+        if updated == existing:
+            return {
+                "changed": False,
+                "path": str(gitignore_path),
+                "entries": PROJECT_GITIGNORE_GUARD_LINES,
+            }
+
+        gitignore_path.write_text(updated, encoding="utf-8")
+        gitignore_path.chmod(0o666)
+        return {
+            "changed": True,
+            "path": str(gitignore_path),
+            "entries": PROJECT_GITIGNORE_GUARD_LINES,
+        }
 
     def _tracked_workspace_files(self, root: Path) -> list[Path]:
         if not root.exists():
@@ -1081,6 +1138,9 @@ class TaskService:
             workspace_dir = (project_root / task_subfolder).resolve()
             workspace_exists = workspace_dir.exists()
             workspace_status = getattr(task, "workspace_status", None) or "unknown"
+            is_visible_task_workspace = workspace_dir.parent == project_root
+            if workspace_status == "promoted" and not is_visible_task_workspace:
+                continue
             is_unpromoted_done = (
                 getattr(task, "status", None) == TaskStatus.DONE
                 and workspace_status != "promoted"
@@ -1274,6 +1334,82 @@ class TaskService:
             "skipped": skipped,
         }
 
+    def archive_promoted_task_workspace(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        reason: str = "auto_published_to_baseline",
+    ) -> dict[str, Any]:
+        """Move an accepted task workspace out of the visible project root."""
+        project_root = self.get_project_root(project).resolve()
+        task_subfolder = getattr(task, "task_subfolder", None)
+        if not task_subfolder:
+            return {"archived": False, "reason": "task_has_no_workspace"}
+
+        workspace_dir = (project_root / task_subfolder).resolve()
+        archive_root = (project_root / PROMOTED_WORKSPACE_ARCHIVE_ROOT).resolve()
+        if workspace_dir == archive_root or workspace_dir.is_relative_to(archive_root):
+            task.workspace_status = "promoted"
+            task.promoted_at = getattr(task, "promoted_at", None) or datetime.now(UTC)
+            return {
+                "archived": False,
+                "reason": "already_archived",
+                "path": str(workspace_dir),
+            }
+        if not workspace_dir.exists():
+            task.workspace_status = "promoted"
+            task.promoted_at = getattr(task, "promoted_at", None) or datetime.now(UTC)
+            return {
+                "archived": False,
+                "reason": "workspace_missing",
+                "path": str(workspace_dir),
+            }
+        if workspace_dir.parent != project_root:
+            task.workspace_status = "promoted"
+            task.promoted_at = getattr(task, "promoted_at", None) or datetime.now(UTC)
+            return {
+                "archived": False,
+                "reason": "not_direct_project_child",
+                "path": str(workspace_dir),
+            }
+        if (
+            workspace_dir.name in HYDRATION_EXCLUDED_NAMES
+            or workspace_dir.name == LEGACY_BASELINE_DIR_NAME
+        ):
+            return {
+                "archived": False,
+                "reason": "reserved_workspace_name",
+                "path": str(workspace_dir),
+            }
+
+        archived_at = datetime.now(UTC)
+        archive_dir = (
+            archive_root
+            / archived_at.strftime("%Y%m%d-%H%M%S")
+            / f"task-{task.id}-{workspace_dir.name}"
+        ).resolve()
+        archive_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(workspace_dir), str(archive_dir))
+
+        archive_subfolder = archive_dir.relative_to(project_root).as_posix()
+        existing_note = (getattr(task, "promotion_note", None) or "").strip()
+        archive_note = f"Archived promoted workspace at {archive_dir} after {reason}"
+        task.task_subfolder = archive_subfolder
+        task.workspace_status = "promoted"
+        task.promoted_at = archived_at
+        task.promotion_note = (
+            f"{existing_note}\n{archive_note}" if existing_note else archive_note
+        )
+        task.updated_at = archived_at
+        return {
+            "archived": True,
+            "reason": reason,
+            "path": str(workspace_dir),
+            "archive_path": str(archive_dir),
+            "task_subfolder": archive_subfolder,
+        }
+
     def archive_task_workspace_for_repair_rerun(
         self,
         project: Project,
@@ -1337,6 +1473,64 @@ class TaskService:
             "reason": reason,
             "path": str(workspace_dir),
             "archive_path": str(archive_dir),
+        }
+
+    def restore_archived_task_workspace(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        archive_path: str,
+    ) -> dict[str, Any]:
+        """Restore one archived task workspace back under the project root."""
+        project_root = self.get_project_root(project).resolve()
+        archive_dir = Path(archive_path).expanduser().resolve()
+        allowed_roots = [
+            (project_root / ".openclaw" / "retained-workspace-archive").resolve(),
+            (project_root / ".openclaw" / "requested-changes-archive").resolve(),
+        ]
+        if not any(
+            archive_dir == root or archive_dir.is_relative_to(root)
+            for root in allowed_roots
+        ):
+            raise ValueError("archive path is outside this project's workspace archive")
+        if not archive_dir.exists() or not archive_dir.is_dir():
+            raise ValueError("archive path does not exist")
+        if getattr(task, "task_subfolder", None):
+            raise ValueError("task already has an active workspace")
+
+        raw_name = archive_dir.name
+        prefix = f"task-{task.id}-"
+        restored_name = (
+            raw_name[len(prefix) :] if raw_name.startswith(prefix) else raw_name
+        )
+        restored_name = restored_name.strip() or f"task-{task.id}-restored"
+        target_dir = (project_root / restored_name).resolve()
+        if target_dir.parent != project_root:
+            raise ValueError("restored workspace name would escape project root")
+        if target_dir.exists():
+            suffix = int(datetime.now(UTC).timestamp())
+            target_dir = (project_root / f"{restored_name}-restored-{suffix}").resolve()
+
+        shutil.move(str(archive_dir), str(target_dir))
+        task.task_subfolder = target_dir.name
+        task.workspace_status = self.infer_workspace_status(task)
+        task.updated_at = datetime.now(UTC)
+        db_note = (getattr(task, "promotion_note", None) or "").strip()
+        task.promotion_note = (
+            f"{db_note}\nRestored archived workspace from {archive_dir}"
+            if db_note
+            else f"Restored archived workspace from {archive_dir}"
+        )
+        self.db.commit()
+        self.db.refresh(task)
+        return {
+            "restored": True,
+            "task_id": task.id,
+            "archive_path": str(archive_dir),
+            "workspace_path": str(target_dir),
+            "task_subfolder": task.task_subfolder,
+            "workspace_status": task.workspace_status,
         }
 
     def validate_project_baseline(

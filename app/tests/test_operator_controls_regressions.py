@@ -84,6 +84,7 @@ def test_settings_can_select_openai_backend(authenticated_client):
 def test_checkpoint_inspection_returns_validation_and_plan_preview(
     authenticated_client, db_session
 ):
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
     project = Project(name="Checkpoint Project")
     db_session.add(project)
     db_session.commit()

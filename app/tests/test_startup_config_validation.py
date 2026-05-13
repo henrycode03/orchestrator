@@ -63,14 +63,15 @@ def test_settings_accepts_short_runtime_config_names():
     from app.config import Settings
 
     settings = Settings(
-        AGENT_BACKEND="docker_openclaw",
-        AGENT_MODEL="local-docker",
+        _env_file=None,
+        AGENT_BACKEND="local_openclaw",
+        AGENT_MODEL="local",
         PLANNING_REPAIR_ENABLED=False,
         LANGFUSE_ENABLED=True,
     )
 
-    assert settings.AGENT_BACKEND == "docker_openclaw"
-    assert settings.AGENT_MODEL == "local-docker"
+    assert settings.AGENT_BACKEND == "local_openclaw"
+    assert settings.AGENT_MODEL == "local"
     assert settings.PLANNING_REPAIR_ENABLED is False
     assert settings.LANGFUSE_ENABLED is True
 
@@ -79,6 +80,7 @@ def test_settings_keeps_legacy_orchestrator_env_aliases():
     from app.config import Settings
 
     settings = Settings(
+        _env_file=None,
         ORCHESTRATOR_AGENT_BACKEND="openai_responses_api",
         ORCHESTRATOR_AGENT_MODEL_FAMILY="gpt-5",
         ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED=False,
