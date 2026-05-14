@@ -1009,6 +1009,8 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
         change_set_payload = latest_change_set.get("change_set") or {}
         if int(change_set_payload.get("changed_count") or 0) <= 0:
             continue
+        if change_set_payload.get("disposition") != "captured":
+            continue
         pending_change_sets.append(
             {
                 "task_id": task.id,
@@ -1061,24 +1063,25 @@ def retry_task(
     return _queue_task_retry(db, task, retry_request=retry_request)
 
 
+@router.post("/tasks/{task_id}/accept", response_model=TaskResponse)
 @router.post("/tasks/{task_id}/promote", response_model=TaskResponse)
-def promote_task_workspace(
+def accept_task_workspace(
     task_id: int,
     payload: TaskPromotionRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Mark a task workspace as reviewed and promoted into the project baseline."""
+    """Accept a reviewed task workspace into the project baseline."""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.status != TaskStatus.DONE:
         raise HTTPException(
-            status_code=409, detail="Only completed tasks can be promoted"
+            status_code=409, detail="Only completed tasks can be accepted"
         )
     if not task.task_subfolder:
         raise HTTPException(
-            status_code=409, detail="Task has no workspace folder to promote"
+            status_code=409, detail="Task has no workspace folder to accept"
         )
 
     project = db.query(Project).filter(Project.id == task.project_id).first()
@@ -1090,7 +1093,7 @@ def promote_task_workspace(
     if payload.task_execution_id is None and _change_set_has_changes(latest_change_set):
         raise HTTPException(
             status_code=400,
-            detail="task_execution_id is required to promote a recorded change set",
+            detail="task_execution_id is required to accept a recorded change set",
         )
 
     accepted_change_set = None
@@ -1143,12 +1146,12 @@ def promote_task_workspace(
         disposition_record = task_service.mark_task_execution_change_set_disposition(
             task_execution_id=payload.task_execution_id,
             disposition="promoted",
-            reason=(payload.note or "operator_promoted_change_set").strip()
-            or "operator_promoted_change_set",
+            reason=(payload.note or "operator_accepted_change_set").strip()
+            or "operator_accepted_change_set",
             metadata=build_operator_override_metadata(
-                action="promote",
-                reason=(payload.note or "operator_promoted_change_set").strip()
-                or "operator_promoted_change_set",
+                action="accept",
+                reason=(payload.note or "operator_accepted_change_set").strip()
+                or "operator_accepted_change_set",
                 task_execution_id=payload.task_execution_id,
                 change_set=accepted_change_set,
                 operator=_operator_identifier(current_user),
@@ -1175,7 +1178,8 @@ def promote_task_workspace(
             task_id=task.id,
             level="INFO",
             message=(
-                f"Workspace promoted into project baseline ({baseline_result['files_copied']} files copied)"
+                "Workspace accepted into project baseline "
+                f"({baseline_result['files_copied']} files copied)"
             ),
             log_metadata=json.dumps(
                 {
@@ -1271,7 +1275,7 @@ def update_task(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Cannot lower current_step on a promoted task workspace. "
+                    "Cannot lower current_step on an accepted task workspace. "
                     "Request changes or rerun in a new isolated session instead."
                 ),
             )

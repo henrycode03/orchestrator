@@ -480,6 +480,73 @@ def test_command_fix_replaces_failed_structured_ops_before_retry(db_session, tmp
     assert repaired_step.get("ops") == []
 
 
+def test_code_fix_verification_replaces_stale_commands_before_retry(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "success",
+                "output": "index present",
+            },
+            {
+                "output": json.dumps(
+                    {
+                        "fix_type": "code_fix",
+                        "analysis": "Use the existing nested stylesheet path.",
+                        "fix": "Verify css/style.css instead of style.css.",
+                        "verification": "test -f index.html && test -f css/style.css",
+                        "expected_files": ["index.html", "css/style.css"],
+                        "confidence": "HIGH",
+                    }
+                )
+            },
+            {
+                "status": "success",
+                "output": "verified",
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={
+            "description": "Inspect existing page",
+            "commands": ["cat index.html", "cat style.css"],
+            "verification": "",
+            "expected_files": ["index.html", "style.css"],
+        },
+    )
+    (ctx.orchestration_state.project_dir / "index.html").write_text(
+        "<link rel='stylesheet' href='css/style.css'>",
+        encoding="utf-8",
+    )
+    (ctx.orchestration_state.project_dir / "css").mkdir()
+    (ctx.orchestration_state.project_dir / "css" / "style.css").write_text(
+        "body { color: green; }",
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    repaired_step = ctx.orchestration_state.plan[0]
+    assert repaired_step["commands"] == ["test -f index.html && test -f css/style.css"]
+    assert (
+        repaired_step["verification"] == "test -f index.html && test -f css/style.css"
+    )
+    assert repaired_step["expected_files"] == ["index.html", "css/style.css"]
+
+
 def test_non_actionable_code_fix_for_structured_ops_is_rejected(db_session, tmp_path):
     runtime = _FakeRuntime(
         [
@@ -539,6 +606,46 @@ def test_non_actionable_code_fix_for_structured_ops_is_rejected(db_session, tmp_
     assert len(runtime.prompts) == 1
     assert ctx.task.status == TaskStatus.FAILED
     assert "not actionable" in ctx.task.error_message
+
+
+def test_max_step_attempts_pauses_session(db_session, tmp_path, monkeypatch):
+    import app.services.orchestration.phases.execution_loop as execution_loop
+
+    monkeypatch.setattr(execution_loop, "MAX_STEP_ATTEMPTS", 1)
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "still failing",
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={
+            "description": "Run impossible command",
+            "commands": ["false"],
+            "verification": "",
+        },
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result == {"status": "failed", "reason": "max_attempts_reached"}
+    db_session.refresh(ctx.session)
+    assert ctx.session.status == "paused"
+    assert ctx.session.is_active is False
+    assert ctx.session.last_alert_level == "error"
 
 
 def test_typed_ops_fix_replaces_failed_structured_ops_before_retry(

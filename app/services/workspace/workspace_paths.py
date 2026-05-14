@@ -29,6 +29,7 @@ PROMOTED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/promoted-workspace-archive"
 REJECTED_CHANGE_ARCHIVE_ROOT = ".openclaw/rejected-change-archive"
 RETAINED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/retained-workspace-archive"
 REQUESTED_CHANGES_ARCHIVE_ROOT = ".openclaw/requested-changes-archive"
+TASK_REPORT_ROOT = ".openclaw/task-reports"
 TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 
 PROJECT_GITIGNORE_GUARD_START = "# BEGIN OpenClaw workspace guard"

@@ -671,7 +671,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     )
 
     response = authenticated_client.post(
-        f"/api/v1/tasks/{task.id}/promote",
+        f"/api/v1/tasks/{task.id}/accept",
         json={"note": "accepted", "task_execution_id": execution.id},
     )
 
@@ -687,7 +687,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     promotion_log = (
         db_session.query(LogEntry)
         .filter(LogEntry.task_id == task.id)
-        .filter(LogEntry.message.like("Workspace promoted into project baseline%"))
+        .filter(LogEntry.message.like("Workspace accepted into project baseline%"))
         .one()
     )
     promotion_metadata = json.loads(promotion_log.log_metadata)
@@ -704,7 +704,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     disposition_metadata = promotion_metadata["baseline_result"]["accepted_change_set"][
         "disposition_metadata"
     ]
-    assert disposition_metadata["action"] == "promote"
+    assert disposition_metadata["action"] == "accept"
     assert disposition_metadata["operator"] == "regression@example.com"
     assert disposition_metadata["override_reason"] == "accepted"
     assert disposition_metadata["task_execution_id"] == execution.id
@@ -716,9 +716,12 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     assert change_set_response.status_code == 200
     change_set_body = change_set_response.json()
     assert change_set_body["change_set"]["disposition"] == "promoted"
-    assert change_set_body["change_set"]["disposition_metadata"]["action"] == (
-        "promote"
+    assert change_set_body["change_set"]["disposition_metadata"]["action"] == ("accept")
+    overview_response = authenticated_client.get(
+        f"/api/v1/projects/{project.id}/workspace-overview"
     )
+    assert overview_response.status_code == 200
+    assert overview_response.json()["pending_change_sets"] == []
 
 
 def test_manual_promote_endpoint_requires_execution_id_for_recorded_change_set(
@@ -799,7 +802,7 @@ def test_manual_promote_endpoint_requires_execution_id_for_recorded_change_set(
     db_session.commit()
 
     response = authenticated_client.post(
-        f"/api/v1/tasks/{task.id}/promote",
+        f"/api/v1/tasks/{task.id}/accept",
         json={"note": "accepted"},
     )
 
@@ -860,7 +863,7 @@ def test_manual_promote_rejects_active_project_mutation_lock(
         owner="test",
     ):
         response = authenticated_client.post(
-            f"/api/v1/tasks/{task.id}/promote",
+            f"/api/v1/tasks/{task.id}/accept",
             json={"note": "accepted", "task_execution_id": execution.id},
         )
 
@@ -961,7 +964,7 @@ def test_manual_promote_endpoint_rejects_stale_task_execution_id(
     db_session.commit()
 
     response = authenticated_client.post(
-        f"/api/v1/tasks/{task.id}/promote",
+        f"/api/v1/tasks/{task.id}/accept",
         json={"note": "accepted", "task_execution_id": first_execution.id},
     )
 
@@ -1042,8 +1045,8 @@ def test_change_set_actions_reject_task_execution_id_from_another_task(
     )
     db_session.commit()
 
-    promote_response = authenticated_client.post(
-        f"/api/v1/tasks/{task.id}/promote",
+    accept_response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/accept",
         json={"note": "accepted", "task_execution_id": other_execution.id},
     )
     reject_response = authenticated_client.post(
@@ -1051,8 +1054,8 @@ def test_change_set_actions_reject_task_execution_id_from_another_task(
         json={"task_execution_id": other_execution.id, "note": "wrong task"},
     )
 
-    assert promote_response.status_code == 409
-    assert "different task" in promote_response.json()["detail"]
+    assert accept_response.status_code == 409
+    assert "different task" in accept_response.json()["detail"]
     assert reject_response.status_code == 409
     assert "different task" in reject_response.json()["detail"]
     db_session.refresh(task)
@@ -1108,6 +1111,14 @@ def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
                 workspace_status="ready",
                 task_subfolder="task-ready",
             ),
+            Task(
+                project_id=project.id,
+                title="Missing promoted workspace",
+                description="Historical task subfolder already archived or removed",
+                status=TaskStatus.DONE,
+                workspace_status="promoted",
+                task_subfolder="task-missing-promoted",
+            ),
         ]
     )
     db_session.commit()
@@ -1133,6 +1144,10 @@ def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
         if item["task_subfolder"] == "task-ready"
     )
     assert ready_workspace["baseline_diff"]["added_count"] == 1
+    assert all(
+        item["task_subfolder"] != "task-missing-promoted"
+        for item in audit["retained_task_workspaces"]
+    )
     assert ready_workspace["baseline_diff"]["modified_count"] == 1
     assert "README.md" in ready_workspace["baseline_diff"]["modified_files"]
 
@@ -1171,7 +1186,7 @@ def test_update_task_rejects_lowering_current_step_on_promoted_workspace(
     )
 
     assert response.status_code == 409
-    assert "promoted task workspace" in response.json()["detail"]
+    assert "accepted task workspace" in response.json()["detail"]
     db_session.refresh(task)
     assert task.current_step == 3
 

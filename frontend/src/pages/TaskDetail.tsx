@@ -115,19 +115,19 @@ function TaskDetail() {
     fetchTask();
   };
 
-  const handlePromote = async () => {
+  const handleAccept = async () => {
     if (!task) return;
-    const note = window.prompt('Optional promotion note for this workspace:', task.promotion_note || '');
+    const note = window.prompt('Optional acceptance note for this workspace:', task.promotion_note || '');
     if (note === null) return;
     try {
-      await tasksAPI.promoteWorkspace(task.id, {
+      await tasksAPI.acceptWorkspace(task.id, {
         note: note || undefined,
         task_execution_id: changeSet?.task_execution_id || undefined,
       });
       await fetchTask();
     } catch (error) {
-      console.error('Failed to promote task workspace:', error);
-      setSaveError('Failed to promote task workspace');
+      console.error('Failed to accept task workspace:', error);
+      setSaveError('Failed to accept task workspace');
     }
   };
 
@@ -221,6 +221,11 @@ function TaskDetail() {
   const isArchivedPromotedWorkspace = (targetTask: Task) =>
     targetTask.workspace_status === 'promoted' &&
     (targetTask.task_subfolder || '').startsWith('.openclaw/promoted-workspace-archive/');
+
+  const formatWorkspaceStatus = (status?: string | null) => {
+    if (status === 'promoted') return 'accepted';
+    return String(status || 'not_created').replace(/_/g, ' ');
+  };
 
   const stepsJsonState = useMemo(() => {
     if (!editForm.steps.trim()) {
@@ -451,7 +456,7 @@ function TaskDetail() {
                   />
                   <span>
                     {promotedWorkspace
-                      ? 'Promoted task workspaces cannot lower the current step. Request changes or rerun in a new isolated session.'
+                      ? 'Accepted task workspaces cannot lower the current step. Request changes or rerun in a new isolated session.'
                       : 'I understand lowering this step may re-run earlier work and can overwrite or duplicate project files.'}
                   </span>
                 </label>
@@ -496,7 +501,7 @@ function TaskDetail() {
             <div className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="rounded-full border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-3 py-1 text-xs capitalize text-slate-200">
-                  Workspace: {String(task.workspace_status || 'not_created').replace(/_/g, ' ')}
+                  Workspace: {formatWorkspaceStatus(task.workspace_status)}
                 </span>
                 {task.task_subfolder && !isArchivedPromotedWorkspace(task) && (
                   <span className="rounded-full border border-[color:var(--oc-border-soft)] px-3 py-1 text-xs text-slate-400">
@@ -509,7 +514,7 @@ function TaskDetail() {
               )}
               {task.promoted_at && (
                 <p className="mt-2 text-xs text-emerald-400">
-                  Promoted {new Date(task.promoted_at).toLocaleString()}
+                  Accepted {new Date(task.promoted_at).toLocaleString()}
                 </p>
               )}
               {heldForReview && (
@@ -517,7 +522,7 @@ function TaskDetail() {
                   <p className="text-sm font-medium text-amber-200">Held for review</p>
                   <p className="mt-1 text-xs text-amber-100/80">
                     Backend review policy {reviewDecision?.workspace_review_policy || 'unknown'} held this change set{reviewDecision?.reason ? `: ${reviewDecision.reason.replace(/_/g, ' ')}` : ''}.
-                    Promote it, request changes, or reject and restore after review.
+                    Accept it, request changes, or reject and restore after review.
                   </p>
                 </div>
               )}
@@ -546,8 +551,8 @@ function TaskDetail() {
                   </div>
                 )}
                 {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
-                  <Button size="sm" onClick={handlePromote}>
-                    Promote Workspace
+                  <Button size="sm" onClick={handleAccept}>
+                    Accept Workspace
                   </Button>
                 )}
                 {task.task_subfolder && task.workspace_status !== 'promoted' && (
@@ -673,7 +678,7 @@ function TaskDetail() {
                   value={requestChangesNote}
                   onChange={(event) => setRequestChangesNote(event.target.value)}
                   className="min-h-[120px] bg-[color:var(--oc-surface-deep)] border-[color:var(--oc-border-soft)]"
-                  placeholder="Describe what must change before this workspace can be promoted."
+                  placeholder="Describe what must change before this workspace can be accepted."
                 />
               </div>
               <label className="flex items-start gap-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3 text-sm text-slate-300">

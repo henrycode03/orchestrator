@@ -16,6 +16,7 @@ from app.services.orchestration.workflow_profiles import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 from app.services.task_service import TaskService
 
 
@@ -132,6 +133,12 @@ def _contains_negated_stack_marker(text: str, markers: tuple[str, ...]) -> bool:
 def get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
     if not task:
         return None
+    return project_root / TASK_REPORT_ROOT / f"task_report_{task.id}.md"
+
+
+def get_legacy_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
+    if not task:
+        return None
     return project_root / f"task_report_{task.id}.md"
 
 
@@ -227,7 +234,12 @@ def run_virtual_merge_gate(
     missing_reports = []
     for task in prior_tasks:
         report_path = get_task_report_path(project_root, task)
-        if report_path and not report_path.exists():
+        legacy_report_path = get_legacy_task_report_path(project_root, task)
+        if (
+            report_path
+            and not report_path.exists()
+            and (legacy_report_path is None or not legacy_report_path.exists())
+        ):
             missing_reports.append(
                 f"#{task.plan_position} {task.title} (missing {report_path.name})"
             )

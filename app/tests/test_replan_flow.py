@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.services.session.replan_service import (
     _generate_summary_via_llm,
+    enrich_failure_summary_record_with_llm,
     get_or_generate_failure_summary,
     store_operator_feedback,
     trigger_replan,
@@ -99,14 +100,15 @@ def failed_task(
 
 
 class TestGetOrGenerateFailureSummary:
-    def test_generates_via_llm(
-        self, db_session: Session, stopped_session: SessionModel
+    def test_generates_fallback_without_llm(
+        self, db_session: Session, stopped_session: SessionModel, failed_task: Task
     ):
-        with patch(_LLM_PATH, return_value="LLM-generated summary of failure."):
+        with patch(_LLM_PATH, return_value="LLM-generated summary of failure.") as mock:
             record = get_or_generate_failure_summary(db_session, stopped_session.id)
+            mock.assert_not_called()
 
         assert record.session_id == stopped_session.id
-        assert record.summary == "LLM-generated summary of failure."
+        assert "Migrate schema" in record.summary
         assert record.operator_feedback is None
 
     def test_falls_back_when_llm_fails(
@@ -131,7 +133,18 @@ class TestGetOrGenerateFailureSummary:
             mock.assert_not_called()
 
         assert r1.id == r2.id
-        assert r2.summary == "First summary."
+        assert r2.summary == r1.summary
+
+    def test_llm_enrichment_updates_existing_fallback(
+        self, db_session: Session, stopped_session: SessionModel
+    ):
+        record = get_or_generate_failure_summary(db_session, stopped_session.id)
+
+        with patch(_LLM_PATH, return_value="Enriched model summary."):
+            enrich_failure_summary_record_with_llm(db_session, stopped_session.id)
+
+        db_session.expire(record)
+        assert record.summary == "Enriched model summary."
 
     def test_404_for_missing_session(self, db_session: Session):
         from fastapi import HTTPException
@@ -262,15 +275,16 @@ class TestFailureSummaryEndpoints:
         db_session.add(session)
         db_session.commit()
 
-        with patch(_LLM_PATH, return_value="API test summary."):
+        with patch(_LLM_PATH, return_value="API test summary.") as mock:
             resp = authenticated_client.get(
-                f"/api/v1/sessions/{session.id}/failure-summary"
+                f"/api/v1/sessions/{session.id}/failure-summary?enrich=false"
             )
+            mock.assert_not_called()
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["session_id"] == session.id
-        assert data["summary"] == "API test summary."
+        assert data["summary"] != ""
 
     def test_get_failure_summary_includes_latest_failure_diagnostics(
         self, authenticated_client: TestClient, db_session: Session
@@ -327,7 +341,7 @@ class TestFailureSummaryEndpoints:
 
         with patch(_LLM_PATH, return_value="API test summary."):
             resp = authenticated_client.get(
-                f"/api/v1/sessions/{session.id}/failure-summary"
+                f"/api/v1/sessions/{session.id}/failure-summary?enrich=false"
             )
 
         assert resp.status_code == 200

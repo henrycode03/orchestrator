@@ -88,6 +88,7 @@ from .session_runtime_service import (
     slugify_task_name,
 )
 from .replan_service import (
+    enrich_failure_summary_with_llm,
     get_or_generate_failure_summary,
     store_operator_feedback,
     trigger_replan,
@@ -174,6 +175,7 @@ __all__ = [
     "slugify_task_name",
     "stream_session_logs",
     "stream_session_status",
+    "enrich_failure_summary_with_llm",
     "get_or_generate_failure_summary",
     "store_operator_feedback",
     "trigger_replan",

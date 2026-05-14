@@ -1,6 +1,14 @@
 """Sessions API endpoints for orchestration runtimes."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, WebSocket
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    status,
+    WebSocket,
+)
 from fastapi.requests import Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
@@ -36,6 +44,7 @@ from app.services import (
     approve_intervention as _approve_intervention,
     create_intervention_request as _create_intervention_request,
     deny_intervention as _deny_intervention,
+    enrich_failure_summary_with_llm as _enrich_failure_summary_with_llm,
     get_intervention_history as _get_intervention_history,
     get_pending_interventions as _get_pending_interventions,
     request_human_intervention_lifecycle as _request_human_intervention_lifecycle,
@@ -972,17 +981,21 @@ def _latest_failure_diagnostics(db: Session, session_id: int) -> Dict[str, Any] 
 @router.get("/sessions/{session_id}/failure-summary")
 def get_failure_summary(
     session_id: int,
+    background_tasks: BackgroundTasks,
+    enrich: bool = Query(False),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Return the execution failure summary for a stopped/failed session.
 
-    Generates the summary on first call via the agent LLM (falls back to log
-    scraping if the LLM is unavailable). Idempotent — subsequent calls return
-    the cached record.
+    Generates a deterministic fallback summary on first call and optionally
+    enriches it via the model in the background. Idempotent — subsequent calls
+    return the cached record.
     """
     _require_session_access(db, session_id, current_user)
     record = _get_or_generate_failure_summary(db, session_id)
+    if enrich:
+        background_tasks.add_task(_enrich_failure_summary_with_llm, session_id)
     payload = _serialize_failure_summary(db, record)
     payload["diagnostics"] = _latest_failure_diagnostics(db, session_id)
     return payload

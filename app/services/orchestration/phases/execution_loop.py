@@ -93,6 +93,15 @@ def _get_task_execution(
     return db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
 
 
+def _verification_can_replace_stale_commands(step: dict[str, Any]) -> bool:
+    commands = step.get("commands")
+    if not isinstance(commands, list) or not commands:
+        return False
+    if isinstance(step.get("ops"), list) and step.get("ops"):
+        return False
+    return True
+
+
 def execute_step_loop(
     *,
     ctx: OrchestrationRunContext,
@@ -1148,6 +1157,11 @@ def execute_step_loop(
                 error_message=error_message,
                 completed_at=datetime.now(timezone.utc),
             )
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=error_message[:2000],
+            )
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
@@ -1912,7 +1926,14 @@ def execute_step_loop(
                     step["expected_files"] = debug_data.get("expected_files", [])
                     step_updated = True
                 if isinstance(debug_data.get("verification"), str):
-                    step["verification"] = debug_data.get("verification", "")
+                    verification_fix = debug_data.get("verification", "")
+                    step["verification"] = verification_fix
+                    if (
+                        fix_type == "code_fix"
+                        and verification_fix.strip()
+                        and _verification_can_replace_stale_commands(step)
+                    ):
+                        step["commands"] = [verification_fix]
                     step_updated = True
                 if step_updated:
                     orchestration_state.plan[step_index] = step

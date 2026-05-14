@@ -28,6 +28,7 @@ from app.services.orchestration.context.assembly import (
     assemble_task_summary_prompt,
     render_adapted_runtime_prompt,
 )
+from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
@@ -1589,6 +1590,34 @@ def finalize_successful_task(
                     "reason": "baseline_publish_validation_failed",
                 }
 
+    if (
+        task_change_set
+        and ctx.task_execution_id
+        and not should_hold_for_review
+        and review_decision.get("outcome") == "auto_promote"
+        and hasattr(task_service, "mark_task_execution_change_set_disposition")
+    ):
+        disposition_record = task_service.mark_task_execution_change_set_disposition(
+            task_execution_id=ctx.task_execution_id,
+            disposition="promoted",
+            reason=review_decision.get("reason") or "auto_promote",
+            metadata={
+                "action": "auto_promote",
+                "task_execution_id": ctx.task_execution_id,
+                "workspace_review_policy": workspace_review_policy,
+                "review_decision": review_decision,
+            },
+            commit=False,
+        )
+        if disposition_record and baseline_publish_result:
+            baseline_publish_result["accepted_change_set_disposition"] = (
+                task_service.get_task_execution_change_set(
+                    task_execution_id=ctx.task_execution_id
+                )
+                if hasattr(task_service, "get_task_execution_change_set")
+                else None
+            )
+
         _run_evaluator(
             runtime_service=runtime_service,
             orchestration_state=orchestration_state,
@@ -1814,11 +1843,16 @@ def finalize_successful_task(
             )
             if report_result and "report" in report_result:
                 report_content = report_result["report"]
-                report_filename = f"task_report_{task_id}.md"
-                report_path = orchestration_state.project_dir / report_filename
-                os.makedirs(orchestration_state.project_dir, exist_ok=True)
+                report_path = (
+                    orchestration_state.project_dir
+                    / TASK_REPORT_ROOT
+                    / f"task_report_{task_id}.md"
+                )
+                os.makedirs(report_path.parent, exist_ok=True)
+                report_path.parent.chmod(0o777)
                 with open(report_path, "w", encoding="utf-8") as handle:
                     handle.write(report_content)
+                report_path.chmod(0o666)
                 logger.info("[REPORT] Task report saved to: %s", report_path)
         except Exception as report_error:
             logger.error(

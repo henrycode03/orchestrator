@@ -113,7 +113,7 @@ def test_manual_tasks_execute_in_project_root(monkeypatch, db_session, tmp_path)
     assert workspace["task_subfolder"] is None
 
 
-def test_ordered_task_reports_live_in_project_root(monkeypatch, db_session, tmp_path):
+def test_ordered_task_reports_live_in_openclaw(monkeypatch, db_session, tmp_path):
     _patch_workspace_root(monkeypatch, tmp_path)
     project, _session, task = _seed_project_session_and_task(
         db_session,
@@ -124,6 +124,6 @@ def test_ordered_task_reports_live_in_project_root(monkeypatch, db_session, tmp_
     )
 
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
-    expected = project_root / f"task_report_{task.id}.md"
+    expected = project_root / ".openclaw" / "task-reports" / f"task_report_{task.id}.md"
 
     assert get_task_report_path(project_root, task) == expected

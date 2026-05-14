@@ -2,6 +2,7 @@ import json
 
 from app.models import Project, Task, TaskStatus
 from app.services.orchestration.task_rules import (
+    get_task_report_path,
     get_workflow_profile,
     run_virtual_merge_gate,
     should_force_review_execution_profile,
@@ -143,9 +144,9 @@ def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
     db_session.refresh(prior_task)
     db_session.refresh(current_task)
 
-    (project_root / f"task_report_{prior_task.id}.md").write_text(
-        "done\n", encoding="utf-8"
-    )
+    report_path = get_task_report_path(project_root, prior_task)
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("done\n", encoding="utf-8")
     baseline_dir = project_root / ".openclaw" / "project_baseline"
     baseline_dir.mkdir(parents=True)
     (baseline_dir / "index.html").write_text("<main></main>\n", encoding="utf-8")
@@ -170,3 +171,52 @@ def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
 
     assert reason is not None
     assert "prior failed/cancelled tasks" in reason
+
+
+def test_virtual_merge_gate_accepts_legacy_root_task_report(db_session, tmp_path):
+    project_root = tmp_path / "legacy-report"
+    project_root.mkdir(parents=True)
+
+    project = Project(name="Legacy Report", workspace_path=str(project_root))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    prior_task = Task(
+        project_id=project.id,
+        title="Task 1: Build page",
+        description="Build the page.",
+        status=TaskStatus.DONE,
+        plan_position=1,
+        task_subfolder="task-build",
+    )
+    current_task = Task(
+        project_id=project.id,
+        title="Task 2: Verify page",
+        description="Verify the page.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+        task_subfolder="task-verify",
+    )
+    db_session.add_all([prior_task, current_task])
+    db_session.commit()
+    db_session.refresh(prior_task)
+    db_session.refresh(current_task)
+
+    (project_root / f"task_report_{prior_task.id}.md").write_text(
+        "done\n", encoding="utf-8"
+    )
+    baseline_dir = project_root / ".openclaw" / "project_baseline"
+    baseline_dir.mkdir(parents=True)
+    (baseline_dir / "index.html").write_text("<main></main>\n", encoding="utf-8")
+
+    assert (
+        run_virtual_merge_gate(
+            db_session,
+            project,
+            current_task,
+            "full_lifecycle",
+            lambda root: root / ".openclaw" / "state_manager.json",
+        )
+        is None
+    )

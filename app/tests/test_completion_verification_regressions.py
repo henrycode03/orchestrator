@@ -11,6 +11,7 @@ from app.models import (
     SessionTask,
     Task,
     TaskExecution,
+    TaskExecutionChangeSet,
     TaskStatus,
 )
 from app.services.orchestration.events.event_types import EventType
@@ -989,6 +990,14 @@ def test_auto_completion_stamps_change_set_metadata_on_trivial_publish(
     assert payload["workspace_review_policy"] == "hold_nontrivial"
     assert payload["accepted_change_set"]["task_execution_id"] == execution.id
     assert payload["accepted_change_set"]["change_set"]["added_files"] == ["src/app.py"]
+    durable_change_set = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_execution_id == execution.id)
+        .one()
+    )
+    assert durable_change_set.review_decision["outcome"] == "auto_promote"
+    assert durable_change_set.disposition == "promoted"
+    assert durable_change_set.disposition_metadata["action"] == "auto_promote"
 
 
 def test_auto_completion_flushes_done_state_before_next_task_lookup(

@@ -2,9 +2,10 @@
 
 Lifecycle:
   1. Session fails → operator opens failure-summary endpoint.
-  2. Backend generates a compact summary (~500 tokens) via LLM.
-  3. Operator optionally adds feedback via POST /operator-feedback.
-  4. Operator triggers POST /replan → new PlanningSession seeded with summary + feedback.
+  2. Backend writes an immediate deterministic summary from logs/task state.
+  3. Optional model enrichment can update the summary asynchronously.
+  4. Operator optionally adds feedback via POST /operator-feedback.
+  5. Operator triggers POST /replan → new PlanningSession seeded with summary + feedback.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from .session_lookup import get_session_or_404
 logger = logging.getLogger(__name__)
 
 _SUMMARY_CHAR_LIMIT = 2000  # ~500 tokens
+_LLM_LOG_LIMIT = 12
+_LLM_SUMMARY_TIMEOUT_SECONDS = 15
 
 
 _ANSI_RE = _re.compile(r"\x1b\[[0-9;]*m")
@@ -161,7 +164,7 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
                 LogEntry.level.in_(["ERROR", "WARN", "WARNING"]),
             )
             .order_by(LogEntry.created_at.desc())
-            .limit(30)
+            .limit(_LLM_LOG_LIMIT)
             .all()
         )
 
@@ -176,13 +179,17 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
         )
 
         log_block = (
-            "\n".join(f"[{entry.level}] {entry.message[:300]}" for entry in error_logs)
+            "\n".join(
+                f"[{entry.level}] {_strip_ansi(entry.message)[:180]}"
+                for entry in error_logs
+                if not _is_json_fragment(entry.message)
+            )
             or "(no error logs)"
         )
 
         task_block = (
             "\n".join(
-                f"- {t.title}: {(t.error_message or 'unknown')[:300]}"
+                f"- {t.title}: {(t.error_message or 'unknown')[:180]}"
                 for t in failed_tasks
             )
             or "(no failed tasks)"
@@ -205,7 +212,7 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
             session_id=session_id,
             task_id=task_execution.task_id if task_execution else None,
             task_execution_id=task_execution.id if task_execution else None,
-            timeout_seconds=60,
+            timeout_seconds=_LLM_SUMMARY_TIMEOUT_SECONDS,
             session_prefix="failure_summary",
         )
 
@@ -240,7 +247,7 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
 def get_or_generate_failure_summary(
     db: DBSession, session_id: int
 ) -> ExecutionFailureSummary:
-    """Return existing summary or generate one if it doesn't exist yet."""
+    """Return existing summary or create a deterministic fallback immediately."""
     session = get_session_or_404(db, session_id)
 
     existing = (
@@ -251,9 +258,7 @@ def get_or_generate_failure_summary(
     if existing:
         return existing
 
-    summary_text = _generate_summary_via_llm(db, session_id)
-    if not summary_text:
-        summary_text = _build_fallback_summary(db, session_id)
+    summary_text = _build_fallback_summary(db, session_id)
 
     record = ExecutionFailureSummary(
         session_id=session_id,
@@ -264,11 +269,52 @@ def get_or_generate_failure_summary(
     db.refresh(record)
 
     logger.info(
-        "Failure summary generated for session %s (%d chars)",
+        "Fallback failure summary generated for session %s (%d chars)",
         session_id,
         len(summary_text),
     )
     return record
+
+
+def enrich_failure_summary_record_with_llm(db: DBSession, session_id: int) -> None:
+    """Best-effort model enrichment for an existing failure summary record."""
+
+    record = (
+        db.query(ExecutionFailureSummary)
+        .filter(ExecutionFailureSummary.session_id == session_id)
+        .first()
+    )
+    if not record:
+        return
+    summary_text = _generate_summary_via_llm(db, session_id)
+    if not summary_text:
+        return
+    record.summary = summary_text
+    db.commit()
+    logger.info(
+        "Failure summary enriched via LLM for session %s (%d chars)",
+        session_id,
+        len(summary_text),
+    )
+
+
+def enrich_failure_summary_with_llm(session_id: int) -> None:
+    """Background wrapper; never block or fail failure-summary reads."""
+
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        enrich_failure_summary_record_with_llm(db, session_id)
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "Failure summary enrichment failed for session %s: %s",
+            session_id,
+            exc,
+        )
+    finally:
+        db.close()
 
 
 def store_operator_feedback(

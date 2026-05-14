@@ -101,10 +101,10 @@ function ProjectDetail() {
   const [savingProjectMeta, setSavingProjectMeta] = useState(false);
   const [rebuildingBaseline, setRebuildingBaseline] = useState(false);
   const [cleaningWorkspaces, setCleaningWorkspaces] = useState(false);
-  const [promoteTask, setPromoteTask] = useState<Task | null>(null);
-  const [promoteTaskExecutionId, setPromoteTaskExecutionId] = useState<number | null>(null);
-  const [promotionNote, setPromotionNote] = useState('');
-  const [promotingWorkspace, setPromotingWorkspace] = useState(false);
+  const [acceptTask, setAcceptTask] = useState<Task | null>(null);
+  const [acceptTaskExecutionId, setAcceptTaskExecutionId] = useState<number | null>(null);
+  const [acceptanceNote, setAcceptanceNote] = useState('');
+  const [acceptingWorkspace, setAcceptingWorkspace] = useState(false);
   const [requestChangesTask, setRequestChangesTask] = useState<Task | null>(null);
   const [requestChangesNote, setRequestChangesNote] = useState('');
   const [requestChangesRerun, setRequestChangesRerun] = useState(true);
@@ -196,13 +196,15 @@ function ProjectDetail() {
     }
   };
 
-  const formatWorkspaceStatus = (status?: string | null) =>
-    (status || 'not_created').replace(/_/g, ' ');
+  const formatWorkspaceStatus = (status?: string | null) => {
+    if (status === 'promoted') return 'accepted';
+    return (status || 'not_created').replace(/_/g, ' ');
+  };
 
   const workspaceCountItems = workspaceOverview
     ? [
         { key: 'ready', label: 'Ready', value: workspaceOverview.counts.ready || 0, className: 'text-primary-300' },
-        { key: 'promoted', label: 'Promoted', value: workspaceOverview.counts.promoted || 0, className: 'text-emerald-300' },
+        { key: 'promoted', label: 'Accepted', value: workspaceOverview.counts.promoted || 0, className: 'text-emerald-300' },
         { key: 'changes_requested', label: 'Changes Requested', value: workspaceOverview.counts.changes_requested || 0, className: 'text-amber-300' },
         { key: 'blocked', label: 'Blocked', value: workspaceOverview.counts.blocked || 0, className: 'text-red-300' },
       ].filter((item) => item.value > 0)
@@ -253,36 +255,36 @@ function ProjectDetail() {
     workspaceOverview?.audit?.retained_task_workspaces.find((item) => item.task_id === task.id)
       ?.baseline_diff || null;
 
-  const openPromoteTask = (task: Task, taskExecutionId?: number | null) => {
+  const openAcceptTask = (task: Task, taskExecutionId?: number | null) => {
     const pendingChangeSet = pendingChangeSets.find((item) => item.task_id === task.id);
-    setPromoteTask(task);
-    setPromoteTaskExecutionId(taskExecutionId || pendingChangeSet?.task_execution_id || null);
-    setPromotionNote(task.promotion_note || '');
+    setAcceptTask(task);
+    setAcceptTaskExecutionId(taskExecutionId || pendingChangeSet?.task_execution_id || null);
+    setAcceptanceNote(task.promotion_note || '');
   };
 
-  const submitPromoteTask = async () => {
-    if (!promoteTask || !id) return;
+  const submitAcceptTask = async () => {
+    if (!acceptTask || !id) return;
     try {
-      setPromotingWorkspace(true);
-      const response = await tasksAPI.promoteWorkspace(
-        promoteTask.id,
+      setAcceptingWorkspace(true);
+      const response = await tasksAPI.acceptWorkspace(
+        acceptTask.id,
         {
-          note: promotionNote.trim() || undefined,
-          task_execution_id: promoteTaskExecutionId || undefined,
+          note: acceptanceNote.trim() || undefined,
+          task_execution_id: acceptTaskExecutionId || undefined,
         }
       );
       setTasks((current) =>
-        current.map((item) => (item.id === promoteTask.id ? response.data : item))
+        current.map((item) => (item.id === acceptTask.id ? response.data : item))
       );
       const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
       setWorkspaceOverview(workspaceResponse.data || null);
-      setPromoteTask(null);
-      setPromoteTaskExecutionId(null);
+      setAcceptTask(null);
+      setAcceptTaskExecutionId(null);
     } catch (error) {
-      console.error('Failed to promote task workspace:', error);
-      alert('Failed to promote task workspace. Please try again.');
+      console.error('Failed to accept task workspace:', error);
+      alert('Failed to accept task workspace. Please try again.');
     } finally {
-      setPromotingWorkspace(false);
+      setAcceptingWorkspace(false);
     }
   };
 
@@ -319,7 +321,7 @@ function ProjectDetail() {
 
   const handleRebuildBaseline = async () => {
     if (!id) return;
-    if (!window.confirm('Rebuild the project baseline from all promoted task workspaces?')) {
+    if (!window.confirm('Rebuild the project baseline from all accepted task workspaces?')) {
       return;
     }
 
@@ -329,7 +331,7 @@ function ProjectDetail() {
       const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
       setWorkspaceOverview(workspaceResponse.data || null);
       alert(
-        `Baseline rebuilt with ${result.data.files_copied} files from ${result.data.promoted_task_count} promoted task(s).`
+        `Baseline rebuilt with ${result.data.files_copied} files from ${result.data.promoted_task_count} accepted task(s).`
       );
     } catch (error) {
       console.error('Failed to rebuild project baseline:', error);
@@ -349,7 +351,7 @@ function ProjectDetail() {
         alert('No blocked retained task workspaces are eligible for cleanup.');
         return;
       }
-      if (!window.confirm(`Archive ${candidateCount} blocked retained task workspace folder(s)? Promoted and running workspaces will be preserved.`)) {
+      if (!window.confirm(`Archive ${candidateCount} blocked retained task workspace folder(s)? Accepted and running workspaces will be preserved.`)) {
         return;
       }
       const result = await projectsAPI.cleanupWorkspaces(Number(id), { dry_run: false });
@@ -883,7 +885,7 @@ function ProjectDetail() {
             <div className="grid gap-3">
               {pendingChangeSets.map((item) => {
                 const reviewTask = tasks.find((task) => task.id === item.task_id) || null;
-                const canPromote = Boolean(
+                const canAccept = Boolean(
                   reviewTask?.status === 'done' &&
                     reviewTask?.task_subfolder &&
                     reviewTask?.workspace_status !== 'promoted'
@@ -944,13 +946,13 @@ function ProjectDetail() {
                     >
                       Open task review
                     </Link>
-                    {canPromote && reviewTask && (
+                    {canAccept && reviewTask && (
                       <button
                         type="button"
-                        onClick={() => openPromoteTask(reviewTask, item.task_execution_id)}
+                        onClick={() => openAcceptTask(reviewTask, item.task_execution_id)}
                         className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/15"
                       >
-                        Promote
+                        Accept
                       </button>
                     )}
                     {canRequestChanges && reviewTask && (
@@ -1099,7 +1101,7 @@ function ProjectDetail() {
                       <p className="text-xs uppercase tracking-wide text-slate-500">Canonical Baseline</p>
                       <p className="mt-1 text-sm text-slate-300">
                         {workspaceOverview.baseline.exists
-                          ? `${workspaceOverview.baseline.file_count} files built from ${workspaceOverview.baseline.promoted_task_count} promoted task(s)`
+                          ? `${workspaceOverview.baseline.file_count} files built from ${workspaceOverview.baseline.promoted_task_count} accepted task(s)`
                           : 'No canonical baseline yet'}
                       </p>
                       {workspaceOverview.baseline.path && (
@@ -1141,7 +1143,7 @@ function ProjectDetail() {
                           <p className="mt-0.5 font-medium text-slate-300">{workspaceOverview.audit.retained_task_workspace_count}</p>
                         </div>
                         <div>
-                          <p className="text-slate-500 uppercase tracking-wide text-[10px]">Unpromoted</p>
+                          <p className="text-slate-500 uppercase tracking-wide text-[10px]">Unaccepted</p>
                           <p className="mt-0.5 font-medium text-slate-300">{workspaceOverview.audit.unpromoted_done_workspace_count}</p>
                         </div>
                         <div>
@@ -1261,10 +1263,10 @@ function ProjectDetail() {
                             )}
                             {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                               <button
-                                onClick={() => openPromoteTask(task)}
+                                onClick={() => openAcceptTask(task)}
                                 className="w-full rounded-md px-2.5 py-2 text-left text-xs text-emerald-300 transition-colors hover:bg-emerald-950/40"
                               >
-                                Promote workspace
+                                Accept workspace
                               </button>
                             )}
                             {task.task_subfolder && task.workspace_status !== 'promoted' && (
@@ -1307,13 +1309,13 @@ function ProjectDetail() {
         </div>
       )}
 
-      {/* Promote Workspace Modal */}
-      {promoteTask && (
+      {/* Accept Workspace Modal */}
+      {acceptTask && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
           <div className="w-full max-w-xl rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5 shadow-2xl">
-            <h3 className="text-sm font-semibold text-white">Promote Workspace</h3>
+            <h3 className="text-sm font-semibold text-white">Accept Workspace</h3>
             {(() => {
-              const diff = getTaskWorkspaceDiff(promoteTask);
+              const diff = getTaskWorkspaceDiff(acceptTask);
               const changedFiles = [
                 ...(diff?.added_files || []).map((path) => ({ path, type: 'Added' })),
                 ...(diff?.modified_files || []).map((path) => ({ path, type: 'Modified' })),
@@ -1327,9 +1329,9 @@ function ProjectDetail() {
                         ? `${diff.added_count} added, ${diff.modified_count} modified`
                         : 'No baseline diff data available for this workspace'}
                     </p>
-                    {promoteTaskExecutionId && (
+                    {acceptTaskExecutionId && (
                       <p className="mt-1 text-xs text-slate-500">
-                        Accepting execution {promoteTaskExecutionId}
+                        Accepting execution {acceptTaskExecutionId}
                       </p>
                     )}
                     {changedFiles.length > 0 && (
@@ -1350,35 +1352,35 @@ function ProjectDetail() {
                   </div>
                   <div>
                     <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                      Promotion note
+                      Acceptance note
                     </label>
                     <textarea
-                      value={promotionNote}
-                      onChange={(event) => setPromotionNote(event.target.value)}
+                      value={acceptanceNote}
+                      onChange={(event) => setAcceptanceNote(event.target.value)}
                       rows={3}
                       className="w-full resize-none rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
-                      placeholder="Optional note for this promoted workspace."
+                      placeholder="Optional note for this accepted workspace."
                     />
                   </div>
                   <div className="flex gap-2 pt-1">
                     <button
                       type="button"
                       onClick={() => {
-                        setPromoteTask(null);
-                        setPromoteTaskExecutionId(null);
+                        setAcceptTask(null);
+                        setAcceptTaskExecutionId(null);
                       }}
-                      disabled={promotingWorkspace}
+                      disabled={acceptingWorkspace}
                       className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:opacity-50"
                     >
                       Cancel
                     </button>
                     <button
                       type="button"
-                      onClick={submitPromoteTask}
-                      disabled={promotingWorkspace}
+                      onClick={submitAcceptTask}
+                      disabled={acceptingWorkspace}
                       className="flex-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
                     >
-                      {promotingWorkspace ? 'Promoting...' : 'Promote Workspace'}
+                      {acceptingWorkspace ? 'Accepting...' : 'Accept Workspace'}
                     </button>
                   </div>
                 </div>
@@ -1403,7 +1405,7 @@ function ProjectDetail() {
                   onChange={(event) => setRequestChangesNote(event.target.value)}
                   rows={5}
                   className="w-full resize-y rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
-                  placeholder="Describe what must change before this workspace can be promoted."
+                  placeholder="Describe what must change before this workspace can be accepted."
                 />
               </div>
               <label className="flex items-start gap-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3 text-sm text-slate-300">

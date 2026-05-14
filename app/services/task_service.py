@@ -1072,6 +1072,8 @@ class TaskService:
             workspace_dir = (project_root / task_subfolder).resolve()
             workspace_exists = workspace_dir.exists()
             workspace_status = getattr(task, "workspace_status", None) or "unknown"
+            if not workspace_exists:
+                continue
             is_visible_task_workspace = workspace_dir.parent == project_root
             if workspace_status == "promoted" and not is_visible_task_workspace:
                 continue

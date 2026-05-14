@@ -446,10 +446,10 @@ export const tasksAPI = {
       create_new_session?: boolean;
     },
   ) => apiClient.post(`/tasks/${id}/retry`, data || {}),
-  promoteWorkspace: (
+  acceptWorkspace: (
     id: number,
     data?: { note?: string; task_execution_id?: number },
-  ) => apiClient.post<Task>(`/tasks/${id}/promote`, data || {}),
+  ) => apiClient.post<Task>(`/tasks/${id}/accept`, data || {}),
   requestWorkspaceChanges: (id: number, note: string) =>
     apiClient.post<Task>(`/tasks/${id}/request-changes`, { note }),
   getChangeSet: (id: number) =>
