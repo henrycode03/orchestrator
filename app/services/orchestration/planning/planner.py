@@ -443,9 +443,17 @@ class PlannerService:
             return False
         return True
 
+    @staticmethod
+    def _monotonic() -> float:
+        return time.monotonic()
+
     @classmethod
     async def _invoke_direct_no_thinking_planning(
-        cls, runtime_service: Any, planning_prompt: str
+        cls,
+        runtime_service: Any,
+        planning_prompt: str,
+        *,
+        timeout_budget_seconds: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         import time as _time
 
@@ -454,7 +462,10 @@ class PlannerService:
         base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
         model = settings.PLANNING_REPAIR_MODEL
         api_key = settings.PLANNING_REPAIR_API_KEY
-        direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
+        configured_direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
+        direct_timeout = configured_direct_timeout
+        if timeout_budget_seconds is not None:
+            direct_timeout = max(1, min(direct_timeout, int(timeout_budget_seconds)))
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": planning_prompt}],
@@ -534,12 +545,40 @@ class PlannerService:
         prompt: str,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        timeout_budget = kwargs.get("timeout_seconds")
+        timeout_budget_seconds: Optional[float]
+        if isinstance(timeout_budget, (int, float)) and timeout_budget > 0:
+            timeout_budget_seconds = float(timeout_budget)
+        else:
+            timeout_budget_seconds = None
+
         if cls._should_try_direct_no_thinking_planning(runtime_service, len(prompt)):
+            direct_started_at = cls._monotonic()
             direct = await cls._invoke_direct_no_thinking_planning(
-                runtime_service, prompt
+                runtime_service,
+                prompt,
+                timeout_budget_seconds=timeout_budget_seconds,
             )
             if direct is not None:
                 return direct
+            if timeout_budget_seconds is not None:
+                elapsed_seconds = cls._monotonic() - direct_started_at
+                remaining_seconds = timeout_budget_seconds - elapsed_seconds
+                if remaining_seconds <= 0:
+                    raise TimeoutError(
+                        "Direct planning fallback budget exhausted before OpenClaw "
+                        f"fallback could start after {elapsed_seconds:.1f}s"
+                    )
+                adjusted_timeout = max(1, int(remaining_seconds))
+                if adjusted_timeout < int(timeout_budget_seconds):
+                    kwargs = {**kwargs, "timeout_seconds": adjusted_timeout}
+                    _logger.info(
+                        "[PLANNING_DIRECT] fallback budget adjusted timeout=%ds "
+                        "after direct_elapsed=%.1fs original_timeout=%ss",
+                        adjusted_timeout,
+                        elapsed_seconds,
+                        timeout_budget,
+                    )
         async with cls._openclaw_planning_lock_async() as lock_diagnostics:
             try:
                 result = await runtime_service.execute_task(prompt, **kwargs)

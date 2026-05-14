@@ -473,6 +473,62 @@ def test_planning_model_calls_use_interprocess_lock(tmp_path, monkeypatch):
     assert lock_path.exists()
 
 
+def test_direct_planning_fallback_shares_openclaw_timeout_budget(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+        async def execute_task(self, prompt, **kwargs):
+            captured["fallback_prompt"] = prompt
+            captured["fallback_kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    async def direct_timeout(
+        cls, runtime_service, prompt, *, timeout_budget_seconds=None
+    ):
+        captured["direct_prompt"] = prompt
+        captured["direct_timeout_budget_seconds"] = timeout_budget_seconds
+        return None
+
+    monotonic_values = iter([1000.0, 1090.0])
+
+    def fake_monotonic():
+        return next(monotonic_values, 1090.0)
+
+    monkeypatch.setattr(PlannerService, "_monotonic", staticmethod(fake_monotonic))
+    monkeypatch.setattr(
+        PlannerService,
+        "_invoke_direct_no_thinking_planning",
+        classmethod(direct_timeout),
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:8000/v1",
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_MODEL", "qwen-local")
+
+    result = asyncio.run(
+        PlannerService._execute_task_with_planning_lock(
+            Runtime(),
+            "plan this",
+            timeout_seconds=300,
+            reuse_task_session=False,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert captured["direct_prompt"] == "plan this"
+    assert captured["direct_timeout_budget_seconds"] == 300
+    assert captured["fallback_prompt"] == "plan this"
+    assert captured["fallback_kwargs"]["timeout_seconds"] == 210
+
+
 def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 
