@@ -1,0 +1,77 @@
+"""Project-scoped mutation locks for canonical-root write operations."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator, Optional
+
+
+class ProjectMutationLockError(RuntimeError):
+    def __init__(self, *, project_id: int, operation: str, lock_path: Path):
+        self.project_id = project_id
+        self.operation = operation
+        self.lock_path = lock_path
+        super().__init__(
+            f"Project {project_id} already has an active canonical-root writer"
+        )
+
+
+@contextmanager
+def project_mutation_lock(
+    *,
+    project_id: int,
+    project_root: Path,
+    operation: str,
+    owner: Optional[str] = None,
+    stale_after_seconds: int = 60 * 60 * 6,
+) -> Iterator[Path]:
+    lock_dir = project_root / ".openclaw" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir.chmod(0o777)
+    lock_path = lock_dir / f"project-{project_id}.mutation.lock"
+    token = str(uuid.uuid4())
+    now = time.time()
+
+    if lock_path.exists():
+        try:
+            metadata = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
+            created_at = float(metadata.get("created_at_epoch") or 0)
+        except (ValueError, OSError, json.JSONDecodeError):
+            created_at = 0
+        if created_at and now - created_at > stale_after_seconds:
+            lock_path.unlink(missing_ok=True)
+
+    metadata = {
+        "project_id": project_id,
+        "operation": operation,
+        "owner": owner,
+        "token": token,
+        "created_at_epoch": now,
+    }
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(lock_path, flags, 0o666)
+    except FileExistsError as exc:
+        raise ProjectMutationLockError(
+            project_id=project_id,
+            operation=operation,
+            lock_path=lock_path,
+        ) from exc
+
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle)
+
+    try:
+        yield lock_path
+    finally:
+        try:
+            current = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
+        except (OSError, json.JSONDecodeError):
+            current = {}
+        if current.get("token") == token:
+            lock_path.unlink(missing_ok=True)

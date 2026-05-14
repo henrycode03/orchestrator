@@ -29,12 +29,13 @@ from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import (
     create_task_execution,
 )
-from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
+from app.services.task_service import TaskService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
     get_effective_workspace_review_policy,
 )
+from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -843,34 +844,26 @@ def get_latest_task_change_set(task_id: int, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    entry = (
-        db.query(LogEntry)
-        .filter(
-            LogEntry.task_id == task_id,
-            LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
-        )
-        .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
-        .first()
-    )
-    if not entry:
+    task_service = TaskService(db)
+    latest_change_set = task_service.get_latest_task_change_set_for_task(task_id)
+    if not latest_change_set:
         raise HTTPException(status_code=404, detail="No change set recorded for task")
-    try:
-        change_set = json.loads(entry.log_metadata or "{}")
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Recorded change set is invalid")
-    review_decision = TaskService(db).change_set_review_decision(
-        change_set,
-        workspace_review_policy=get_effective_workspace_review_policy(
-            settings.WORKSPACE_REVIEW_POLICY,
-            db=db,
-        ),
-    )
+    change_set = latest_change_set.get("change_set") or {}
+    review_decision = latest_change_set.get("review_decision")
+    if not review_decision:
+        review_decision = task_service.change_set_review_decision(
+            change_set,
+            workspace_review_policy=get_effective_workspace_review_policy(
+                settings.WORKSPACE_REVIEW_POLICY,
+                db=db,
+            ),
+        )
     return {
         "task_id": task_id,
-        "task_execution_id": entry.task_execution_id,
+        "task_execution_id": latest_change_set.get("task_execution_id"),
         "change_set": change_set,
         "review_decision": review_decision,
-        "recorded_at": entry.created_at.isoformat() if entry.created_at else None,
+        "recorded_at": latest_change_set.get("recorded_at"),
     }
 
 
@@ -920,14 +913,17 @@ def reject_latest_task_change_set(
         if change_set and change_set.get("snapshot_key")
         else workspace_snapshot_key(task_id, task_execution_id)
     )
-    result = task_service.reject_task_execution_change_set(
-        project,
-        task,
-        task_execution_id=task_execution_id,
-        snapshot_key=snapshot_key,
-        reason=(payload.note or "operator_rejected_change_set").strip()
-        or "operator_rejected_change_set",
-    )
+    try:
+        result = task_service.reject_task_execution_change_set(
+            project,
+            task,
+            task_execution_id=task_execution_id,
+            snapshot_key=snapshot_key,
+            reason=(payload.note or "operator_rejected_change_set").strip()
+            or "operator_rejected_change_set",
+        )
+    except ProjectMutationLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result
 
 
@@ -983,7 +979,8 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
                 "task_execution_id": latest_change_set.get("task_execution_id"),
                 "recorded_at": latest_change_set.get("recorded_at"),
                 "change_set": change_set_payload,
-                "review_decision": task_service.change_set_review_decision(
+                "review_decision": latest_change_set.get("review_decision")
+                or task_service.change_set_review_decision(
                     change_set_payload,
                     workspace_review_policy=workspace_review_policy,
                 ),
@@ -1098,9 +1095,29 @@ def promote_task_workspace(
     task.promoted_at = datetime.now(UTC)
     task.promotion_note = (payload.note or "").strip() or None
     task.updated_at = datetime.now(UTC)
-    baseline_result = task_service.promote_task_into_baseline(project, task)
+    try:
+        baseline_result = task_service.promote_task_into_baseline(project, task)
+    except ProjectMutationLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if accepted_change_set:
         baseline_result["accepted_change_set"] = accepted_change_set
+        disposition_record = task_service.mark_task_execution_change_set_disposition(
+            task_execution_id=payload.task_execution_id,
+            disposition="promoted",
+            reason=(payload.note or "operator_promoted_change_set").strip()
+            or "operator_promoted_change_set",
+            metadata={
+                "files_copied": baseline_result.get("files_copied"),
+                "baseline_path": baseline_result.get("baseline_path"),
+            },
+            commit=False,
+        )
+        if disposition_record:
+            baseline_result["accepted_change_set"] = (
+                task_service.get_task_execution_change_set(
+                    task_execution_id=disposition_record.task_execution_id
+                )
+            )
     promoted_workspace_archive_result = task_service.archive_promoted_task_workspace(
         project, task, reason="manual_promotion"
     )

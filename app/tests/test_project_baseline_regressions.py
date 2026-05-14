@@ -9,10 +9,12 @@ from app.models import (
     Session as SessionModel,
     Task,
     TaskExecution,
+    TaskExecutionChangeSet,
     TaskStatus,
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
+from app.services.workspace.project_mutation_lock import project_mutation_lock
 
 
 def test_rebuild_project_baseline_uses_only_promoted_workspaces(
@@ -196,6 +198,32 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
     assert "dependency_files_changed" in change_set["warning_flags"]
     assert all(".openclaw" not in path for path in change_set["added_files"])
 
+    durable_change_set = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_execution_id == execution.id)
+        .one()
+    )
+    assert durable_change_set.project_id == project.id
+    assert durable_change_set.task_id == task.id
+    assert durable_change_set.session_id == session.id
+    assert durable_change_set.base_snapshot_key == snapshot_key
+    assert durable_change_set.added_files == ["package.json"]
+    assert durable_change_set.modified_files == ["README.md"]
+    assert durable_change_set.deleted_files == ["old.txt"]
+    assert durable_change_set.review_decision["held_for_review"] is True
+    assert durable_change_set.review_reason == "nontrivial_change_set_review_required"
+    assert durable_change_set.disposition == "captured"
+
+    read_back = task_service.get_task_execution_change_set(
+        task_execution_id=execution.id
+    )
+    assert read_back["changed_count"] == 3
+    assert read_back["added_files"] == ["package.json"]
+    assert read_back["review_decision"]["reason"] == (
+        "nontrivial_change_set_review_required"
+    )
+    assert read_back["disposition"] == "captured"
+
     log_entry = (
         db_session.query(LogEntry)
         .filter(
@@ -288,6 +316,10 @@ def test_reject_task_execution_change_set_archives_candidate_and_restores_snapsh
     )
 
     assert result["rejected"] is True
+    assert result["change_set_disposition"]["disposition"] == "rejected"
+    assert result["change_set_disposition"]["disposition_reason"] == (
+        "operator_rejected_change_set"
+    )
     assert result["restore_result"]["restored"] is True
     assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
     assert (project_root / "keep.txt").read_text(encoding="utf-8") == "keep\n"
@@ -394,6 +426,8 @@ def test_change_set_endpoints_show_and_reject_recorded_candidate(
     assert reject_response.status_code == 200
     reject_body = reject_response.json()
     assert reject_body["rejected"] is True
+    assert reject_body["change_set_disposition"]["disposition"] == "rejected"
+    assert reject_body["change_set_disposition"]["disposition_reason"] == "needs review"
     assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
     assert not (project_root / "notes.md").exists()
     db_session.refresh(task)
@@ -572,28 +606,15 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     db_session.add(execution)
     db_session.commit()
     db_session.refresh(execution)
-    db_session.add(
-        LogEntry(
-            session_id=session.id,
-            task_id=task.id,
-            task_execution_id=execution.id,
-            level="INFO",
-            message=TASK_CHANGE_SET_LOG_MESSAGE,
-            log_metadata=json.dumps(
-                {
-                    "schema": "openclaw.task_execution_change_set.v1",
-                    "task_id": task.id,
-                    "task_execution_id": execution.id,
-                    "changed_count": 1,
-                    "added_files": ["README.md"],
-                    "modified_files": [],
-                    "deleted_files": [],
-                    "warning_flags": [],
-                }
-            ),
-        )
+    task_service = TaskService(db_session)
+    task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=workspace_snapshot_key(task.id, execution.id),
+        target_dir=task_dir,
     )
-    db_session.commit()
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/promote",
@@ -621,6 +642,10 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
             "task_execution_id"
         ]
         == execution.id
+    )
+    assert (
+        promotion_metadata["baseline_result"]["accepted_change_set"]["disposition"]
+        == "promoted"
     )
 
 
@@ -694,6 +719,67 @@ def test_manual_promote_endpoint_requires_execution_id_for_recorded_change_set(
 
     assert response.status_code == 400
     assert "task_execution_id is required" in response.json()["detail"]
+
+
+def test_manual_promote_rejects_active_project_mutation_lock(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "manual-promote-lock"
+    project_root.mkdir(parents=True)
+    project = Project(name="manual-promote-lock", workspace_path=str(project_root))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-manual"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("manual", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Manual promote",
+        description="Accepted manually",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-manual",
+    )
+    session = SessionModel(project_id=project.id, name="manual-promote-lock-session")
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    TaskService(db_session).persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=workspace_snapshot_key(task.id, execution.id),
+        target_dir=task_dir,
+    )
+
+    with project_mutation_lock(
+        project_id=project.id,
+        project_root=project_root,
+        operation="test_conflict",
+        owner="test",
+    ):
+        response = authenticated_client.post(
+            f"/api/v1/tasks/{task.id}/promote",
+            json={"note": "accepted", "task_execution_id": execution.id},
+        )
+
+    assert response.status_code == 409
+    assert "active canonical-root writer" in response.json()["detail"]
     db_session.refresh(task)
     assert task.workspace_status == "ready"
     assert task_dir.exists()

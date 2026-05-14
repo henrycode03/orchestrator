@@ -340,6 +340,52 @@ class TaskExecution(Base):
     session = relationship("Session", back_populates="task_executions")
     task = relationship("Task", back_populates="executions")
     logs = relationship("LogEntry", back_populates="task_execution")
+    change_sets = relationship(
+        "TaskExecutionChangeSet",
+        back_populates="task_execution",
+        cascade="all, delete-orphan",
+    )
+
+
+class TaskExecutionChangeSet(Base):
+    __tablename__ = "task_execution_change_sets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True, index=True)
+    task_execution_id = Column(
+        Integer, ForeignKey("task_executions.id"), nullable=False, index=True
+    )
+    base_snapshot_key = Column(String(255), nullable=False)
+    head_snapshot_key = Column(String(255), nullable=True)
+    snapshot_path = Column(Text, nullable=True)
+    target_path = Column(Text, nullable=True)
+    snapshot_exists = Column(Boolean, default=False, nullable=False)
+    added_files = Column(JSON, nullable=False, default=list)
+    modified_files = Column(JSON, nullable=False, default=list)
+    deleted_files = Column(JSON, nullable=False, default=list)
+    warning_flags = Column(JSON, nullable=False, default=list)
+    review_decision = Column(JSON, nullable=True)
+    review_reason = Column(String(255), nullable=True)
+    disposition = Column(String(50), default="captured", nullable=False, index=True)
+    disposition_reason = Column(Text, nullable=True)
+    disposition_at = Column(DateTime(timezone=True), nullable=True)
+    disposition_metadata = Column(JSON, nullable=True)
+    status = Column(String(50), nullable=True, index=True)
+    captured_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "task_execution_id",
+            name="uq_task_execution_change_sets_task_execution_id",
+        ),
+        Index("ix_task_execution_change_sets_task_recorded", "task_id", "created_at"),
+    )
+
+    task_execution = relationship("TaskExecution", back_populates="change_sets")
 
 
 class TaskCheckpoint(Base):

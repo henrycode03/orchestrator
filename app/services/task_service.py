@@ -10,11 +10,12 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import LogEntry, Project, Task, TaskStatus
+from app.models import LogEntry, Project, Task, TaskExecutionChangeSet, TaskStatus
 from app.services.workspace.project_isolation_service import (
     _slugify_workspace_name,
     resolve_project_workspace_path,
 )
+from app.services.workspace.project_mutation_lock import project_mutation_lock
 
 HYDRATION_EXCLUDED_NAMES = {
     ".openclaw",
@@ -695,6 +696,139 @@ class TaskService:
             ),
         }
 
+    def _change_set_record_payload(
+        self, record: TaskExecutionChangeSet
+    ) -> dict[str, Any]:
+        added_files = list(record.added_files or [])
+        modified_files = list(record.modified_files or [])
+        deleted_files = list(record.deleted_files or [])
+        warning_flags = list(record.warning_flags or [])
+        return {
+            "schema": "openclaw.task_execution_change_set.v1",
+            "change_set_id": record.id,
+            "project_id": record.project_id,
+            "task_id": record.task_id,
+            "task_execution_id": record.task_execution_id,
+            "snapshot_key": record.base_snapshot_key,
+            "snapshot_path": record.snapshot_path,
+            "snapshot_exists": bool(record.snapshot_exists),
+            "target_path": record.target_path,
+            "status": record.status,
+            "captured_at": (
+                record.captured_at.isoformat() if record.captured_at else None
+            ),
+            "added_files": added_files,
+            "modified_files": modified_files,
+            "deleted_files": deleted_files,
+            "added_count": len(added_files),
+            "modified_count": len(modified_files),
+            "deleted_count": len(deleted_files),
+            "changed_count": len(added_files)
+            + len(modified_files)
+            + len(deleted_files),
+            "warning_flags": warning_flags,
+            "review_decision": record.review_decision,
+            "review_reason": record.review_reason,
+            "disposition": record.disposition,
+            "disposition_reason": record.disposition_reason,
+            "disposition_at": (
+                record.disposition_at.isoformat() if record.disposition_at else None
+            ),
+            "disposition_metadata": record.disposition_metadata,
+        }
+
+    def _parse_change_set_captured_at(
+        self, change_set: dict[str, Any]
+    ) -> Optional[datetime]:
+        captured_at = change_set.get("captured_at")
+        if not captured_at:
+            return None
+        try:
+            return datetime.fromisoformat(str(captured_at))
+        except ValueError:
+            return None
+
+    def _upsert_task_execution_change_set_record(
+        self,
+        *,
+        change_set: dict[str, Any],
+        session_id: Optional[int],
+        workspace_review_policy: Optional[str] = None,
+        review_decision: Optional[dict[str, Any]] = None,
+    ) -> TaskExecutionChangeSet:
+        task_execution_id = int(change_set["task_execution_id"])
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_execution_id == task_execution_id)
+            .first()
+        )
+        if record is None:
+            record = TaskExecutionChangeSet(task_execution_id=task_execution_id)
+            self.db.add(record)
+
+        record.project_id = int(change_set["project_id"])
+        record.task_id = int(change_set["task_id"])
+        record.session_id = session_id
+        record.base_snapshot_key = str(change_set["snapshot_key"])
+        record.snapshot_path = change_set.get("snapshot_path")
+        record.target_path = change_set.get("target_path")
+        record.snapshot_exists = bool(change_set.get("snapshot_exists"))
+        record.added_files = list(change_set.get("added_files") or [])
+        record.modified_files = list(change_set.get("modified_files") or [])
+        record.deleted_files = list(change_set.get("deleted_files") or [])
+        record.warning_flags = list(change_set.get("warning_flags") or [])
+        record.status = change_set.get("status")
+        record.captured_at = self._parse_change_set_captured_at(change_set)
+        if review_decision is None:
+            if workspace_review_policy is None:
+                try:
+                    from app.config import settings
+                    from app.services.workspace.system_settings import (
+                        get_effective_workspace_review_policy,
+                    )
+
+                    workspace_review_policy = get_effective_workspace_review_policy(
+                        settings.WORKSPACE_REVIEW_POLICY,
+                        db=self.db,
+                    )
+                except Exception:
+                    workspace_review_policy = "hold_nontrivial"
+            review_decision = self.change_set_review_decision(
+                change_set,
+                workspace_review_policy=workspace_review_policy,
+            )
+        record.review_decision = review_decision
+        record.review_reason = (
+            review_decision.get("reason") if review_decision else None
+        )
+        if not record.disposition:
+            record.disposition = "captured"
+        return record
+
+    def mark_task_execution_change_set_disposition(
+        self,
+        *,
+        task_execution_id: int,
+        disposition: str,
+        reason: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        commit: bool = True,
+    ) -> Optional[TaskExecutionChangeSet]:
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_execution_id == task_execution_id)
+            .first()
+        )
+        if not record:
+            return None
+        record.disposition = disposition
+        record.disposition_reason = reason
+        record.disposition_at = datetime.now(UTC)
+        record.disposition_metadata = metadata or {}
+        if commit:
+            self.db.commit()
+        return record
+
     def persist_task_execution_change_set(
         self,
         project: Project,
@@ -706,6 +840,8 @@ class TaskService:
         target_dir: Optional[Path] = None,
         preserve_project_root_rules: bool = True,
         status: Optional[str] = None,
+        workspace_review_policy: Optional[str] = None,
+        review_decision: Optional[dict[str, Any]] = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         change_set = self.build_task_execution_change_set(
@@ -716,6 +852,12 @@ class TaskService:
             target_dir=target_dir,
             preserve_project_root_rules=preserve_project_root_rules,
             status=status,
+        )
+        self._upsert_task_execution_change_set_record(
+            change_set=change_set,
+            session_id=session_id,
+            workspace_review_policy=workspace_review_policy,
+            review_decision=review_decision,
         )
         existing = (
             self.db.query(LogEntry)
@@ -751,6 +893,14 @@ class TaskService:
         *,
         task_execution_id: int,
     ) -> Optional[dict[str, Any]]:
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_execution_id == task_execution_id)
+            .first()
+        )
+        if record:
+            return self._change_set_record_payload(record)
+
         entry = (
             self.db.query(LogEntry)
             .filter(
@@ -772,6 +922,26 @@ class TaskService:
         self,
         task_id: int,
     ) -> Optional[dict[str, Any]]:
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_id == task_id)
+            .order_by(
+                TaskExecutionChangeSet.created_at.desc(),
+                TaskExecutionChangeSet.id.desc(),
+            )
+            .first()
+        )
+        if record:
+            return {
+                "change_set_id": record.id,
+                "task_execution_id": record.task_execution_id,
+                "recorded_at": (
+                    record.created_at.isoformat() if record.created_at else None
+                ),
+                "change_set": self._change_set_record_payload(record),
+                "review_decision": record.review_decision,
+            }
+
         entry = (
             self.db.query(LogEntry)
             .filter(
@@ -805,6 +975,31 @@ class TaskService:
         reason: str = "operator_rejected_change_set",
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project).resolve()
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=project_root,
+            operation="reject_change_set",
+            owner=f"task:{task.id}:execution:{task_execution_id}",
+        ):
+            return self._reject_task_execution_change_set_unlocked(
+                project,
+                task,
+                task_execution_id=task_execution_id,
+                snapshot_key=snapshot_key,
+                reason=reason,
+                project_root=project_root,
+            )
+
+    def _reject_task_execution_change_set_unlocked(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        task_execution_id: int,
+        snapshot_key: str,
+        reason: str,
+        project_root: Path,
+    ) -> dict[str, Any]:
         change_set = self.get_task_execution_change_set(
             task_execution_id=task_execution_id
         ) or self.build_task_execution_change_set(
@@ -856,6 +1051,18 @@ class TaskService:
             preserve_project_root_rules=True,
         )
         self.ensure_project_gitignore_guard(project)
+        disposition_record = self.mark_task_execution_change_set_disposition(
+            task_execution_id=task_execution_id,
+            disposition="rejected",
+            reason=reason,
+            metadata={
+                "archive_path": str(archive_dir),
+                "manifest_path": str(manifest_path),
+                "copied_files": copied_files,
+                "restore_result": restore_result,
+            },
+            commit=False,
+        )
 
         task.workspace_status = "changes_requested"
         task.promoted_at = None
@@ -879,6 +1086,11 @@ class TaskService:
             "restore_result": restore_result,
             "workspace_status": task.workspace_status,
             "change_set": change_set,
+            "change_set_disposition": (
+                self._change_set_record_payload(disposition_record)
+                if disposition_record
+                else None
+            ),
         }
 
     def infer_workspace_status(self, task: Task) -> str:
@@ -1299,6 +1511,18 @@ class TaskService:
         return copied
 
     def promote_task_into_baseline(self, project: Project, task: Task) -> dict:
+        project_root = self.get_project_root(project)
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=project_root,
+            operation="promote_task",
+            owner=f"task:{task.id}",
+        ):
+            return self._promote_task_into_baseline_unlocked(project, task)
+
+    def _promote_task_into_baseline_unlocked(
+        self, project: Project, task: Task
+    ) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)
         baseline_dir.mkdir(parents=True, exist_ok=True)
         if not task.task_subfolder:
@@ -1357,6 +1581,16 @@ class TaskService:
         }
 
     def rebuild_project_baseline(self, project: Project) -> dict:
+        project_root = self.get_project_root(project)
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=project_root,
+            operation="rebuild_baseline",
+            owner=f"project:{project.id}",
+        ):
+            return self._rebuild_project_baseline_unlocked(project)
+
+    def _rebuild_project_baseline_unlocked(self, project: Project) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)
         baseline_dir.mkdir(parents=True, exist_ok=True)
         self.ensure_project_gitignore_guard(project)
@@ -1372,7 +1606,7 @@ class TaskService:
         applied_tasks = []
         total_files = 0
         for task in merged_tasks:
-            result = self.promote_task_into_baseline(project, task)
+            result = self._promote_task_into_baseline_unlocked(project, task)
             applied_tasks.append(
                 {
                     "task_id": task.id,

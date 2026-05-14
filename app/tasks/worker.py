@@ -92,6 +92,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
     mark_task_attempt_running,
 )
+from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.services.observability import (
     build_text_trace_payload,
     flush_langfuse,
@@ -174,6 +175,7 @@ def execute_orchestration_task(
     runs_in_canonical_baseline: bool = False
     active_policy = None
     restore_workspace_snapshot_if_needed = None
+    project_mutation_lock_context = None
 
     try:
         # Get session and task
@@ -454,6 +456,15 @@ def execute_orchestration_task(
 
         is_resume_execution = bool(resume_checkpoint_name)
         task_service = TaskService(db)
+        if runs_in_canonical_baseline and project:
+            mutation_lock_context = project_mutation_lock(
+                project_id=project.id,
+                project_root=task_service.get_project_root(project),
+                operation="execute_canonical_root_task",
+                owner=f"session:{session_id}:task:{task_id}:execution:{task_execution_id}",
+            )
+            mutation_lock_context.__enter__()
+            project_mutation_lock_context = mutation_lock_context
         if project:
             task_service.ensure_project_gitignore_guard(project)
         if runs_in_canonical_baseline and project and not is_resume_execution:
@@ -1447,6 +1458,8 @@ def execute_orchestration_task(
                 task_execution_id,
                 sync_exc,
             )
+        if project_mutation_lock_context is not None:
+            project_mutation_lock_context.__exit__(None, None, None)
         if trace_context_manager is not None:
             trace_context_manager.__exit__(None, None, None)
         flush_langfuse()

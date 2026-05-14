@@ -1407,6 +1407,9 @@ def finalize_successful_task(
                     }
 
     task_change_set = None
+    workspace_review_policy = get_effective_workspace_review_policy(
+        settings.WORKSPACE_REVIEW_POLICY, db=db
+    )
     if (
         project
         and task
@@ -1422,13 +1425,11 @@ def finalize_successful_task(
             target_dir=Path(orchestration_state.project_dir),
             preserve_project_root_rules=runs_in_canonical_baseline,
             status=TaskStatus.DONE.value,
+            workspace_review_policy=workspace_review_policy,
             commit=False,
         )
 
     nontrivial_change_flags = list((task_change_set or {}).get("warning_flags") or [])
-    workspace_review_policy = get_effective_workspace_review_policy(
-        settings.WORKSPACE_REVIEW_POLICY, db=db
-    )
     if hasattr(task_service, "change_set_review_decision"):
         review_decision = task_service.change_set_review_decision(
             task_change_set,

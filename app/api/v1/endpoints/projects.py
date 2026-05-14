@@ -29,6 +29,7 @@ from app.services.workspace.project_isolation_service import (
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
+from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.config import settings
 from app.dependencies import get_current_active_user
 from app.services.authz import get_project_for_user, project_access_filter
@@ -201,7 +202,10 @@ def rebuild_project_baseline(
     """Rebuild the canonical project baseline from promoted task workspaces."""
     project = get_project_for_user(db, project_id, current_user)
 
-    result = TaskService(db).rebuild_project_baseline(project)
+    try:
+        result = TaskService(db).rebuild_project_baseline(project)
+    except ProjectMutationLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "project_id": project.id,
         "project_name": project.name,
