@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
@@ -246,6 +247,64 @@ def _active_project_task_conflict(db: Session, task: Task) -> Task | None:
         )
         .first()
     )
+
+
+def _clear_terminal_task_mutation_lock(
+    db: Session,
+    *,
+    task: Task,
+    lock_path: Path,
+    task_execution_id: int | None,
+) -> bool:
+    """Clear a stale mutation lock left by this task's terminal execution."""
+
+    try:
+        metadata = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    owner = str(metadata.get("owner") or "")
+    owner_parts = owner.split(":")
+    if (
+        len(owner_parts) != 6
+        or owner_parts[0] != "session"
+        or owner_parts[2] != "task"
+        or owner_parts[4] != "execution"
+    ):
+        return False
+    try:
+        owner_task_id = int(owner_parts[3])
+        owner_execution_id = int(owner_parts[5])
+    except (TypeError, ValueError):
+        return False
+    if owner_task_id != task.id:
+        return False
+    if task_execution_id is not None and owner_execution_id != task_execution_id:
+        return False
+
+    task_execution = (
+        db.query(TaskExecution).filter(TaskExecution.id == owner_execution_id).first()
+    )
+    if not task_execution or task_execution.task_id != task.id:
+        return False
+    if task_execution.status not in {
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }:
+        return False
+
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    logger.warning(
+        "Cleared stale project mutation lock for task %s execution %s at %s",
+        task.id,
+        owner_execution_id,
+        lock_path,
+    )
+    return True
 
 
 def _queue_task_retry(
@@ -1214,7 +1273,15 @@ def accept_task_workspace(
     try:
         baseline_result = task_service.promote_task_into_baseline(project, task)
     except ProjectMutationLockError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if _clear_terminal_task_mutation_lock(
+            db,
+            task=task,
+            lock_path=exc.lock_path,
+            task_execution_id=payload.task_execution_id,
+        ):
+            baseline_result = task_service.promote_task_into_baseline(project, task)
+        else:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     if accepted_change_set:
         baseline_result["accepted_change_set"] = accepted_change_set
         disposition_record = task_service.mark_task_execution_change_set_disposition(

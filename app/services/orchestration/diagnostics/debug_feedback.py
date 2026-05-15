@@ -332,6 +332,39 @@ def normalize_bounded_debug_repair_payload(
 ) -> Optional[dict[str, Any]]:
     """Convert a Phase 7F repair array into the legacy debug action shape."""
 
+    if isinstance(parsed_data, dict):
+        fix_type = str(parsed_data.get("fix_type") or "code_fix").strip()
+        if fix_type not in {"code_fix", "command_fix", "ops_fix", "revise_plan"}:
+            return None
+
+        normalized: dict[str, Any] = {
+            "fix_type": fix_type,
+            "fix": str(parsed_data.get("fix") or "").strip(),
+            "analysis": str(parsed_data.get("analysis") or "")[:1200],
+            "confidence": str(parsed_data.get("confidence") or "MEDIUM"),
+        }
+        if isinstance(parsed_data.get("expected_files"), list):
+            normalized["expected_files"] = [
+                str(path).strip()
+                for path in parsed_data.get("expected_files", [])
+                if str(path).strip()
+            ]
+        if isinstance(parsed_data.get("verification"), str):
+            normalized["verification"] = str(parsed_data.get("verification") or "")
+        if isinstance(parsed_data.get("ops"), list):
+            normalized["ops"] = parsed_data.get("ops", [])
+        if isinstance(parsed_data.get("revised_plan"), list):
+            normalized["revised_plan"] = parsed_data.get("revised_plan", [])
+        if fix_type == "command_fix" and not is_runnable_shell_command_fix(
+            normalized["fix"]
+        ):
+            return None
+        if fix_type in {"code_fix", "ops_fix"} and not any(
+            key in normalized for key in ("expected_files", "verification", "ops")
+        ):
+            return None
+        return normalized
+
     if not isinstance(parsed_data, list) or len(parsed_data) != 1:
         return None
     item = parsed_data[0]

@@ -626,6 +626,8 @@ class ValidatorService:
         seen_python = False
         seen_node = False
         for step in plan:
+            if ValidatorService._step_is_readonly_inspection(step):
+                continue
             text = " ".join(
                 [step.get("description", "")]
                 + [str(command or "") for command in step.get("commands", []) or []]

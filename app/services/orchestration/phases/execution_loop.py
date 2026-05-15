@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -119,7 +120,11 @@ def _is_read_only_inspection_command(command: str) -> bool:
         return False
     blocked_tokens = (" >", ">>", "&&", ";", "||", "$(", "`")
     if any(token in normalized for token in blocked_tokens):
+        if normalized == "rg --files . | sort":
+            return True
         return False
+    if normalized == "rg --files . | sort":
+        return True
     if normalized.startswith("find .") and "| head" in normalized:
         return True
     return "|" not in normalized
@@ -129,8 +134,9 @@ def _is_simple_verification_command(command: str) -> bool:
     normalized = " ".join(str(command or "").strip().split())
     if not normalized:
         return False
+    if normalized.startswith("node -e "):
+        return _node_eval_script(normalized) is not None
     allowed_prefixes = (
-        "node -e ",
         "python -c ",
         "python3 -c ",
         "python -m py_compile ",
@@ -145,6 +151,36 @@ def _is_simple_verification_command(command: str) -> bool:
     return not any(
         token in normalized for token in (" >", ">>", ";", "&&", "||", "$(", "`")
     )
+
+
+def _node_eval_script(command: str) -> str | None:
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized.startswith("node -e "):
+        return None
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        tokens = []
+    if len(tokens) == 3 and tokens[0] == "node" and tokens[1] == "-e":
+        script = tokens[2]
+    else:
+        script = normalized[len("node -e ") :].strip()
+        if len(script) >= 2 and script[0] == script[-1] and script[0] in {"'", '"'}:
+            script = script[1:-1]
+    return script.replace('\\\\"', '"').replace('\\"', '"')
+
+
+def _same_simple_verification_command(command: str, verification: str) -> bool:
+    if command == verification:
+        return True
+    try:
+        if shlex.split(command, posix=True) == shlex.split(verification, posix=True):
+            return True
+    except ValueError:
+        pass
+    command_script = _node_eval_script(command)
+    verification_script = _node_eval_script(verification)
+    return bool(command_script and command_script == verification_script)
 
 
 def _execute_read_only_inspection_step(
@@ -192,14 +228,26 @@ def _execute_simple_verification_step(
     verification = str(verification_command or "").strip()
     if len(normalized_commands) != 1 or not verification:
         return None
-    if normalized_commands[0] != verification:
+    command = normalized_commands[0]
+    command_is_simple_verification = _is_simple_verification_command(command)
+    verification_is_simple = _is_simple_verification_command(verification)
+    if _same_simple_verification_command(command, verification):
+        command_to_run = verification
+    elif (
+        command.startswith("node -e ")
+        and verification.startswith("node -e ")
+        and command_is_simple_verification
+        and verification_is_simple
+    ):
+        command_to_run = command
+    else:
         return None
-    if not _is_simple_verification_command(verification):
+    if not _is_simple_verification_command(command_to_run):
         return None
 
     result = execute_verification_command(
         project_dir=project_dir,
-        command=verification,
+        command=command_to_run,
         timeout_seconds=120,
     )
     return {

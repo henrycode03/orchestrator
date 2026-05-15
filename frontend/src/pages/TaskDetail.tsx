@@ -127,7 +127,10 @@ function TaskDetail() {
       await fetchTask();
     } catch (error) {
       console.error('Failed to accept task workspace:', error);
-      setSaveError('Failed to accept task workspace');
+      const detail =
+        (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        'Failed to accept task workspace';
+      setSaveError(detail);
     }
   };
 

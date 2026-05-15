@@ -1173,6 +1173,50 @@ def test_validator_stack_conflict_ignores_json_method_substring(tmp_path):
     )
 
 
+def test_validator_stack_conflict_ignores_readonly_inspection_globs(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect current workspace",
+            "commands": [
+                "find . -type f -name '*.json' -o -name '*.js' -o -name '*.py' | head -20"
+            ],
+            "verification": None,
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Create manifest.json",
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "manifest.json",
+                    "content": '{"name":"phase10a-alpha","version":"1.0.0"}',
+                }
+            ],
+            "commands": [],
+            "verification": "node -e \"const fs=require('fs'); JSON.parse(fs.readFileSync('manifest.json','utf8'))\"",
+            "rollback": "rm -f manifest.json",
+            "expected_files": ["manifest.json"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create manifest.json with name phase10a-alpha and version 1.0.0",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "stack_conflict" not in verdict.details
+    assert (
+        "Plan mixes inconsistent implementation stacks for one task"
+        not in verdict.reasons
+    )
+
+
 def test_validator_stack_conflict_still_detects_real_js_file(tmp_path):
     plan = [
         {

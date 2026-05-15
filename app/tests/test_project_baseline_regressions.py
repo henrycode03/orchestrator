@@ -874,6 +874,81 @@ def test_manual_promote_rejects_active_project_mutation_lock(
     assert task_dir.exists()
 
 
+def test_manual_promote_clears_terminal_execution_mutation_lock(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "manual-promote-terminal-lock"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="manual-promote-terminal-lock",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-manual"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("manual", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Manual promote stale terminal lock",
+        description="Accepted manually",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-manual",
+    )
+    session = SessionModel(project_id=project.id, name="terminal-lock-session")
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    TaskService(db_session).persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=workspace_snapshot_key(task.id, execution.id),
+        target_dir=task_dir,
+    )
+    lock_dir = project_root / ".openclaw" / "locks"
+    lock_dir.mkdir(parents=True)
+    lock_path = lock_dir / f"project-{project.id}.mutation.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "project_id": project.id,
+                "operation": "execute_canonical_root_task",
+                "owner": f"session:{session.id}:task:{task.id}:execution:{execution.id}",
+                "token": "stale-terminal-lock",
+                "created_at_epoch": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/accept",
+        json={"note": "accepted", "task_execution_id": execution.id},
+    )
+
+    assert response.status_code == 200
+    assert not lock_path.exists()
+    db_session.refresh(task)
+    assert task.workspace_status == "promoted"
+
+
 def test_manual_promote_rejects_when_later_project_task_is_running(
     authenticated_client,
     db_session,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict
 
@@ -42,6 +43,168 @@ from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
 )
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
+
+
+def _node_exists_verification_command(paths: list[str]) -> str:
+    encoded_paths = json.dumps(paths)
+    script = (
+        "const fs=require('fs'); "
+        f"const files={encoded_paths}; "
+        "for (const p of files) { if (!fs.existsSync(p)) process.exit(1); }"
+    )
+    return "node -e " + json.dumps(script)
+
+
+def _node_file_contains_verification_command(path: str, needle: str) -> str:
+    script = (
+        "const fs=require('fs'); "
+        f"const content=fs.readFileSync({json.dumps(path)},'utf8'); "
+        f"if (!content.includes({json.dumps(needle)})) process.exit(1);"
+    )
+    return "node -e " + json.dumps(script)
+
+
+def _grep_quiet_verification_target(command: str) -> tuple[str, str] | None:
+    try:
+        tokens = shlex.split(str(command or ""), posix=True)
+    except ValueError:
+        return None
+    if len(tokens) < 4 or tokens[0] != "grep" or "-q" not in tokens:
+        return None
+    quiet_index = tokens.index("-q")
+    if quiet_index + 2 >= len(tokens):
+        return None
+    needle = tokens[quiet_index + 1]
+    path = tokens[quiet_index + 2]
+    if not needle or not path or path.startswith("-"):
+        return None
+    return path.lstrip("./"), needle
+
+
+def _commands_are_weak_expected_file_verification(commands: Any) -> bool:
+    if not isinstance(commands, list) or not commands:
+        return False
+    normalized_commands = [
+        str(command or "").strip() for command in commands if str(command or "").strip()
+    ]
+    if len(normalized_commands) != len(commands):
+        return False
+    return all(
+        PlannerService._verification_is_weak(command)
+        or " ".join(command.split()).startswith(("grep ", "cat ", "test "))
+        for command in normalized_commands
+    )
+
+
+def _strengthen_weak_expected_file_verifications(
+    plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    strengthened: list[dict[str, Any]] = []
+    for step in plan:
+        updated = dict(step)
+        expected_files = [
+            str(path or "").strip().lstrip("./")
+            for path in (updated.get("expected_files") or [])
+            if str(path or "").strip()
+        ]
+        if expected_files and PlannerService._verification_is_weak(
+            updated.get("verification")
+        ):
+            grep_target = _grep_quiet_verification_target(
+                str(updated.get("verification") or "")
+            )
+            if grep_target and grep_target[0] in expected_files:
+                updated["verification"] = _node_file_contains_verification_command(
+                    grep_target[0],
+                    grep_target[1],
+                )
+            else:
+                updated["verification"] = _node_exists_verification_command(
+                    expected_files
+                )
+        if expected_files and _commands_are_weak_expected_file_verification(
+            updated.get("commands")
+        ):
+            updated["commands"] = [str(updated.get("verification") or "").strip()]
+        strengthened.append(updated)
+    return strengthened
+
+
+def _split_repaired_single_step_full_lifecycle_plan(
+    extracted_plan: Any,
+) -> list[dict[str, Any]] | None:
+    if not isinstance(extracted_plan, list) or len(extracted_plan) != 1:
+        return None
+    original = extracted_plan[0]
+    if not isinstance(original, dict):
+        return None
+
+    ops = original.get("ops") if isinstance(original.get("ops"), list) else []
+    commands = (
+        original.get("commands") if isinstance(original.get("commands"), list) else []
+    )
+    commands = [
+        str(command or "").strip() for command in commands if str(command or "").strip()
+    ]
+    expected_files = (
+        original.get("expected_files")
+        if isinstance(original.get("expected_files"), list)
+        else []
+    )
+    expected_files = [
+        str(path or "").strip().lstrip("./")
+        for path in expected_files
+        if str(path or "").strip()
+    ]
+    op_paths = [
+        str(operation.get("path") or "").strip().lstrip("./")
+        for operation in ops
+        if isinstance(operation, dict)
+        and str(operation.get("op") or "")
+        in {"write_file", "append_file", "replace_in_file"}
+        and str(operation.get("path") or "").strip()
+    ]
+    material_paths = list(dict.fromkeys(expected_files + op_paths))
+    original_verification = str(original.get("verification") or "").strip()
+    verifier = (
+        _node_exists_verification_command(material_paths)
+        if material_paths
+        else original_verification
+    )
+    if not (ops or commands) or not verifier:
+        return None
+
+    implementation_step: dict[str, Any] = {
+        "step_number": 2,
+        "description": str(original.get("description") or "Apply requested change"),
+        "commands": commands,
+        "verification": verifier,
+        "rollback": original.get("rollback"),
+        "expected_files": material_paths,
+    }
+    if ops:
+        implementation_step["ops"] = ops
+
+    return [
+        {
+            "step_number": 1,
+            "description": "Inspect the current workspace",
+            "commands": ["rg --files . | sort"],
+            "verification": 'node -e "process.exit(0)"',
+            "rollback": None,
+            "expected_files": [],
+        },
+        implementation_step,
+        {
+            "step_number": 3,
+            "description": "Verify the requested change",
+            "commands": [verifier],
+            "verification": verifier,
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
 
 # Circuit breaker: abort planning after this many consecutive validation failures
 # to prevent infinite retry loops that hang the session.
@@ -878,78 +1041,111 @@ def execute_planning_phase(
                 or repair_shrank_multistep_plan
                 or (single_step_full_lifecycle_plan and retry_state.repair_prompt_used)
             ):
-                truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
-                    output_text=output_text,
-                    extracted_plan=extracted_plan,
-                    repair_stage="after_first_repair",
-                )
-                if repair_shrank_multistep_plan:
-                    truncated_diagnostics["truncated_multistep_original_step_count"] = (
-                        retry_state.last_multistep_plan_step_count
+                normalized_plan = None
+                if (
+                    retry_state.repair_prompt_used
+                    and isinstance(extracted_plan, list)
+                    and len(extracted_plan) == 1
+                ):
+                    normalized_plan = _split_repaired_single_step_full_lifecycle_plan(
+                        extracted_plan
                     )
-                    truncated_diagnostics["truncated_multistep_subcodes"] = list(
-                        dict.fromkeys(
-                            list(
-                                truncated_diagnostics.get(
-                                    "truncated_multistep_subcodes"
+                if normalized_plan:
+                    ctx.logger.warning(
+                        "[ORCHESTRATION] Normalized repaired single-step full-lifecycle plan into %d deterministic steps",
+                        len(normalized_plan),
+                    )
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="WARN",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Normalized repaired single-step "
+                            "full-lifecycle plan into deterministic steps"
+                        ),
+                        details={
+                            "reason": "single_step_full_lifecycle_plan_normalized",
+                            "step_count": len(normalized_plan),
+                        },
+                    )
+                    extracted_plan = normalized_plan
+                    output_text = json.dumps(normalized_plan)
+                    repair_shrank_multistep_plan = False
+                    single_step_full_lifecycle_plan = False
+                else:
+                    truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
+                        output_text=output_text,
+                        extracted_plan=extracted_plan,
+                        repair_stage="after_first_repair",
+                    )
+                    if repair_shrank_multistep_plan:
+                        truncated_diagnostics[
+                            "truncated_multistep_original_step_count"
+                        ] = retry_state.last_multistep_plan_step_count
+                        truncated_diagnostics["truncated_multistep_subcodes"] = list(
+                            dict.fromkeys(
+                                list(
+                                    truncated_diagnostics.get(
+                                        "truncated_multistep_subcodes"
+                                    )
+                                    or []
                                 )
-                                or []
+                                + [
+                                    "repair_shrank_previously_valid_multistep_plan",
+                                    (
+                                        "original_steps_detected_"
+                                        f"{retry_state.last_multistep_plan_step_count}"
+                                    ),
+                                ]
                             )
-                            + [
-                                "repair_shrank_previously_valid_multistep_plan",
-                                (
-                                    "original_steps_detected_"
-                                    f"{retry_state.last_multistep_plan_step_count}"
-                                ),
-                            ]
                         )
+                    failure_type = (
+                        "single_step_full_lifecycle_plan_after_repair"
+                        if (
+                            single_step_full_lifecycle_plan
+                            and retry_state.repair_prompt_used
+                        )
+                        else "truncated_multistep_plan_after_retry"
                     )
-                failure_type = (
-                    "single_step_full_lifecycle_plan_after_repair"
-                    if (
-                        single_step_full_lifecycle_plan
-                        and retry_state.repair_prompt_used
+                    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                    ctx.orchestration_state.abort_reason = (
+                        "Planning output collapsed into a single-step plan"
                     )
-                    else "truncated_multistep_plan_after_retry"
-                )
-                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
-                ctx.orchestration_state.abort_reason = (
-                    "Planning output collapsed into a single-step plan"
-                )
-                emit_phase_event(
-                    ctx.orchestration_state,
-                    ctx.emit_live,
-                    level="ERROR",
-                    phase="planning",
-                    message="[ORCHESTRATION] Planning output was still a single-step plan after repair",
-                    details={"reason": failure_type},
-                )
-                _emit_planning_diagnostics_contract_violation(
-                    ctx,
-                    reason=failure_type,
-                    contract_violations=[
-                        "full-lifecycle planning returned a single-step plan after repair"
-                    ],
-                    contract_diagnostics=truncated_diagnostics,
-                    output_text=output_text,
-                    strategy_info=failure_type,
-                )
-                _finalize_planning_terminal_failure(
-                    ctx=ctx,
-                    failure_type=failure_type,
-                    failure_reason=(
-                        "Planning output was still a single-step plan after repair. "
-                        "The run was stopped to avoid a false success."
-                    ),
-                )
-                if ctx.restore_workspace_snapshot_if_needed:
-                    ctx.restore_workspace_snapshot_if_needed(
-                        "single-step full-lifecycle plan"
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="ERROR",
+                        phase="planning",
+                        message="[ORCHESTRATION] Planning output was still a single-step plan after repair",
+                        details={"reason": failure_type},
                     )
-                return {
-                    "status": "failed",
-                    "reason": failure_type,
-                }
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason=failure_type,
+                        contract_violations=[
+                            "full-lifecycle planning returned a single-step plan after repair"
+                        ],
+                        contract_diagnostics=truncated_diagnostics,
+                        output_text=output_text,
+                        strategy_info=failure_type,
+                    )
+                    _finalize_planning_terminal_failure(
+                        ctx=ctx,
+                        failure_type=failure_type,
+                        failure_reason=(
+                            "Planning output was still a single-step plan after repair. "
+                            "The run was stopped to avoid a false success."
+                        ),
+                    )
+                    if ctx.restore_workspace_snapshot_if_needed:
+                        ctx.restore_workspace_snapshot_if_needed(
+                            "single-step full-lifecycle plan"
+                        )
+                    return {
+                        "status": "failed",
+                        "reason": failure_type,
+                    }
 
             if extracted_plan is None:
                 plan_shape = type(plan_data).__name__
@@ -962,6 +1158,9 @@ def execute_planning_phase(
                 )
 
             sanitized_plan = PlannerService.sanitize_common_plan_issues(extracted_plan)
+            sanitized_plan = _strengthen_weak_expected_file_verifications(
+                sanitized_plan
+            )
             try:
                 ctx.orchestration_state.plan = normalize_plan_with_live_logging(
                     ctx.db,

@@ -30,6 +30,10 @@ from app.services.session.session_lifecycle_service import (
     stop_session_lifecycle,
 )
 from app.services.session import session_runtime_service
+from app.services.orchestration.phases.planning_flow import (
+    _split_repaired_single_step_full_lifecycle_plan,
+    _strengthen_weak_expected_file_verifications,
+)
 from app.services.workspace.checkpoint_service import CheckpointError
 from fastapi import HTTPException
 
@@ -72,6 +76,56 @@ def _make_task(db, project, *, status=TaskStatus.PENDING):
     db.commit()
     db.refresh(task)
     return task
+
+
+def test_repaired_single_step_full_lifecycle_plan_is_split_for_execution():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create about.html",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "about.html",
+                    "content": "<h1>Phase 10A Alpha</h1>\n",
+                }
+            ],
+            "verification": "node -e \"const fs=require('fs'); fs.readFileSync('about.html','utf8')\"",
+            "rollback": "rm -f about.html",
+            "expected_files": ["about.html"],
+        }
+    ]
+
+    split_plan = _split_repaired_single_step_full_lifecycle_plan(plan)
+
+    assert split_plan is not None
+    assert [step["step_number"] for step in split_plan] == [1, 2, 3]
+    assert split_plan[0]["commands"] == ["rg --files . | sort"]
+    assert split_plan[1]["ops"] == plan[0]["ops"]
+    assert split_plan[1]["expected_files"] == ["about.html"]
+    assert split_plan[2]["commands"] == [split_plan[2]["verification"]]
+    assert "node -e" in split_plan[2]["verification"]
+
+
+def test_weak_expected_file_verification_is_strengthened():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Append README usage",
+            "commands": ["grep -A 5 '## Usage' README.md"],
+            "verification": "grep -q 'Usage' README.md",
+            "rollback": None,
+            "expected_files": ["README.md"],
+        }
+    ]
+
+    strengthened = _strengthen_weak_expected_file_verifications(plan)
+
+    assert strengthened[0]["verification"].startswith("node -e ")
+    assert "README.md" in strengthened[0]["verification"]
+    assert "Usage" in strengthened[0]["verification"]
+    assert strengthened[0]["commands"] == [strengthened[0]["verification"]]
 
 
 # ── start boundary conditions ─────────────────────────────────────────────────

@@ -26,7 +26,13 @@ from app.services.orchestration.reporting.decision_timeline import (
     get_session_decision_timeline_payload,
 )
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.phases.execution_loop import execute_step_loop
+from app.services.orchestration.phases.execution_loop import (
+    _execute_simple_verification_step,
+    _is_simple_verification_command,
+    _is_read_only_inspection_command,
+    _same_simple_verification_command,
+    execute_step_loop,
+)
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.prompt_templates import OrchestrationState
@@ -182,6 +188,54 @@ def _make_run_context(
         restore_workspace_snapshot_if_needed=lambda reason: None,
     )
     return ctx, execution
+
+
+def test_simple_node_verification_matches_equivalent_quote_escaping():
+    command = (
+        'node -e "const fs=require(\'fs\'); const files=[\\"README.md\\"]; '
+        'for (const p of files) { if (!fs.existsSync(p)) process.exit(1); }"'
+    )
+    verification = (
+        'node -e "const fs=require(\'fs\'); const files=[\\"README.md\\"]; '
+        'for (const p of files) { if (!fs.existsSync(p)) process.exit(1); }"'
+    )
+
+    assert _same_simple_verification_command(command, verification)
+
+
+def test_simple_node_verification_allows_javascript_boolean_operators():
+    verification = (
+        "node -e \"const fs=require('fs'); const c=fs.readFileSync('styles.css','utf8'); "
+        "if(!c.includes('margin: 0') || !c.includes('color: #333')) process.exit(1)\""
+    )
+
+    assert _is_simple_verification_command(verification)
+
+
+def test_read_only_inspection_allows_sorted_rg_file_listing():
+    assert _is_read_only_inspection_command("rg --files . | sort")
+
+
+def test_simple_verification_executes_stronger_single_command(tmp_path):
+    (tmp_path / "styles.css").write_text(
+        "body {\n  margin: 0;\n}\n\nh1 {\n  color: #333;\n}\n",
+        encoding="utf-8",
+    )
+    command = (
+        "node -e \"const fs=require('fs'); const content=fs.readFileSync('styles.css','utf8'); "
+        "if(!content.includes('body') || !content.includes('margin: 0') || "
+        "!content.includes('h1') || !content.includes('color: #333')) process.exit(1);\""
+    )
+    verification = "node -e \"const fs=require('fs'); if(!fs.existsSync('styles.css')) process.exit(1)\""
+
+    result = _execute_simple_verification_step(
+        project_dir=tmp_path,
+        commands=[command],
+        verification_command=verification,
+    )
+
+    assert result is not None
+    assert result["status"] == "completed"
 
 
 def test_phase7f_classifies_runtime_failures():
