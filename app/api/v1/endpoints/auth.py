@@ -42,7 +42,11 @@ from app.auth import (
     verify_ed25519_signature,
     generate_ed25519_keypair,
 )
-from app.dependencies import get_current_user, get_current_active_user
+from app.dependencies import (
+    get_current_user,
+    get_current_active_user,
+    get_current_optional_user,
+)
 from app.services.auth_rate_limit import enforce_auth_rate_limit
 from app.services.session.auth import (
     generate_session_token,
@@ -437,6 +441,7 @@ def unpair_device(
 def verify_signature(
     request: Request,
     payload: VerifySignatureRequest,
+    current_user: User | None = Depends(get_current_optional_user),
 ):
     """
     Verify an Ed25519 signature for testing/debugging.
@@ -446,6 +451,12 @@ def verify_signature(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Not found",
+        )
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     try:

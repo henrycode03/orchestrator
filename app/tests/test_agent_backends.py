@@ -3,6 +3,9 @@ from app.services.agents.agent_backends import (
     get_backend_descriptor,
     list_supported_backends,
 )
+from app.services.agents.openclaw_service import OpenClawSessionService
+from app.models import Project, Session as SessionModel
+from app.config import settings
 from app.services.model_adaptation import resolve_adaptation_profile
 
 
@@ -54,3 +57,30 @@ def test_resolve_adaptation_profile_prefers_matching_backend_and_model_family():
     assert profile.backend == "openai_responses_api"
     assert profile.name == "openai_responses_structured"
     assert profile.prompt_dialect == "responses_json"
+
+
+def test_openclaw_cli_args_are_parsed_into_resolved_command(
+    db_session, monkeypatch, tmp_path
+):
+    cli_path = tmp_path / "openclaw"
+    cli_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    monkeypatch.setattr(settings, "OPENCLAW_CLI_PATH", str(cli_path))
+    monkeypatch.setattr(settings, "OPENCLAW_CLI_ARGS", '--profile "load test" --json')
+
+    project = Project(name="CLI Args Project")
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(name="CLI Args Session", project_id=project.id)
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = OpenClawSessionService(db_session, session.id)
+
+    assert service._resolve_openclaw_command() == [
+        str(cli_path),
+        "--profile",
+        "load test",
+        "--json",
+    ]

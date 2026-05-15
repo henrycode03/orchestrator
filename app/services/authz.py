@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import false, or_
 from sqlalchemy.orm import Session
 
 from app.models import Project, Session as SessionModel, User
 
 
-def project_access_filter(db: Session, user: User):
+def project_access_filter(db: Session, user: User | None):
     """Return the project visibility predicate for authenticated local users."""
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return false()
+
     active_user_ids = db.query(User.id).filter(User.is_active.is_(True)).limit(2).all()
     if len(active_user_ids) <= 1:
-        return or_(Project.user_id == user.id, Project.user_id.is_(None))
-    return Project.user_id == user.id
+        return or_(Project.user_id == user_id, Project.user_id.is_(None))
+    return Project.user_id == user_id
 
 
 def get_project_for_user(db: Session, project_id: int, user: User) -> Project:

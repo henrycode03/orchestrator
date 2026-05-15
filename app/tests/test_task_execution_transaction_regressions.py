@@ -13,6 +13,7 @@ from app.models import (
     TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
+    User,
 )
 from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
 
@@ -495,9 +496,21 @@ def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
 async def test_task_execute_endpoint_uses_runtime_factory(db_session, monkeypatch):
     from app.api.v1.endpoints.tasks import execute_task_with_runtime
 
-    project = Project(name="Runtime Project", workspace_path="/tmp/runtime-project")
+    user = User(
+        email="runtime-owner@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.flush()
+    project = Project(
+        name="Runtime Project",
+        workspace_path="/tmp/runtime-project",
+        user_id=user.id,
+    )
     db_session.add(project)
     db_session.commit()
+    db_session.refresh(user)
     db_session.refresh(project)
 
     task = Task(
@@ -532,7 +545,7 @@ async def test_task_execute_endpoint_uses_runtime_factory(db_session, monkeypatc
         async def json(self):
             return {"prompt": "neutral runtime prompt", "timeout_seconds": 42}
 
-    result = await execute_task_with_runtime(task.id, _FakeRequest(), db_session, None)
+    result = await execute_task_with_runtime(task.id, _FakeRequest(), db_session, user)
 
     assert result["status"] == "completed"
     assert [call[0] for call in calls] == ["create_session", "execute_task"]

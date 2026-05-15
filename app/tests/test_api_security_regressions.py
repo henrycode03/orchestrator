@@ -2,7 +2,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app.auth import create_access_token
+from app.auth import create_access_token, get_password_hash
 from app.config import settings
 from app.models import (
     PlanningSession,
@@ -14,6 +14,7 @@ from app.models import (
 )
 from app.api.v1.endpoints.auth import generate_keypair
 from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_auth_rate_limit
+from app.services.authz import project_access_filter
 from app.dependencies import get_current_active_user, get_current_user
 
 
@@ -83,6 +84,85 @@ def test_settings_system_update_requires_admin_in_multi_user_deployments(
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Admin privileges are required for this action"
+
+
+def test_users_list_requires_admin_in_multi_user_deployments(api_app, db_session):
+    user_one = User(
+        id=701,
+        email="users-list-owner@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    user_two = User(
+        id=702,
+        email="users-list-other@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    db_session.add_all([user_one, user_two])
+    db_session.commit()
+
+    def override_current_user():
+        return user_one
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        response = client.get("/api/v1/users")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin privileges are required for this action"
+
+
+def test_auth_verify_requires_authentication_when_enabled(api_client, monkeypatch):
+    monkeypatch.setattr(settings, "ALLOW_TEST_ENDPOINTS", True)
+
+    response = api_client.post(
+        "/api/v1/auth/verify",
+        json={
+            "message": "test",
+            "signature": "invalid",
+            "public_key": "invalid",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_auth_verify_stays_hidden_when_disabled(api_client):
+    response = api_client.post(
+        "/api/v1/auth/verify",
+        json={
+            "message": "test",
+            "signature": "invalid",
+            "public_key": "invalid",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+def test_session_cookie_is_secure_in_production(api_client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    password = "password123"
+    user = User(
+        email="secure-cookie@example.com",
+        hashed_password=get_password_hash(password),
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+
+    response = api_client.post(
+        "/api/v1/auth/session/login",
+        json={"email": user.email, "password": password},
+    )
+
+    assert response.status_code == 200
+    assert "secure" in response.headers["set-cookie"].lower()
 
 
 def test_task_update_rejects_unsupported_fields(authenticated_client, db_session):
@@ -240,6 +320,18 @@ def test_project_routes_are_scoped_to_the_authenticated_user(api_app, db_session
     assert list_response.status_code == 200
     assert [project["id"] for project in list_response.json()] == [own_project.id]
     assert other_response.status_code == 404
+
+
+def test_project_access_filter_denies_missing_user(db_session):
+    project = Project(name="Anonymous Predicate Project", user_id=None)
+    db_session.add(project)
+    db_session.commit()
+
+    visible_projects = (
+        db_session.query(Project).filter(project_access_filter(db_session, None)).all()
+    )
+
+    assert visible_projects == []
 
 
 def test_legacy_ownerless_projects_are_not_visible_to_authenticated_users(
