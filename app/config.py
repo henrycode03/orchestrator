@@ -107,7 +107,7 @@ class Settings(BaseSettings):
         return database_url
 
     # Auth
-    SECRET_KEY: str
+    SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # 15-minute access token (short-lived)
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7-day refresh token
     SESSION_COOKIE_NAME: str = "orchestrator_session"

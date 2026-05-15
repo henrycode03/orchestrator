@@ -114,13 +114,12 @@ def test_settings_rejects_unknown_workspace_review_policy():
         )
 
 
-def test_settings_requires_secret_key():
-    from pydantic import ValidationError
-
+def test_settings_allows_import_without_secret_key():
     from app.config import Settings
 
-    with pytest.raises(ValidationError, match="SECRET_KEY"):
-        Settings(_env_file=None)
+    settings = Settings(_env_file=None)
+
+    assert settings.SECRET_KEY == ""
 
 
 def test_validate_raises_on_empty_secret_key(monkeypatch):
