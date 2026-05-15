@@ -89,7 +89,6 @@ def _get_knowledge_service() -> KnowledgeService:
     return KnowledgeService(
         qdrant_url=settings.QDRANT_URL,
         collection_name=settings.QDRANT_COLLECTION_NAME,
-        embedding_model=settings.OPENAI_EMBEDDING_MODEL,
     )
 
 

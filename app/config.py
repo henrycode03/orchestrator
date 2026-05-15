@@ -181,7 +181,15 @@ class Settings(BaseSettings):
     # Knowledge Layer
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_COLLECTION_NAME: str = "knowledge"
+    # Embedding provider: "auto" | "openai" | "ollama"
+    # "auto" uses OpenAI when OPENAI_API_KEY is set, otherwise falls back to Ollama.
+    EMBEDDING_PROVIDER: str = "auto"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # Ollama runs on the host; orchestrator reaches it via host.docker.internal.
+    OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
+    OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
+    # 0 = auto (1536 for openai, 768 for ollama nomic-embed-text)
+    EMBEDDING_DIM: int = 0
     KNOWLEDGE_CONTENT_MAX_CHARS: int = 800
     KNOWLEDGE_MAX_ITEMS: int = 3
     KNOWLEDGE_MAX_TOTAL_CHARS: int = 2000

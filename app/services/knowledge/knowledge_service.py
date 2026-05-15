@@ -26,8 +26,6 @@ from app.schemas.knowledge import (
     RecommendedAction,
 )
 
-_EMBEDDING_DIM = 1536
-
 # knowledge_type rank for budget sorting (lower = higher priority)
 _TYPE_RANK: dict[str, int] = {
     KnowledgeType.failure_memory: 0,
@@ -38,6 +36,19 @@ _TYPE_RANK: dict[str, int] = {
     KnowledgeType.best_practice: 5,
     KnowledgeType.system_doc: 6,
 }
+
+
+def _resolve_provider() -> str:
+    p = settings.EMBEDDING_PROVIDER.strip().lower()
+    if p == "auto":
+        return "openai" if settings.OPENAI_API_KEY.strip() else "ollama"
+    return p
+
+
+def _resolve_dim(provider: str) -> int:
+    if settings.EMBEDDING_DIM > 0:
+        return settings.EMBEDDING_DIM
+    return 768 if provider == "ollama" else 1536
 
 
 def _knowledge_type_values(knowledge_types: list[str]) -> list[str]:
@@ -59,7 +70,8 @@ class KnowledgeService:
         self,
         qdrant_url: str = settings.QDRANT_URL,
         collection_name: str = settings.QDRANT_COLLECTION_NAME,
-        embedding_model: str = settings.OPENAI_EMBEDDING_MODEL,
+        embedding_model: str = "",
+        embedding_dim: int = 0,
     ) -> None:
         # ":memory:" is a positional-only arg for the in-process store
         if qdrant_url == ":memory:":
@@ -67,11 +79,27 @@ class KnowledgeService:
         else:
             self._client = QdrantClient(url=qdrant_url)
         self._collection = collection_name
-        self._embedding_model = embedding_model
-        self._openai = OpenAI(
-            api_key=settings.OPENAI_API_KEY or "no-key",
-            max_retries=0,
-            timeout=10.0,
+
+        provider = _resolve_provider()
+        if provider == "ollama":
+            base_url = settings.OLLAMA_BASE_URL.rstrip("/") + "/v1"
+            self._embedding_model = embedding_model or settings.OLLAMA_EMBEDDING_MODEL
+            self._embed_client = OpenAI(
+                api_key="ollama",
+                base_url=base_url,
+                max_retries=0,
+                timeout=30.0,
+            )
+        else:
+            self._embedding_model = embedding_model or settings.OPENAI_EMBEDDING_MODEL
+            self._embed_client = OpenAI(
+                api_key=settings.OPENAI_API_KEY or "no-key",
+                max_retries=0,
+                timeout=10.0,
+            )
+
+        self._embedding_dim = (
+            embedding_dim if embedding_dim > 0 else _resolve_dim(provider)
         )
         self._ensure_collection()
 
@@ -347,7 +375,7 @@ class KnowledgeService:
         return score
 
     def _embed(self, text: str) -> list[float]:
-        response = self._openai.embeddings.create(
+        response = self._embed_client.embeddings.create(
             model=self._embedding_model, input=text
         )
         return response.data[0].embedding
@@ -407,6 +435,6 @@ class KnowledgeService:
             self._client.create_collection(
                 collection_name=self._collection,
                 vectors_config=VectorParams(
-                    size=_EMBEDDING_DIM, distance=Distance.COSINE
+                    size=self._embedding_dim, distance=Distance.COSINE
                 ),
             )

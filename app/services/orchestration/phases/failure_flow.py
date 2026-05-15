@@ -408,7 +408,6 @@ def _apply_knowledge_halt(
         svc = KnowledgeService(
             qdrant_url=settings.QDRANT_URL,
             collection_name=settings.QDRANT_COLLECTION_NAME,
-            embedding_model=settings.OPENAI_EMBEDDING_MODEL,
         )
         knowledge_ctx = svc.retrieve(
             query=sig.normalized_message,
@@ -507,7 +506,6 @@ def record_failure_knowledge_for_stopped_session(
         svc = KnowledgeService(
             qdrant_url=settings.QDRANT_URL,
             collection_name=settings.QDRANT_COLLECTION_NAME,
-            embedding_model=settings.OPENAI_EMBEDDING_MODEL,
         )
         knowledge_ctx = svc.retrieve(
             query=sig.normalized_message,

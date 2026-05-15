@@ -38,7 +38,7 @@ def db():
 @pytest.fixture()
 def svc():
     with patch.object(KnowledgeService, "_embed", return_value=_FAKE_VECTOR):
-        yield KnowledgeService(qdrant_url=":memory:")
+        yield KnowledgeService(qdrant_url=":memory:", embedding_dim=len(_FAKE_VECTOR))
 
 
 def _make_item(

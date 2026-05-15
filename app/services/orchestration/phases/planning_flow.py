@@ -1900,7 +1900,6 @@ def _retrieve_knowledge(
         svc = KnowledgeService(
             qdrant_url=settings.QDRANT_URL,
             collection_name=settings.QDRANT_COLLECTION_NAME,
-            embedding_model=settings.OPENAI_EMBEDDING_MODEL,
         )
         knowledge_ctx = svc.retrieve(
             query=query or ctx.prompt or "",

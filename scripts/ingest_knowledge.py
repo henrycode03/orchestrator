@@ -160,7 +160,6 @@ def run(source_dir: Path, db_url: str, qdrant_url: str) -> None:
     svc = KnowledgeService(
         qdrant_url=qdrant_url,
         collection_name=settings.QDRANT_COLLECTION_NAME,
-        embedding_model=settings.OPENAI_EMBEDDING_MODEL,
     )
     db = SessionLocal()
 

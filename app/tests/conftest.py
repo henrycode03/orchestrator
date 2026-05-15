@@ -140,6 +140,7 @@ def qdrant_memory(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "QDRANT_URL", ":memory:")
+    monkeypatch.setattr(settings, "EMBEDDING_DIM", 1536)
 
 
 @pytest.fixture

@@ -267,7 +267,7 @@ def test_orphan_recovery_writes_knowledge_usage_log(db, monkeypatch):
     _fake_vector = [0.0] * 1536
 
     with patch.object(KnowledgeService, "_embed", return_value=_fake_vector):
-        svc = KnowledgeService(qdrant_url=":memory:")
+        svc = KnowledgeService(qdrant_url=":memory:", embedding_dim=len(_fake_vector))
         svc.ingest(item)
 
     with patch(
