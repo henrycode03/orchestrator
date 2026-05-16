@@ -17,6 +17,7 @@ from app.api.v1.endpoints import (
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.project_logs import router as project_logs_router
+from app.api.v1.endpoints.ops import router as ops_router
 from app.dependencies import get_current_active_user
 from app.services.health import api_root_payload, health_payload
 
@@ -154,3 +155,6 @@ api_router.include_router(
     tags=["knowledge"],
     dependencies=[Depends(get_current_active_user)],
 )
+
+# Production observability (Phase 10B) — admin-only
+api_router.include_router(ops_router)
