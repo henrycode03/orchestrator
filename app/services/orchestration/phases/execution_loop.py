@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os as _os
+import re as _re
 import shlex
+import subprocess as _subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -77,8 +80,11 @@ from app.services.orchestration.validation.parsing import (
 )
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
+    TaskWorkspaceViolationError,
+    assert_no_workspace_cd_escape,
     compute_workspace_checksum,
     detect_scope_violations,
+    normalize_path_reference,
     summarize_step_changes,
 )
 from app.services.orchestration.context.hitl_sentinel import (
@@ -190,13 +196,37 @@ def _python_inline_verification_script(command: str) -> str | None:
     )
     if any(fragment in lowered for fragment in blocked_fragments):
         return None
-    if "pathlib.path(" not in lowered:
-        return None
-    if not any(fragment in lowered for fragment in (".read_text(", ".exists(")):
+    path_check = "pathlib.path(" in lowered and any(
+        fragment in lowered for fragment in (".read_text(", ".exists(")
+    )
+    config_check = "configparser" in lowered and ".read(" in lowered
+    module_assert_check = "import utils" in lowered and "assert " in lowered
+    if not (path_check or config_check or module_assert_check):
         return None
     if not any(fragment in lowered for fragment in ("sys.exit(", "print(")):
+        if not module_assert_check:
+            return None
+    if module_assert_check and "assert " not in lowered:
         return None
     return script
+
+
+def _patch_python_verification_cmd(command: str) -> str:
+    """Prepend 'import sys; ' when a python -c script uses sys.* without importing it."""
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized.startswith(("python -c ", "python3 -c ")):
+        return command
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return command
+    if len(tokens) != 3:
+        return command
+    script = tokens[2]
+    if "sys." in script and "import sys" not in script:
+        script = "import sys; " + script
+        return f"{tokens[0]} -c {shlex.quote(script)}"
+    return command
 
 
 def _node_eval_script(command: str) -> str | None:
@@ -264,6 +294,209 @@ def _execute_read_only_inspection_step(
     }
 
 
+def _is_safe_local_shell_command(command: str) -> bool:
+    """Return True for shell commands safe to run locally in the project workspace.
+
+    Handles common file-creation patterns the LLM generates instead of write_file
+    ops — echo redirects, mkdir, touch. These would otherwise fall through to the
+    LLM execute_task path where no local file is actually created.
+    """
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return False
+    blocked_tokens = (
+        "$(",
+        "`",
+        "curl",
+        "wget",
+        "pip",
+        "npm",
+        "yarn",
+        "apt",
+        "yum",
+        "brew",
+        "rm ",
+        "rm\t",
+        "sudo",
+        "; rm",
+        "&&rm",
+        "||rm",
+        "..",  # block path traversal
+    )
+    if any(t in normalized for t in blocked_tokens):
+        return False
+    safe_prefixes = (
+        "echo ",
+        "echo\t",
+        "printf ",
+        "mkdir ",
+        "mkdir\t",
+        "touch ",
+        "cp ",
+        "cp\t",
+        "mv ",
+        "mv\t",
+    )
+    return any(normalized.startswith(p) for p in safe_prefixes)
+
+
+def _is_workspace_local_path_token(token: str, project_dir: Path) -> bool:
+    raw = str(token or "").strip()
+    if not raw:
+        return False
+    if _re.match(r"^[A-Za-z]:[\\/]", raw) or raw.startswith(("\\\\", "//")):
+        return False
+    try:
+        normalize_path_reference(raw, project_dir)
+    except TaskWorkspaceViolationError:
+        return False
+    return True
+
+
+def _local_shell_command_paths_are_safe(command: str, project_dir: Path) -> bool:
+    if _re.search(r"(^|[\s>])([A-Za-z]:[\\/]|\\\\)", str(command or "")):
+        return False
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+
+    executable = tokens[0]
+    if executable in {"echo", "printf"}:
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {">", ">>"}:
+                if index + 1 >= len(tokens):
+                    return False
+                if not _is_workspace_local_path_token(tokens[index + 1], project_dir):
+                    return False
+                index += 2
+                continue
+            if token.startswith((">", ">>")):
+                target = token[2:] if token.startswith(">>") else token[1:]
+                if not _is_workspace_local_path_token(target, project_dir):
+                    return False
+            index += 1
+        return True
+
+    if executable in {"mkdir", "touch"}:
+        operands = [token for token in tokens[1:] if not token.startswith("-")]
+        return bool(operands) and all(
+            _is_workspace_local_path_token(token, project_dir) for token in operands
+        )
+
+    if executable in {"cp", "mv"}:
+        operands = [token for token in tokens[1:] if not token.startswith("-")]
+        return len(operands) >= 2 and all(
+            _is_workspace_local_path_token(token, project_dir) for token in operands
+        )
+
+    return False
+
+
+def _execute_local_shell_commands_step(
+    *,
+    project_dir: Path,
+    commands: list[Any],
+    verification_command: Any,
+) -> dict[str, Any] | None:
+    """Execute safe shell write commands locally instead of delegating to the LLM.
+
+    Returns None if any command fails the safety check, so the caller can fall
+    through to the LLM path.
+    """
+    normalized_cmds = [
+        str(c or "").strip() for c in (commands or []) if str(c or "").strip()
+    ]
+    if not normalized_cmds:
+        return None
+    if not all(_is_safe_local_shell_command(c) for c in normalized_cmds):
+        return None
+    # Workspace escape check
+    for cmd in normalized_cmds:
+        try:
+            assert_no_workspace_cd_escape(cmd, project_dir)
+        except TaskWorkspaceViolationError:
+            return None
+        if not _local_shell_command_paths_are_safe(cmd, project_dir):
+            return None
+
+    files_before = set(
+        _os.path.relpath(_os.path.join(root, f), project_dir)
+        for root, _, files in _os.walk(project_dir)
+        for f in files
+    )
+    outputs: list[str] = []
+    for cmd in normalized_cmds:
+        try:
+            result = _subprocess.run(
+                cmd,
+                cwd=str(project_dir),
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except _subprocess.TimeoutExpired:
+            return {
+                "status": "failed",
+                "output": f"Command timed out: {cmd}",
+                "error": "timeout",
+                "files_changed": [],
+            }
+        if result.returncode != 0:
+            err = "\n".join(
+                filter(None, [result.stdout.strip(), result.stderr.strip()])
+            )
+            return {
+                "status": "failed",
+                "output": err,
+                "error": err,
+                "files_changed": [],
+            }
+        out = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
+        if out:
+            outputs.append(f"$ {cmd}\n{out}")
+
+    files_after = set(
+        _os.path.relpath(_os.path.join(root, f), project_dir)
+        for root, _, files in _os.walk(project_dir)
+        for f in files
+    )
+    files_changed = [
+        f for f in files_after - files_before if not f.startswith(".openclaw")
+    ]
+
+    # Run verification if provided
+    verification = _patch_python_verification_cmd(
+        str(verification_command or "").strip()
+    )
+    if verification:
+        vresult = execute_verification_command(
+            project_dir=project_dir,
+            command=verification,
+            timeout_seconds=60,
+        )
+        if not vresult.get("success"):
+            verr = vresult.get("output", "verification failed")
+            return {
+                "status": "failed",
+                "output": verr,
+                "error": verr,
+                "files_changed": files_changed,
+            }
+
+    return {
+        "status": "completed",
+        "output": "\n\n".join(outputs),
+        "verification_output": "",
+        "files_changed": files_changed,
+    }
+
+
 def _execute_simple_verification_step(
     *,
     project_dir: Path,
@@ -290,6 +523,7 @@ def _execute_simple_verification_step(
         command_to_run = command
     else:
         return None
+    command_to_run = _patch_python_verification_cmd(command_to_run)
     if not _is_simple_verification_command(command_to_run):
         return None
 
@@ -657,44 +891,52 @@ def execute_step_loop(
                     if local_verification_result is not None:
                         step_result = local_verification_result
                     else:
-                        execution_prompt = assemble_execution_prompt(ctx, step)
-                        step_timeout_seconds = determine_step_timeout(
-                            timeout_seconds=timeout_seconds,
-                            total_steps=len(orchestration_state.plan),
-                            execution_profile=execution_profile,
-                            step_description=step_description,
-                            task_prompt=prompt,
+                        local_shell_result = _execute_local_shell_commands_step(
+                            project_dir=orchestration_state.project_dir,
+                            commands=step_commands,
+                            verification_command=verification_command,
                         )
-                        step_result = asyncio.run(
-                            runtime_service.execute_task(
-                                execution_prompt,
-                                timeout_seconds=step_timeout_seconds,
-                            )
-                        )
-                        if runtime_service.reports_context_overflow(step_result):
-                            logger.warning(
-                                "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
-                                "retrying with compact prompt",
-                                step_index + 1,
-                            )
-                            emit_live(
-                                "WARN",
-                                f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
-                                metadata={
-                                    "phase": "executing",
-                                    "step_index": step_index + 1,
-                                    "compact_retry": True,
-                                },
-                            )
-                            compact_execution_prompt = assemble_execution_prompt(
-                                ctx, step, compact=True
+                        if local_shell_result is not None:
+                            step_result = local_shell_result
+                        else:
+                            execution_prompt = assemble_execution_prompt(ctx, step)
+                            step_timeout_seconds = determine_step_timeout(
+                                timeout_seconds=timeout_seconds,
+                                total_steps=len(orchestration_state.plan),
+                                execution_profile=execution_profile,
+                                step_description=step_description,
+                                task_prompt=prompt,
                             )
                             step_result = asyncio.run(
                                 runtime_service.execute_task(
-                                    compact_execution_prompt,
+                                    execution_prompt,
                                     timeout_seconds=step_timeout_seconds,
                                 )
                             )
+                            if runtime_service.reports_context_overflow(step_result):
+                                logger.warning(
+                                    "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
+                                    "retrying with compact prompt",
+                                    step_index + 1,
+                                )
+                                emit_live(
+                                    "WARN",
+                                    f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
+                                    metadata={
+                                        "phase": "executing",
+                                        "step_index": step_index + 1,
+                                        "compact_retry": True,
+                                    },
+                                )
+                                compact_execution_prompt = assemble_execution_prompt(
+                                    ctx, step, compact=True
+                                )
+                                step_result = asyncio.run(
+                                    runtime_service.execute_task(
+                                        compact_execution_prompt,
+                                        timeout_seconds=step_timeout_seconds,
+                                    )
+                                )
             else:
                 step_result = {
                     "status": "completed",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -271,15 +272,25 @@ def execute_verification_command(
         return portable_result
 
     command_to_run = raw_command
-    if raw_command == "python3" or raw_command.startswith("python3 "):
+    if raw_command in {"python", "python3"}:
+        command_to_run = subprocess.list2cmdline([sys.executable])
+    elif raw_command.startswith("python "):
+        command_to_run = (
+            subprocess.list2cmdline([sys.executable]) + raw_command[len("python") :]
+        )
+    elif raw_command.startswith("python3 "):
         command_to_run = (
             subprocess.list2cmdline([sys.executable]) + raw_command[len("python3") :]
         )
 
     try:
+        env = os.environ.copy()
+        python_dir = str(Path(sys.executable).parent)
+        env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         completed = subprocess.run(
             command_to_run,
             cwd=str(project_dir),
+            env=env,
             shell=True,
             capture_output=True,
             text=True,

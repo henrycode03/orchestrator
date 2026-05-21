@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import logging
 import os
@@ -48,6 +49,13 @@ _TRANSIENT_EXPECTED_FILE_PARTS = frozenset(
     }
 )
 _WORKSPACE_STEM = "vault/projects"
+_CREATE_FILE_PLACEHOLDER_OLD_VALUES = frozenset(
+    {
+        "",
+        "# Your code here",
+        "# Add your utility functions here",
+    }
+)
 
 
 def _relative_path_text(path: Path) -> str:
@@ -306,6 +314,64 @@ def _repair_unclosed_python_c_outer_quote(command: str) -> str:
     return command
 
 
+def _rewrite_inline_exception_assertion(script: str) -> str:
+    patterns = (
+        re.compile(
+            r";\s*try:\s*(?P<call>[^;]+?)\s*;\s*assert\s+False"
+            r"(?:\s*,\s*(?P<message>'[^']*'|\"[^\"]*\"))?"
+            r"\s+except\s+(?P<exception>[A-Za-z_][A-Za-z0-9_.]*):\s*pass\s*$"
+        ),
+        re.compile(
+            r";\s*try:\s*(?P<call>[^;]+?)\s*;\s*except\s+"
+            r"(?P<exception>[A-Za-z_][A-Za-z0-9_.]*):\s*pass"
+            r"\s+else:\s*assert\s+False\s*$"
+        ),
+    )
+    match = next(
+        (
+            candidate
+            for pattern in patterns
+            if (candidate := pattern.search(script or ""))
+        ),
+        None,
+    )
+    if not match:
+        return script
+
+    try:
+        parsed = ast.parse(match.group("call"), mode="eval")
+    except SyntaxError:
+        return script
+    if not isinstance(parsed.body, ast.Call) or parsed.body.keywords:
+        return script
+
+    function_expr = ast.unparse(parsed.body.func)
+    args = [ast.unparse(arg) for arg in parsed.body.args]
+    call_args = ", ".join([function_expr, *args])
+    replacement = (
+        f"; import unittest; unittest.TestCase().assertRaises("
+        f"{match.group('exception')}, {call_args})"
+    )
+    return script[: match.start()] + replacement
+
+
+def _repair_python_c_inline_exception_assertion(command: str) -> str:
+    stripped = (command or "").strip()
+    if not re.match(r"^python3?\s+-c\s+", stripped):
+        return command
+    try:
+        tokens = shlex.split(stripped, posix=True)
+    except ValueError:
+        return command
+    if len(tokens) != 3 or tokens[0] not in {"python", "python3"} or tokens[1] != "-c":
+        return command
+
+    rewritten = _rewrite_inline_exception_assertion(tokens[2])
+    if rewritten == tokens[2]:
+        return command
+    return f"{tokens[0]} -c {shlex.quote(rewritten)}"
+
+
 def _normalize_write_pseudo_command(command: str, project_dir: Path) -> Optional[str]:
     """Normalize `write path: description` pseudo-commands without parsing prose as shell."""
 
@@ -372,6 +438,7 @@ def normalize_command(command: str, project_dir: Path) -> str:
         return normalized
 
     normalized = _repair_unclosed_python_c_outer_quote(normalized)
+    normalized = _repair_python_c_inline_exception_assertion(normalized)
     current = _rewrite_safe_cd_chain(normalized, project_dir)
     cd_pattern = re.compile(r"^\s*cd\s+([^;&|]+?)\s*&&\s*(.+)$")
     while True:
@@ -551,6 +618,19 @@ def normalize_file_ops(
                 raise TaskOperationContractViolation(
                     f"{step_label} op {op_index} new must be a string"
                 )
+            target_path = (project_dir / normalized_operation["path"]).resolve()
+            target_is_missing_or_empty = not target_path.exists() or (
+                target_path.is_file() and target_path.stat().st_size == 0
+            )
+            if (
+                target_is_missing_or_empty
+                and old.strip() in _CREATE_FILE_PLACEHOLDER_OLD_VALUES
+                and new.strip()
+            ):
+                normalized_operation["op"] = "write_file"
+                normalized_operation["content"] = new
+                normalized_ops.append(normalized_operation)
+                continue
             normalized_operation["old"] = old
             normalized_operation["new"] = new
         normalized_ops.append(normalized_operation)

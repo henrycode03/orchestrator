@@ -1,9 +1,10 @@
 # Orchestrator Setup Guide
 
-Two paths depending on your machine:
+Three paths depending on your machine:
 
 - [Linux / Ubuntu (with OpenClaw)](#linux--ubuntu-with-openclaw) — native processes, `start.sh`
-- [Windows (native Ollama, no OpenClaw)](#windows-native-ollama-no-openclaw) — Docker Compose full stack
+- [Windows (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `start.ps1`
+- [Windows (llama.cpp, no OpenClaw)](#windows-AMD-gpu--llamacpp-no-openclaw) — `./start-amd.sh`
 
 ---
 
@@ -29,7 +30,7 @@ cd orchestrator
 **2. Create your `.env`**
 
 ```bash
-cp .env.example .env   # if .env.example exists, otherwise create manually
+cp .env.example .env
 ```
 
 Minimum required values:
@@ -73,20 +74,13 @@ Open the dashboard, go to the register page, and create your account.
 
 ### Workspace paths
 
-The Settings `workspace_root` value must be the path visible to the running
-backend process.
+The Settings `workspace_root` value must be the path visible to the running backend process.
 
-- Linux native: use the real Linux projects path, for example
-  `/home/yourname/projects`.
+- Linux native: use the real Linux projects path, e.g. `/home/yourname/projects`.
 
 ### Model selection
 
-```text
-Agent Backend: Local OpenClaw
-```
-
-In Linux / Ubuntu mode, choose the real model in the **OpenClaw dashboard**.
-Orchestrator sends work to OpenClaw, and OpenClaw runs the model selected there.
+In Linux / Ubuntu mode, choose the real model in the **OpenClaw dashboard**. Orchestrator sends work to OpenClaw, and OpenClaw runs the model selected there.
 
 Recommended Orchestrator settings:
 
@@ -96,12 +90,7 @@ Model Family: local
 Adaptation Profile: OpenClaw Default
 ```
 
-Changing OpenClaw from Qwen to an OpenAI model usually does not require any
-Orchestrator setting change.
-
-Orchestrator also has a separate planning-speed model. Defaults are in
-`app/config.py`; override them in `.env` only if your machine needs different
-values:
+Orchestrator also has a separate planning-speed model. Defaults are in `app/config.py`; override in `.env` only if needed:
 
 ```ini
 PLANNING_REPAIR_ENABLED=true
@@ -109,13 +98,7 @@ PLANNING_REPAIR_BASE_URL=http://ai-gateway:8000/v1
 PLANNING_REPAIR_MODEL=qwen-local
 ```
 
-Only switch Orchestrator to:
-
-```text
-Agent Backend: OpenAI Responses API
-```
-
-if you want Orchestrator to bypass OpenClaw and call OpenAI directly.
+Only switch to `AGENT_BACKEND=openai_responses_api` if you want Orchestrator to bypass OpenClaw and call OpenAI directly.
 
 ### Stopping
 
@@ -125,10 +108,6 @@ if you want Orchestrator to bypass OpenClaw and call OpenAI directly.
 
 ### Knowledge Layer (optional)
 
-Orchestrator uses Qdrant + Ollama embeddings for knowledge retrieval at planning time.
-
-Set in `.env`:
-
 ```ini
 EMBEDDING_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
@@ -136,47 +115,19 @@ OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 QDRANT_URL=http://localhost:6333
 ```
 
-Pull the embedding model once:
-
 ```bash
 ollama pull nomic-embed-text
 ```
 
 If Ollama is not installed, set `EMBEDDING_PROVIDER=openai` and provide `OPENAI_API_KEY`.
 
-### Useful `.env` options
-
-```ini
-# Switch to OpenAI backend instead of OpenClaw
-AGENT_BACKEND=openai_responses_api
-OPENAI_API_KEY=sk-...
-
-# Enable Langfuse tracing
-LANGFUSE_ENABLED=true
-LANGFUSE_PUBLIC_KEY=...
-LANGFUSE_SECRET_KEY=...
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
-
-# Workspace review policy
-WORKSPACE_REVIEW_POLICY=hold_nontrivial   # auto_publish_all | hold_nontrivial | hold_all
-
-# Planning repair (uses a second Ollama/API call to fix bad plans)
-PLANNING_REPAIR_ENABLED=true
-PLANNING_REPAIR_BASE_URL=http://ai-gateway:8000/v1
-PLANNING_REPAIR_MODEL=qwen-local
-```
-
 ---
 
-## Windows (native Ollama, no OpenClaw)
+## Windows (Nvidia GPU + Ollama, no OpenClaw)
 
-Uses `docker-compose.windows.yml` for the backend stack: qdrant, redis,
-orchestrator API, and Celery worker. Ollama runs natively on Windows for GPU
-access.
+Uses `docker-compose.windows.yml` for the backend stack. Ollama runs natively on Windows for GPU access.
 
-The React dashboard is optional on Windows. Run it separately with Node/pnpm if
-you want the browser UI; otherwise use the FastAPI Swagger UI at
-`http://localhost:8080/docs`.
+> **Note:** This path is tested on NVIDIA GPU with CUDA. For AMD GPU, see the [Windows AMD GPU + llama.cpp](#windows-amd-gpu--llamacpp-no-openclaw) path below.
 
 Windows process layout:
 
@@ -184,15 +135,12 @@ Windows process layout:
 Windows host
 ├── Ollama native app              http://localhost:11434
 ├── Frontend dev server (optional) http://localhost:3000
-└── Docker Desktop
+└── Docker Desktop (WSL2 backend)
     ├── FastAPI backend            http://localhost:8080
     ├── Celery worker
     ├── Redis
     └── Qdrant
 ```
-
-The frontend talks to the backend at `http://localhost:8080/api/v1`. The
-backend talks to native Ollama through `http://host.docker.internal:11434`.
 
 ### Prerequisites
 
@@ -200,7 +148,7 @@ backend talks to native Ollama through `http://host.docker.internal:11434`.
 - [Ollama for Windows](https://ollama.com/download/windows) with NVIDIA GPU support
   - CUDA drivers ≥ 528 required
   - Verify GPU: `ollama run qwen3:8b-hybrid` should run on GPU, not CPU
-- Optional dashboard: Node.js 18+ and `pnpm`
+- Node.js 18+ and `pnpm` (optional, for dashboard)
 
 ### Hardware recommendations
 
@@ -210,36 +158,9 @@ backend talks to native Ollama through `http://host.docker.internal:11434`.
 | 8 GB | `qwen3:8b-hybrid` | 4096 or 8192 |
 | 12 GB+ | `qwen3:14b-q4_K_M` | 8192 |
 
-27B models require CPU offloading on < 16 GB VRAM — too slow for stable use.
-
-### Model choice
-
-Use Ollama library tags, not random Hugging Face files, for this setup. The
-known-good default is:
-
-```text
-qwen3:8b-hybrid
-```
-
-Why this one:
-
-- based on `qwen3:8b-q4_K_M`, small enough for a 6 GB laptop GPU when `OLLAMA_NUM_CTX=4096`
-- stronger for planning than smaller 1.7B/4B models
-- much less RAM/CPU offload pressure than 14B/30B/32B models
-
-If `qwen3:8b-hybrid` still OOMs, first confirm `OLLAMA_NUM_CTX=4096`. If it
-still fails, use `qwen3:4b-q4_K_M` as the fallback model and set both
-`AGENT_MODEL` and `OLLAMA_AGENT_MODEL` to that exact tag.
-
-Avoid `latest` tags and unrelated Hugging Face quantizations unless you are
-creating and testing your own Ollama Modelfile. This guide assumes the model
-name is an Ollama tag that `ollama pull` can install directly.
-
-> **Backend scope:** `direct_ollama` supports planning + structured-op orchestration (write\_file, mkdir, replace\_in\_file, etc). It does not execute arbitrary shell commands via native tools. Tasks that require only structured ops work normally; tasks that need raw shell execution will ask Ollama for a text plan but cannot run it natively — use `local_openclaw` for full shell execution.
-
 ### Steps
 
-**1. Clone the repo**
+**1. Clone the repo (in WSL2 Ubuntu)**
 
 ```bash
 git clone https://github.com/henrycode03/orchestrator.git
@@ -248,14 +169,12 @@ cd orchestrator
 
 **2. Expose Ollama to Docker containers**
 
-By default Ollama only listens on `127.0.0.1`. Containers cannot reach it without this:
-
 ```powershell
 # Run in PowerShell as Administrator
 [System.Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0", "Machine")
 ```
 
-Then restart Ollama (or reboot). Verify:
+Restart Ollama after setting this. Verify:
 
 ```powershell
 curl http://localhost:11434/api/tags
@@ -267,35 +186,24 @@ curl http://localhost:11434/api/tags
 ollama pull qwen3:8b-q4_K_M
 ollama create qwen3:8b-hybrid -f Modelfile
 ollama pull nomic-embed-text
-ollama list
-ollama run qwen3:8b-hybrid "Return only: OK"
 ```
 
-**3.5. Pre-create local bind-mount paths**
+**3.5. Pre-create bind-mount paths (in WSL2)**
 
-Docker Compose expects these host paths to exist before startup:
-
-```powershell
-New-Item -ItemType Directory -Force -Path checkpoints, logs, knowledge, data, projects
-New-Item -ItemType File -Force -Path orchestrator.db
+```bash
+mkdir -p data logs checkpoints knowledge projects
+touch orchestrator.db
 ```
 
 **4. Create `.env`**
 
-Create a `.env` file in the repo root:
-
 ```ini
-# Required
-SECRET_KEY=<generate: python -c "import secrets; print(secrets.token_hex(32))">
-
-# Database
+SECRET_KEY=<generate: python3 -c "import secrets; print(secrets.token_hex(32))">
 DATABASE_URL=sqlite:////app/orchestrator.db
 
-# Backend — direct Ollama, no OpenClaw
 AGENT_BACKEND=direct_ollama
 AGENT_MODEL=qwen3:8b-hybrid
 
-# Ollama (native on Windows host)
 OLLAMA_BASE_URL=http://host.docker.internal:11434
 OLLAMA_AGENT_MODEL=qwen3:8b-hybrid
 OLLAMA_NUM_CTX=4096
@@ -303,74 +211,31 @@ OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_DIM=0
 
-# Direct Ollama repair through the OpenAI-compatible endpoint
 PLANNING_REPAIR_ENABLED=true
 PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1
 PLANNING_REPAIR_MODEL=qwen3:8b-hybrid
 PLANNING_REPAIR_API_KEY=
 PLANNING_REPAIR_DISABLE_THINKING=true
 
-# Internal Docker network URLs — do not change
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/1
 QDRANT_URL=http://qdrant:6333
 
-# No OpenClaw / no external keys needed
 OPENCLAW_API_KEY=
 OPENAI_API_KEY=
-
-# Review policy
 WORKSPACE_REVIEW_POLICY=hold_nontrivial
+
+WINDOWS_PROJECTS_DIR=/home/yourname/projects
 ```
 
 **5. Build and start**
 
-First build takes a few minutes (installs Python deps inside the image).
+Setup "- RUNTIME_PROFILE=low_resource" in docker-compose.windows.yml
 
-```powershell
+```bash
+export WINDOWS_PROJECTS_DIR=/home/yourname/projects
 docker compose -f docker-compose.windows.yml up --build
 ```
-
-After registration, open Settings and set `workspace_root` to `/app/projects`.
-That value is the container path visible to the backend. The Windows host path
-is configured by `WINDOWS_PROJECTS_DIR`; do not enter `C:\...` paths in Settings.
-
-To use another Windows folder, set `WINDOWS_PROJECTS_DIR` in
-`.env` before starting Compose:
-
-```ini
-WINDOWS_PROJECTS_DIR=C:\Users\YourName\Documents\Projects
-```
-
-In the same Settings page, configure the model used by `direct_ollama`:
-
-1. Set **Agent Backend** to **Direct Ollama**.
-2. Set **Model Family** to the exact Ollama model name. For this test laptop,
-   use:
-
-   ```text
-   qwen3:8b-hybrid
-   ```
-
-3. Set **Adaptation Profile** to **Ollama Default**.
-4. Save the system settings.
-
-The **Model Family** value must match a model installed in Ollama. Check local
-models with:
-
-```powershell
-ollama list
-```
-
-If you install another model later, for example:
-
-```powershell
-ollama pull qwen3:8b
-ollama pull deepseek-coder-v2:16b
-```
-
-enter that exact `NAME` from `ollama list` in **Model Family**. The suggested
-model names in the UI are examples only; they are not forced.
 
 **6. Open the API**
 
@@ -379,108 +244,478 @@ model names in the UI are examples only; they are not forced.
 | API docs | http://localhost:8080/docs |
 | Health | http://localhost:8080/health |
 
-Run the Windows health check after the containers are up:
+**7. Optional: run the dashboard (in WSL2)**
 
-```powershell
-.\scripts\windows_health_check.ps1
-```
-
-Equivalent manual checks:
-
-```powershell
-docker compose -f docker-compose.windows.yml exec orchestrator node --version
-docker compose -f docker-compose.windows.yml exec celery_worker node --version
-docker compose -f docker-compose.windows.yml exec orchestrator curl http://host.docker.internal:11434/api/tags
-curl http://localhost:8080/health
-ollama list
-ollama ps
-```
-
-> **Note:** The Windows Docker setup runs the FastAPI API only; it does not
-> build or serve the React dashboard. Use the FastAPI Swagger UI at
-> `http://localhost:8080/docs` for API setup. If you want the dashboard on
-> Windows, run the frontend separately with Node/pnpm as shown below.
-
-**7. Optional: run the dashboard**
-
-#Install Node.js first
-https://nodejs.org download LTS version
-
-#Update npm
-npm install -g npm@latest
-
-#Install pnpm
-npm install -g pnpm
-
-#Or update pnpm
-pnpm self-update
-
-#check
-node --version
-npm --version
-pnpm --version
-
-In a second PowerShell window:
-
-```powershell
+```bash
 cd frontend
 pnpm install
-$env:VITE_API_URL = "http://localhost:8080/api/v1"
-pnpm dev
+VITE_API_URL=http://localhost:8080/api/v1 pnpm dev
 ```
 
-Open the dashboard at the URL printed by Vite, usually:
-
-```text
-http://localhost:3000
-```
-
-Leave `docker compose -f docker-compose.windows.yml up --build` running in the
-first terminal; the frontend talks to the Docker backend on port `8080`.
+Open `http://localhost:3000` in your browser.
 
 **8. Register a user**
 
-With the dashboard: open the register page in the Vite UI.
+Open the dashboard register page, or via API:
 
-Without the dashboard: use the API directly:
-
-```powershell
-# Register
-curl -X POST http://localhost:8080/api/v1/auth/register `
-  -H "Content-Type: application/json" `
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
   -d '{"email":"you@example.com","password":"yourpassword","full_name":"Your Name"}'
-
-# Or by PowerShell Invoke-WebRequest
-Invoke-WebRequest -Uri "http://localhost:8080/api/v1/auth/register" `
-  -Method POST `
-  -Headers @{"Content-Type"="application/json"} `
-  -Body '{"email":"youremail","password":"yourpassword","full_name":"Your Name"}'
-
-# Get a token
-curl -X POST http://localhost:8080/api/v1/auth/tokens `
-  -H "Content-Type: application/json" `
-  -d '{"email":"you@example.com","password":"yourpassword"}'
 ```
 
-Or open `http://localhost:8080/docs` and use the Swagger UI to register and authenticate interactively.
+**9. Configure workspace**
+
+In Settings, set `workspace_root` to `/app/projects` (the container path, not the host path).
 
 ### Stopping
 
-```powershell
+```bash
 docker compose -f docker-compose.windows.yml down
 ```
 
 Add `-v` to also remove the Qdrant data volume.
 
-### Troubleshooting (Windows)
+### Troubleshooting (Windows Ollama)
 
 | Symptom | Fix |
 |---|---|
-| `Ollama not reachable` in health check | Check `OLLAMA_HOST=0.0.0.0` is set and Ollama restarted |
-| Model runs on CPU, not GPU | Verify CUDA drivers ≥ 528; check `ollama ps` shows GPU |
-| OOM during generation | Lower `OLLAMA_NUM_CTX=4096` in `.env`, then `docker compose ... up` |
-| Container can't reach `host.docker.internal` | Docker Desktop for Windows exposes this automatically; on WSL2-only setups add `extra_hosts: host-gateway` (already in `docker-compose.windows.yml`) |
-| Qdrant data lost after restart | Data persisted via `qdrant_data` named volume by default |
+| Ollama not reachable from containers | Confirm `OLLAMA_HOST=0.0.0.0` is set; restart Ollama |
+| Model runs on CPU | Verify CUDA drivers ≥ 528; check `ollama ps` |
+| OOM during generation | Lower `OLLAMA_NUM_CTX=4096` in `.env` |
+| `host.docker.internal` not resolving | Already in `docker-compose.windows.yml` via `extra_hosts`; verify Docker Desktop WSL2 integration is enabled |
+
+---
+
+## Windows (AMD GPU + llama.cpp, no OpenClaw)
+
+Uses `docker-compose.windows.yml` for the backend stack. llama.cpp runs natively on Windows with the Vulkan backend for AMD GPU access. Ollama runs only for embeddings.
+
+> **This path does not use Ollama for LLM inference.** llama.cpp exposes an OpenAI-compatible endpoint that the orchestrator treats as its agent backend.
+
+Windows process layout:
+
+```text
+Windows host
+├── llama-server.exe (Vulkan)      http://localhost:8001/v1
+├── Ollama native app (embed only) http://localhost:11434
+├── Frontend dev server (optional) http://localhost:3000
+└── Docker Desktop (WSL2 backend)
+    ├── FastAPI backend            http://localhost:8080
+    ├── Celery worker
+    ├── Redis
+    └── Qdrant
+```
+
+### Hardware requirements
+
+| Component | Minimum | Tested |
+|---|---|---|
+| GPU | Any AMD RDNA2+ with Vulkan | RX 7800 XT 16 GB |
+| RAM | 16 GB | 48 GB |
+| OS | Windows 10/11 | Windows 11 |
+
+### Known unsupported configurations
+
+- Do not mount workspace from Windows NTFS into Docker (use WSL2 ext4)
+- Do not set context > 8192 during stability testing
+- Do not run the frontend dev server during stability testing
+- Do not update AMD drivers between test stages
+- Do not mix ROCm and Vulkan builds of llama.cpp
+- Do not run Discord overlay, Steam overlay, MSI Afterburner OSD, or OBS during Vulkan inference
+
+---
+
+### Pre-deployment: Windows host configuration
+
+**1. Pin AMD driver version**
+
+Do not use "latest". Verify the current known-good Adrenalin version against recent RX 7000 series + Vulkan reports on r/LocalLLaMA before installing. Do not update drivers between test stages.
+
+**2. Disable sleep(Options) and GPU suspend**
+
+```powershell
+# Run as Administrator
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+```
+
+In AMD Adrenalin software, also disable GPU power-saving features and Anti-Lag.
+
+**3. Disable overlay software**
+
+Disable the following before any stability testing:
+- Discord in-game overlay
+- Steam overlay
+- MSI Afterburner / RivaTuner OSD
+- AMD Radeon overlay
+- OBS GPU capture hooks
+
+---
+
+### Step 1 — Get llama.cpp (pre-built Vulkan binary)
+
+> Do not compile llama.cpp yourself. Use the pre-built binary to eliminate build toolchain variables.
+
+Download from: **https://github.com/ggml-org/llama.cpp/releases**
+
+Asset name:
+```
+llama-<version>-bin-win-vulkan-x64.zip
+```
+
+Extract to a stable location, e.g. `D:\llama.cpp\`. Do not rename the inner versioned folder.
+
+Verify GPU is detected:
+
+```powershell
+D:\llama.cpp\<version-folder>\llama-server.exe --list-devices
+```
+
+Expected output lists your AMD GPU as a Vulkan device. Do not proceed until this passes.
+
+---
+
+### Step 2 — Download a model
+
+> Start with a smaller model for stability validation before moving to larger ones.
+
+Recommended progression:
+
+| Phase | Model | VRAM | Context |
+|---|---|---|---|
+| 1 (stability) | Qwen3 4B Q4_K_M | ~3 GB | 4096 |
+| 2 (validated) | Qwen2.5-Coder 14B Q5_K_M | ~10 GB | 8192 |
+
+Download GGUF files from HuggingFace and place in a stable folder, e.g. `D:\models\`.
+
+---
+
+### Step 3 — Start llama-server
+
+```powershell
+D:\llama.cpp\<version-folder>\llama-server.exe `
+  -m "D:\models\qwen3-4b-q4_k_m.gguf" `
+  --host 0.0.0.0 `
+  --port 8001 `
+  -ngl 99 `
+  -c 4096 `
+  --jinja
+```
+
+| Flag | Purpose |
+|---|---|
+| `-ngl 99` | Offload all layers to GPU |
+| `-c 4096` | Context window — expand only after stability confirmed |
+| `--host 0.0.0.0` | Required for WSL2 container access |
+| `--jinja` | Chat template rendering for instruction-tuned models |
+
+Verify:
+
+```powershell
+curl http://localhost:8001/v1/models
+```
+
+---
+
+### Step 4 — Run independent llama-server soak test
+
+> Run this before setting up Docker. If llama-server itself is unstable, all subsequent orchestrator debug sessions produce false signals.
+
+```powershell
+while ($true) {
+  try {
+    $body = '{"model":"local","messages":[{"role":"user","content":"Explain what a distributed system is in 3 sentences."}],"max_tokens":150}'
+    $result = Invoke-RestMethod -Uri "http://localhost:8001/v1/chat/completions" -Method POST -ContentType "application/json" -Body $body
+    Write-Host "$(Get-Date -Format 'HH:mm:ss') - OK - $($result.choices[0].message.content.Substring(0, [Math]::Min(60, $result.choices[0].message.content.Length)))..."
+  } catch {
+    Write-Host "$(Get-Date -Format 'HH:mm:ss') - ERROR: $_"
+  }
+  Start-Sleep -Seconds 10
+}
+```
+
+Run for 30–60 minutes. Pass condition: no crashes, no VRAM growth, every request returns a valid completion.
+
+---
+
+### Step 5 — Set up Ollama for embeddings only
+
+Ollama is used only for `nomic-embed-text` embeddings, not for LLM inference.
+
+```powershell
+ollama pull nomic-embed-text
+```
+
+Expose Ollama to Docker containers:
+
+```powershell
+# Run as Administrator
+[System.Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0", "Machine")
+```
+
+Restart Ollama (Quit from system tray, reopen). Verify:
+
+```powershell
+curl http://localhost:11434/api/tags
+```
+
+Find the Windows host IP reachable from WSL2:
+
+```bash
+# In WSL2
+ip route | grep default
+# Use the gateway IP shown, e.g. 172.x.x.1
+```
+
+Verify from WSL2:
+
+```bash
+curl http://<windows-host-ip>:11434/api/tags
+```
+
+---
+
+### Step 6 — Set up WSL2 + Docker Desktop
+
+**Enable Docker Desktop WSL2 integration:**
+
+```
+Docker Desktop → Settings → Resources → WSL Integration
+→ Enable integration with Ubuntu
+→ Apply & Restart
+```
+
+**Create workspace inside WSL2 ext4 (not Windows NTFS):**
+
+```bash
+# In WSL2
+git clone https://github.com/henrycode03/orchestrator.git ~/orchestrator
+cd ~/orchestrator
+mkdir -p data logs checkpoints knowledge ~/projects
+touch orchestrator.db
+```
+
+> Keep all working files inside WSL2's ext4 filesystem. Do not bind-mount from Windows paths. The NTFS↔WSL boundary causes file watcher failures, chmod issues, and git corruption in long sessions.
+
+Fix line-ending detection (prevents false git diffs on shell scripts):
+
+```bash
+git config core.autocrlf false
+git config core.filemode false
+git rm --cached -r .
+git reset --hard HEAD
+```
+
+---
+
+### Step 7 — Create `.env`
+
+```bash
+cd ~/orchestrator
+cp .env.example .env
+python3 -c "import secrets; print(secrets.token_hex(32))"  # use output as SECRET_KEY
+nano .env
+```
+
+Replace contents with:
+
+```ini
+PROJECT_NAME=AI Dev Agent Orchestrator
+VERSION=0.1.0
+HOST=0.0.0.0
+PORT=8080
+
+SECRET_KEY=<your-generated-key>
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+AUTH_RATE_LIMIT_WINDOW_SECONDS=60
+AUTH_RATE_LIMIT_MAX_ATTEMPTS=5
+
+DATABASE_URL=sqlite:////app/orchestrator.db
+
+# Agent backend — llama.cpp as OpenAI-compatible endpoint
+AGENT_BACKEND=openai_responses_api
+AGENT_MODEL=local
+OPENAI_API_KEY=dummy
+OPENAI_BASE_URL=http://host.docker.internal:8001/v1
+
+# Planning repair — same llama.cpp endpoint
+PLANNING_REPAIR_ENABLED=True
+PLANNING_REPAIR_BASE_URL=http://host.docker.internal:8001/v1
+PLANNING_REPAIR_MODEL=local
+PLANNING_REPAIR_API_KEY=dummy
+PLANNING_REPAIR_DISABLE_THINKING=True
+PLANNING_REPAIR_TIMEOUT_SECONDS=90
+PLANNING_SYNTHESIS_TIMEOUT_SECONDS=180
+REPLAN_SYNTHESIS_TIMEOUT_SECONDS=45
+
+# Internal Docker network
+CELERY_BROKER_URL=redis://redis:6379/0
+CELERY_RESULT_BACKEND=redis://redis:6379/1
+QDRANT_URL=http://qdrant:6333
+
+# Embeddings via Ollama (use actual Windows host IP from Step 5)
+EMBEDDING_PROVIDER=ollama
+OLLAMA_BASE_URL=http://<windows-host-ip>:11434
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+EMBEDDING_DIM=0
+
+# Runtime
+RUNTIME_PROFILE=low_resource
+WORKSPACE_REVIEW_POLICY=hold_nontrivial
+DEMO_MODE=False
+JUDGE_AGENT_ENABLED=False
+INLINE_PLANNING=False
+
+# Projects path (WSL2 ext4 path, not Windows path)
+WINDOWS_PROJECTS_DIR=/home/yourname/projects
+
+# Not used in this setup
+OPENCLAW_GATEWAY_URL=
+OPENCLAW_API_KEY=
+LANGFUSE_ENABLED=False
+MOBILE_GATEWAY_API_KEY=change-me-shared-secret
+MOBILE_BASE_URL=http://127.0.0.1:8080/api/v1
+ADMIN_EMAILS=
+GITHUB_TOKEN=
+GITHUB_USERNAME=
+GITHUB_WEBHOOK_SECRET=
+VITE_API_URL=/api/v1
+VITE_API_WS_HOST=
+LOCALHOST=127.0.0.1
+```
+
+---
+
+### Step 8 — Build and start (backend only)
+
+> Do not run the frontend during stability testing.
+
+```bash
+cd ~/orchestrator
+export WINDOWS_PROJECTS_DIR=/home/yourname/projects
+docker compose -f docker-compose.windows.yml up --build
+```
+
+First build takes several minutes. Verify all containers are up:
+
+```bash
+docker compose -f docker-compose.windows.yml ps
+curl http://localhost:8080/health
+```
+
+Expected health response:
+```json
+{"status":"healthy","checks":{"api":"ok","database":"ok","redis":"ok"}}
+```
+
+---
+
+### Step 9 — Register a user
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"yourpassword","full_name":"Your Name"}'
+```
+
+Or use the Swagger UI at `http://localhost:8080/docs`.
+
+---
+
+### Step 10 — Optional: run the dashboard
+
+```bash
+cd ~/orchestrator/frontend
+pnpm install
+VITE_API_URL=http://localhost:8080/api/v1 pnpm dev
+```
+
+Open `http://localhost:3000` in your browser.
+
+---
+
+### Step 11 — Configure workspace in Settings
+
+In the dashboard Settings, set `workspace_root` to:
+
+```
+/app/projects
+```
+
+This is the container-internal path. The host path (`~/projects`) is mapped via `WINDOWS_PROJECTS_DIR` in `.env`.
+
+---
+
+### API compatibility testing phases
+
+`llama-server` is not a complete OpenAI API implementation. Test in phases:
+
+| Phase | What to test | Pass condition |
+|---|---|---|
+| A | `POST /v1/chat/completions` — plain text | Valid JSON, correct structure |
+| B | Structured JSON output | Model returns parseable JSON |
+| C | Tool calling / function schemas | Schema accepted, response matches format |
+| D | Full agent orchestration | Multi-step session completes without dropped context |
+
+Do not move to the next phase until the current one passes.
+
+---
+
+### Stability testing progression
+
+| Stage | Duration | Pass conditions |
+|---|---|---|
+| 1 | 30 min | No VRAM growth, no container restart, no dropped completions |
+| 2 | 2 hours | Memory plateau held, no session corruption, `docker stats` flat |
+| 3 | Recovery test | Kill and restart llama-server mid-session; orchestrator recovers without workspace corruption |
+| 4 | Overnight | Checkpoint files valid, workspace consistent, no memory growth trend |
+
+---
+
+### What to monitor
+
+Focus on memory growth, not GPU utilization percentage.
+
+```powershell
+# Windows: Task Manager > GPU > GPU Memory (Dedicated) and (Shared)
+# Growing Shared GPU memory = VRAM fragmentation
+```
+
+```bash
+# WSL2
+watch -n 5 free -h
+docker stats
+```
+
+---
+
+### Stopping
+
+```bash
+docker compose -f docker-compose.windows.yml down
+```
+
+Add `-v` to also remove the Qdrant data volume.
+
+Kill llama-server: `Ctrl+C` in the PowerShell window running it.
+
+---
+
+### Troubleshooting (AMD + llama.cpp)
+
+| Symptom | Fix |
+|---|---|
+| `--list-devices` shows CPU only | Vulkan runtime missing or driver mismatch; update AMD driver |
+| Crash after driver update | Driver regression; roll back to pinned version |
+| Container can't reach port 8001 | Confirm `--host 0.0.0.0` in llama-server command |
+| `host.docker.internal` not resolving | Already in `docker-compose.windows.yml`; verify Docker Desktop WSL2 integration is enabled |
+| OOM / instability after 30–60 min | VRAM fragmentation; drop `-c` to `2048`, restart server |
+| Git permission errors in container | Workspace on Windows NTFS; move all files to `~/` inside WSL2 |
+| Structured JSON malformed | Verify `--jinja` flag is set; check model tokenizer config |
+| Overnight test fails silently | Sleep/suspend triggered; confirm `powercfg` settings |
+| Inference unstable | Overlay software conflict; disable all overlays before testing |
+| `WINDOWS_PROJECTS_DIR` error on compose up | Run `export WINDOWS_PROJECTS_DIR=...` before `docker compose` command |
 
 ---
 
@@ -489,18 +724,22 @@ Add `-v` to also remove the Qdrant data volume.
 | Variable | Default | Description |
 |---|---|---|
 | `SECRET_KEY` | — | Required. JWT signing key. |
-| `AGENT_BACKEND` | `local_openclaw` | Runtime backend. |
+| `AGENT_BACKEND` | `local_openclaw` | Runtime backend: `local_openclaw`, `direct_ollama`, or `openai_responses_api`. |
+| `OPENAI_BASE_URL` | — | Required for `openai_responses_api`. Point to llama.cpp or any OpenAI-compatible endpoint. |
+| `OPENAI_API_KEY` | — | Required for `openai_responses_api`. Set to `dummy` for local endpoints. |
 | `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:8000` | OpenClaw gateway (Linux only). |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama API base URL. |
-| `OLLAMA_AGENT_MODEL` | `qwen3:8b-hybrid` | Model used for planning/execution. |
+| `OLLAMA_AGENT_MODEL` | `qwen3:8b-hybrid` | Model used for planning/execution (direct_ollama only). |
 | `OLLAMA_NUM_CTX` | `4096` | Context window tokens sent to Ollama. |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model for knowledge retrieval. |
 | `EMBEDDING_PROVIDER` | `auto` | `auto` / `ollama` / `openai`. |
 | `EMBEDDING_DIM` | `0` | `0` = auto (768 for Ollama, 1536 for OpenAI). |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector store URL. |
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for Celery. |
-| `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | Change-set governance: `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
-| `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. For Windows direct Ollama, pair it with `PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1`. |
+| `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
+| `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. |
+| `PLANNING_REPAIR_BASE_URL` | — | Endpoint for planning repair model. |
+| `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
-| `OPENAI_API_KEY` | — | Required only for `openai_responses_api` backend. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |
+| `WINDOWS_PROJECTS_DIR` | — | Host path mounted to `/app/projects` in containers. Use WSL2 ext4 path, not Windows path. |

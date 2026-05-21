@@ -207,8 +207,9 @@ class Settings(BaseSettings):
     # and hardware can support a larger context.
     OLLAMA_NUM_CTX: int = 4096
 
-    # Execution profile: "standard" or "low_resource".
+    # Execution profile: "standard", "medium", or "low_resource".
     # Set low_resource for Windows / 16GB RAM / RTX 4050 / Qwen3:8B deployments.
+    # Set medium for mid-tier machines (e.g. 24GB RAM, 6-core CPU, AMD Ryzen 5xxx).
     RUNTIME_PROFILE: str = "standard"
     MAX_PLAN_STEPS: int = 10
 
@@ -216,25 +217,38 @@ class Settings(BaseSettings):
     @classmethod
     def validate_runtime_profile(cls, value: str) -> str:
         profile = str(value or "standard").strip()
-        if profile not in {"standard", "low_resource"}:
-            raise ValueError("RUNTIME_PROFILE must be 'standard' or 'low_resource'")
+        if profile not in {"standard", "medium", "low_resource"}:
+            raise ValueError(
+                "RUNTIME_PROFILE must be 'standard', 'medium', or 'low_resource'"
+            )
         return profile
 
     @model_validator(mode="after")
-    def apply_low_resource_profile(self) -> "Settings":
-        if self.RUNTIME_PROFILE != "low_resource":
-            return self
-        if self.PLANNING_REPAIR_TIMEOUT_SECONDS > 45:
-            self.PLANNING_REPAIR_TIMEOUT_SECONDS = 45
-        if self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS > 90:
-            self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 90
-        if self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS > 30:
-            self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 30
-        if self.KNOWLEDGE_MAX_ITEMS > 1:
-            self.KNOWLEDGE_MAX_ITEMS = 1
-        if self.KNOWLEDGE_MAX_TOTAL_CHARS > 800:
-            self.KNOWLEDGE_MAX_TOTAL_CHARS = 800
-        self.MAX_PLAN_STEPS = 3
+    def apply_runtime_profile(self) -> "Settings":
+        if self.RUNTIME_PROFILE == "low_resource":
+            if self.PLANNING_REPAIR_TIMEOUT_SECONDS > 45:
+                self.PLANNING_REPAIR_TIMEOUT_SECONDS = 45
+            if self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS > 90:
+                self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 90
+            if self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS > 30:
+                self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 30
+            if self.KNOWLEDGE_MAX_ITEMS > 1:
+                self.KNOWLEDGE_MAX_ITEMS = 1
+            if self.KNOWLEDGE_MAX_TOTAL_CHARS > 800:
+                self.KNOWLEDGE_MAX_TOTAL_CHARS = 800
+            self.MAX_PLAN_STEPS = 3
+        elif self.RUNTIME_PROFILE == "medium":
+            if self.PLANNING_REPAIR_TIMEOUT_SECONDS > 60:
+                self.PLANNING_REPAIR_TIMEOUT_SECONDS = 60
+            if self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS > 120:
+                self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 120
+            if self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS > 38:
+                self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 38
+            if self.KNOWLEDGE_MAX_ITEMS > 2:
+                self.KNOWLEDGE_MAX_ITEMS = 2
+            if self.KNOWLEDGE_MAX_TOTAL_CHARS > 1400:
+                self.KNOWLEDGE_MAX_TOTAL_CHARS = 1400
+            self.MAX_PLAN_STEPS = 6
         return self
 
 
