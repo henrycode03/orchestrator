@@ -977,9 +977,10 @@ class PlannerService:
     def _exact_line_from_task_prompt(task_prompt: str) -> Optional[str]:
         prompt = str(task_prompt or "")
         patterns = (
-            r"exactly\s+this\s+single\s+line:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|$)",
-            r"exactly\s+this\s+line:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|$)",
-            r"stdout(?:\.strip\(\))?\s+equals\s+([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|$)",
+            r"exactly\s+this\s+line\s+and\s+no\s+trailing\s+punctuation:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|\.$|$)",
+            r"exactly\s+this\s+single\s+line:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|\.$|$)",
+            r"exactly\s+this\s+line:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|\.$|$)",
+            r"stdout(?:\.strip\(\))?\s+equals\s+([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|\.$|$)",
         )
         for pattern in patterns:
             match = re.search(pattern, prompt, re.IGNORECASE)
@@ -1015,6 +1016,23 @@ class PlannerService:
             return command
         return command.replace(f"{exact_line}.", exact_line)
 
+    @classmethod
+    def _normalize_exact_script_output_verification(
+        cls, command: Optional[str], task_prompt: str
+    ) -> Optional[str]:
+        exact_line = cls._exact_line_from_task_prompt(task_prompt)
+        text = str(command or "").strip()
+        if not exact_line or not text or "scripts/smoke_status.py" not in text:
+            return command
+        script = (
+            "import subprocess,sys; "
+            "result=subprocess.run("
+            "[sys.executable, 'scripts/smoke_status.py'], "
+            "capture_output=True, text=True); "
+            f"sys.exit(0 if result.stdout.strip() == {json.dumps(exact_line)} else 1)"
+        )
+        return "python -c " + json.dumps(script)
+
     @staticmethod
     def _normalize_python_subprocess_verification(
         command: Optional[str],
@@ -1045,21 +1063,16 @@ class PlannerService:
         )
         return "python -c " + json.dumps(script)
 
-    @staticmethod
+    @classmethod
     def _directory_creation_preconditions(
+        cls,
         plan: Optional[List[Dict[str, Any]]],
     ) -> set[str]:
         materialized_files: set[str] = set()
         for step in plan or []:
             if not isinstance(step, dict):
                 continue
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                if str(operation.get("op") or "") in {"write_file", "append_file"}:
-                    path = str(operation.get("path") or "").strip().lstrip("./")
-                    if path and "/" in path:
-                        materialized_files.add(path)
+            materialized_files.update(cls._file_write_paths_from_step(step))
             for raw_path in step.get("expected_files", []) or []:
                 path = str(raw_path or "").strip().lstrip("./")
                 if Path(path).suffix and "/" in path:
@@ -1072,6 +1085,53 @@ class PlannerService:
                 dirs.add(parent)
         return dirs
 
+    @staticmethod
+    def _file_write_paths_from_step(step: Dict[str, Any]) -> set[str]:
+        paths: set[str] = set()
+        for operation in step.get("ops", []) or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "") in {"write_file", "append_file"}:
+                path = str(operation.get("path") or "").strip().lstrip("./")
+                if path:
+                    paths.add(path)
+        top_level_op = str(
+            step.get("op") or step.get("step") or step.get("type") or ""
+        ).strip()
+        if top_level_op in {"create_file", "write_file", "write", "append_file"}:
+            path = str(step.get("path") or step.get("file") or "").strip().lstrip("./")
+            if path:
+                paths.add(path)
+        return paths
+
+    @classmethod
+    def _future_file_write_paths_by_step(
+        cls, plan: Optional[List[Dict[str, Any]]]
+    ) -> Dict[int, set[str]]:
+        future_by_step: Dict[int, set[str]] = {}
+        future: set[str] = set()
+        steps = list(plan or [])
+        for index in range(len(steps), 0, -1):
+            future_by_step[index] = set(future)
+            step = steps[index - 1]
+            if isinstance(step, dict):
+                future.update(cls._file_write_paths_from_step(step))
+        return future_by_step
+
+    @staticmethod
+    def _looks_like_read_only_inspection(description: str, commands: List[str]) -> bool:
+        text = str(description or "").lower()
+        command_text = " && ".join(commands).lower()
+        if not any(
+            marker in text
+            for marker in ("inspect", "review", "check current", "current workspace")
+        ):
+            return False
+        return bool(command_text) and all(
+            re.match(r"^\s*(ls|pwd|find\s+\.\s+-maxdepth|rg\s+)", token)
+            for token in commands
+        )
+
     @classmethod
     def sanitize_common_plan_issues(
         cls, plan: Optional[List[Dict[str, Any]]], task_prompt: str = ""
@@ -1079,6 +1139,7 @@ class PlannerService:
         sanitized_plan: List[Dict[str, Any]] = []
         total_steps = len(plan or [])
         directory_creation_preconditions = cls._directory_creation_preconditions(plan)
+        future_file_writes = cls._future_file_write_paths_by_step(plan)
 
         for index, raw_step in enumerate(plan or [], start=1):
             step = dict(raw_step or {})
@@ -1175,6 +1236,23 @@ class PlannerService:
             verification = cls._normalize_exact_line_verification(
                 verification, task_prompt
             )
+            verification = cls._normalize_exact_script_output_verification(
+                verification, task_prompt
+            )
+            description_for_intent = str(step.get("description") or "").strip()
+            if (
+                not raw_ops
+                and expected_files
+                and set(expected_files).issubset(future_file_writes.get(index, set()))
+                and cls._looks_like_read_only_inspection(
+                    description_for_intent, commands
+                )
+            ):
+                expected_files = []
+                verification = "python -c " + json.dumps(
+                    "import pathlib,sys; "
+                    "sys.exit(0 if pathlib.Path('.').exists() else 1)"
+                )
             if (
                 not commands
                 and verification

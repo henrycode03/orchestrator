@@ -27,6 +27,23 @@ info()  { echo -e "    ${GRAY}$1${NC}"; }
 # All values below can be overridden by environment variables before running:
 #   LLAMA_EXE_WIN=/mnt/d/AI/llama.cpp/llama-server.exe ./wsl-start.sh
 #   LLAMA_MODEL_PATH="D:\\AI\\models\\qwen-7b.gguf" LLAMA_CTX=4096 ./wsl-start.sh
+ORCHESTRATOR_DIR="${ORCHESTRATOR_DIR:-"$HOME/orchestrator"}"
+env_file_value() {
+    local key="$1"
+    local default_value="${2:-}"
+    local env_file="$ORCHESTRATOR_DIR/.env"
+    local value=""
+
+    if [ -f "$env_file" ]; then
+        value="$(grep -m1 "^${key}=" "$env_file" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true)"
+    fi
+    if [ -n "$value" ]; then
+        printf '%s' "$value"
+    else
+        printf '%s' "$default_value"
+    fi
+}
+
 LLAMA_EXE="${LLAMA_EXE:-"E:\\AI\\llama.cpp\\llama-server.exe"}"
 LLAMA_EXE_WIN="${LLAMA_EXE_WIN:-"/mnt/e/AI/llama.cpp/llama-server.exe"}"
 # Windows-style path passed to llama-server.exe (override with LLAMA_MODEL_PATH)
@@ -34,7 +51,7 @@ MODEL_PATH="${LLAMA_MODEL_PATH:-"E:\\AI\\models\\Qwen\\Qwen2.5-Coder-14B-Instruc
 LLAMA_PORT="${LLAMA_PORT:-8001}"
 # Context window. Default 6144 suits 14B on 16GB+ VRAM.
 # For 8GB VRAM, set LLAMA_CTX=4096 before running.
-LLAMA_CTX="${LLAMA_CTX:-6144}"
+LLAMA_CTX="${LLAMA_CTX:-$(env_file_value LLAMA_CTX 6144)}"
 # Batch: 1024 avoids GPU stall long enough to freeze display during prompt processing
 LLAMA_BATCH="${LLAMA_BATCH:-1024}"
 LLAMA_UBATCH="${LLAMA_UBATCH:-512}"
@@ -42,9 +59,8 @@ LLAMA_UBATCH="${LLAMA_UBATCH:-512}"
 LLAMA_THREADS="${LLAMA_THREADS:-4}"
 LLAMA_THREADS_BATCH="${LLAMA_THREADS_BATCH:-8}"
 OLLAMA_PORT=11434
-ORCHESTRATOR_DIR="${ORCHESTRATOR_DIR:-"$HOME/orchestrator"}"
-EXPECTED_RUNTIME_PROFILE="${EXPECTED_RUNTIME_PROFILE:-low_resource}"
-EXPECTED_OLLAMA_ABSENT="${EXPECTED_OLLAMA_ABSENT:-true}"
+EXPECTED_RUNTIME_PROFILE="${EXPECTED_RUNTIME_PROFILE:-$(env_file_value RUNTIME_PROFILE low_resource)}"
+EXPECTED_OLLAMA_ABSENT="${EXPECTED_OLLAMA_ABSENT:-$(env_file_value EXPECTED_OLLAMA_ABSENT true)}"
 COMPOSE_FILE="docker-compose.windows.yml"
 BACKEND_PORT=8080
 FRONTEND_PORT=3000
@@ -368,7 +384,7 @@ step "Starting Docker backend"
 
 [ -f "$ORCHESTRATOR_DIR/.env" ] || fail ".env not found at $ORCHESTRATOR_DIR/.env"
 
-PROJECTS_DIR=$(grep "^WINDOWS_PROJECTS_DIR=" "$ORCHESTRATOR_DIR/.env" | cut -d= -f2)
+PROJECTS_DIR=$(env_file_value WINDOWS_PROJECTS_DIR)
 PROJECTS_DIR=${PROJECTS_DIR:-"$HOME/projects"}
 mkdir -p "$PROJECTS_DIR"
 
