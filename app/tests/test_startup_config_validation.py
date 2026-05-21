@@ -114,6 +114,41 @@ def test_settings_rejects_unknown_workspace_review_policy():
         )
 
 
+def test_settings_applies_medium_runtime_profile_caps():
+    from app.config import Settings
+
+    settings = Settings(_env_file=None, RUNTIME_PROFILE="medium")
+
+    assert settings.PLANNING_REPAIR_TIMEOUT_SECONDS == 60
+    assert settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS == 120
+    assert settings.REPLAN_SYNTHESIS_TIMEOUT_SECONDS == 38
+    assert settings.KNOWLEDGE_MAX_ITEMS == 2
+    assert settings.KNOWLEDGE_MAX_TOTAL_CHARS == 1400
+    assert settings.MAX_PLAN_STEPS == 6
+
+
+def test_settings_applies_low_resource_runtime_profile_caps():
+    from app.config import Settings
+
+    settings = Settings(_env_file=None, RUNTIME_PROFILE="low_resource")
+
+    assert settings.PLANNING_REPAIR_TIMEOUT_SECONDS == 45
+    assert settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS == 90
+    assert settings.REPLAN_SYNTHESIS_TIMEOUT_SECONDS == 30
+    assert settings.KNOWLEDGE_MAX_ITEMS == 1
+    assert settings.KNOWLEDGE_MAX_TOTAL_CHARS == 800
+    assert settings.MAX_PLAN_STEPS == 3
+
+
+def test_settings_rejects_unknown_runtime_profile():
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError, match="RUNTIME_PROFILE"):
+        Settings(_env_file=None, RUNTIME_PROFILE="oversized")
+
+
 def test_settings_allows_import_without_secret_key():
     from app.config import Settings
 

@@ -59,6 +59,7 @@ class OpenAIResponsesRuntime:
         *,
         diagnostic_label: Optional[str] = None,
         diagnostic_metadata: Optional[dict[str, Any]] = None,
+        **kwargs,
     ) -> dict[str, Any]:
         del diagnostic_label
         del diagnostic_metadata
