@@ -418,6 +418,44 @@ class TestReadOnlyInspectionVerification:
         assert assessment.step_status == "success"
         assert assessment.error_message == ""
 
+    def test_sanitizer_does_not_require_future_file_during_inspection(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Inspect the current workspace",
+                "commands": ["ls"],
+                "verification": (
+                    'python -c "import os,sys; '
+                    "sys.exit(0 if os.path.exists('README.md') else 1)\""
+                ),
+                "rollback": None,
+                "expected_files": ["README.md"],
+            },
+            {
+                "step_number": 2,
+                "description": "Create README.md",
+                "commands": [],
+                "verification": None,
+                "rollback": "rm -f README.md",
+                "expected_files": ["README.md"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "README.md",
+                        "content": "Phase 10G AMD LlamaCpp: Ready\n",
+                    }
+                ],
+            },
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+        assert sanitized[0]["expected_files"] == []
+        assert "README.md" not in sanitized[0]["verification"]
+        assert "pathlib.Path('.').exists()" in sanitized[0]["verification"]
+
 
 # ---------------------------------------------------------------------------
 # Fix 8: simple unittest file creation must materialize requested test file
@@ -709,6 +747,84 @@ class TestUnittestPlanMaterialization:
         assert "Phase 10G Third Machine: Ready." not in verification
         assert "Phase 10G Third Machine: Ready" in content
         assert "Phase 10G Third Machine: Ready" in verification
+
+    def test_sanitizer_rewrites_malformed_smoke_status_grep_verification(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        task_prompt = (
+            "Create scripts/smoke_status.py that prints exactly this line and no "
+            'trailing punctuation: "Phase 10G AMD LlamaCpp: Ready".'
+        )
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Create and implement scripts/smoke_status.py",
+                "commands": [],
+                "verification": (
+                    "python -c 'import subprocess,sys; "
+                    'sys.exit(subprocess.call("python scripts/smoke_status.py | '
+                    'grep -q "Phase 10G AMD LlamaCpp: Ready"", shell=True))\''
+                ),
+                "rollback": "rm -f scripts/smoke_status.py",
+                "expected_files": ["scripts/smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "scripts/smoke_status.py",
+                        "content": "print('Phase 10G AMD LlamaCpp: Ready')",
+                    }
+                ],
+            }
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(
+            plan, task_prompt=task_prompt
+        )
+
+        verification = sanitized[0]["verification"]
+        assert "grep -q" not in verification
+        assert "shell=True" not in verification
+        assert "sys.executable" in verification
+        assert "Phase 10G AMD LlamaCpp: Ready" in verification
+
+    def test_sanitizer_rewrites_malformed_smoke_status_pathlib_verification(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        task_prompt = (
+            "Create scripts/smoke_status.py that prints exactly this line and no "
+            'trailing punctuation: "Phase 10G AMD LlamaCpp: Ready".'
+        )
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Create the smoke_status.py script",
+                "commands": [],
+                "verification": (
+                    'python -c "import pathlib,sys; sys.exit(0 if '
+                    "'print('Phase 10G AMD LlamaCpp: Ready')' in "
+                    "pathlib.Path('scripts/smoke_status.py').read_text() else 1)\""
+                ),
+                "rollback": "rm -f scripts/smoke_status.py",
+                "expected_files": ["scripts/smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "scripts/smoke_status.py",
+                        "content": "print('Phase 10G AMD LlamaCpp: Ready')",
+                    }
+                ],
+            }
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(
+            plan, task_prompt=task_prompt
+        )
+
+        verification = sanitized[0]["verification"]
+        assert "pathlib.Path" not in verification
+        assert "print('Phase 10G AMD LlamaCpp: Ready')" not in verification
+        assert "sys.executable" in verification
+        assert "Phase 10G AMD LlamaCpp: Ready" in verification
 
     def test_assessment_patches_missing_sys_import_in_verification(
         self, tmp_path: Path

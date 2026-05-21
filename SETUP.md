@@ -317,7 +317,7 @@ Windows host
 
 | Component | Minimum | Tested |
 |---|---|---|
-| GPU | Any AMD RDNA2+ with Vulkan | RX 7800 XT 16 GB |
+| GPU | Any AMD RDNA2+ with Vulkan | 16 GB VRAM AMD GPU class |
 | RAM | 16 GB | 48 GB |
 | OS | Windows 10/11 | Windows 11 |
 
@@ -391,7 +391,8 @@ Recommended progression:
 | Phase | Model | VRAM | Context |
 |---|---|---|---|
 | 1 (stability) | Qwen3 4B Q4_K_M | ~3 GB | 4096 |
-| 2 (validated) | Qwen2.5-Coder 14B Q5_K_M | ~10 GB | 8192 |
+| 2 (8 GB VRAM) | Qwen2.5-Coder 7B Q5_K_M | ~5.5 GB | 4096 |
+| 3 (12-16 GB VRAM) | Qwen2.5-Coder 14B Q5_K_M | ~10-12 GB | 6144 |
 
 Download GGUF files from HuggingFace and place in a stable folder, e.g. `D:\models\`.
 
@@ -415,6 +416,14 @@ D:\llama.cpp\<version-folder>\llama-server.exe `
 | `-c 4096` | Context window — expand only after stability confirmed |
 | `--host 0.0.0.0` | Required for WSL2 container access |
 | `--jinja` | Chat template rendering for instruction-tuned models |
+
+Profile guidance:
+
+| Hardware tier | Recommended backend/profile | Context |
+|---|---|---|
+| < 8 GB VRAM | Ollama / `direct_ollama`, `RUNTIME_PROFILE=low_resource` | 4096 |
+| 8 GB VRAM llama.cpp compatibility | `openai_responses_api`, `RUNTIME_PROFILE=low_resource` | 4096 |
+| 12-16 GB VRAM llama.cpp validated locally | `openai_responses_api`, `RUNTIME_PROFILE=medium` | 6144 |
 
 Verify:
 
@@ -613,9 +622,10 @@ LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
 ./wsl-start.sh --check --backend-only
 ```
 
-`--check` expects `RUNTIME_PROFILE=low_resource` by default. For a previously
-validated machine intentionally running `medium`, use
-`EXPECTED_RUNTIME_PROFILE=medium ./wsl-start.sh --check --backend-only`.
+`--check` reads `RUNTIME_PROFILE` and `LLAMA_CTX` from private `.env` when
+present. For a previously validated 12-16 GB VRAM llama.cpp machine
+intentionally running `medium`, set `RUNTIME_PROFILE=medium` and
+`LLAMA_CTX=6144` in `.env`, or pass them as command-line overrides.
 It also expects Ollama to be absent by default for the third-machine path. For
 current-machine validation where Ollama is intentionally installed, add
 `EXPECTED_OLLAMA_ABSENT=false`.
@@ -771,7 +781,7 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
 | `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. |
 | `PLANNING_REPAIR_BASE_URL` | — | Endpoint for planning repair model. |
-| `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. |
+| `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. Use `low_resource` for 8 GB llama.cpp or constrained local backends; use `medium` only after a 12-16 GB VRAM llama.cpp setup is stable. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |
 | `WINDOWS_PROJECTS_DIR` | — | Host path mounted to `/app/projects` in containers. Use WSL2 ext4 path, not Windows path. |
