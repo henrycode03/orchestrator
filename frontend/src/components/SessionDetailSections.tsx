@@ -14,6 +14,7 @@ import type {
   SessionDigest,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
+  SessionNarrativeTimeline,
   SessionRecoveryContext,
   SessionReplayResponse,
   SessionStateDiffResponse,
@@ -750,6 +751,7 @@ interface SessionLogsPanelProps {
 interface SessionTimelinePanelProps {
   decisionEvents?: SessionDecisionEvent[];
   formatDateTime: (value?: string | null) => string;
+  narrativeTimeline?: SessionNarrativeTimeline | null;
   timelineSpans?: TimelineSpan[];
   timelineEvents: TimelineEvent[];
   offTrackMoment?: OffTrackMoment | null;
@@ -1162,6 +1164,7 @@ export function SessionDiagnosticsPanel({
 export function SessionTimelinePanel({
   decisionEvents = [],
   formatDateTime,
+  narrativeTimeline = null,
   timelineSpans = [],
   timelineEvents,
   offTrackMoment = null,
@@ -1262,6 +1265,85 @@ export function SessionTimelinePanel({
 
   return (
     <div className="min-w-0 space-y-4 overflow-x-hidden">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100">Narrative Timeline</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              {narrativeTimeline
+                ? `${narrativeTimeline.event_count} grouped events`
+                : 'No narrative timeline available yet'}
+            </p>
+          </div>
+          {narrativeTimeline && (
+            <span className="rounded bg-[color:var(--oc-surface-deep)] px-2 py-1 text-xs text-slate-400">
+              {narrativeTimeline.session_status}
+            </span>
+          )}
+        </div>
+        {!narrativeTimeline || narrativeTimeline.phases.length === 0 ? (
+          <p className="text-sm text-slate-400">
+            Start or resume a session to build a grouped timeline from status, tasks, logs, and checkpoints.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {narrativeTimeline.phases.map((phase) => (
+              <div key={phase.phase} className="min-w-0">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                    {phase.title}
+                  </p>
+                  <span className="text-xs text-slate-500">{phase.event_count}</span>
+                </div>
+                <div className="space-y-2">
+                  {phase.events.slice(0, 8).map((event) => (
+                    <div
+                      key={event.id}
+                      className={cn(
+                        'rounded-md border px-3 py-2',
+                        event.kind === 'failure'
+                          ? 'border-red-800/60 bg-red-950/20'
+                          : event.kind === 'checkpoint'
+                            ? 'border-emerald-800/60 bg-emerald-950/20'
+                            : event.kind === 'warning'
+                              ? 'border-amber-800/60 bg-amber-950/20'
+                              : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)]'
+                      )}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-slate-100">{event.title}</span>
+                        <span className="text-xs text-slate-500">{formatDateTime(event.at)}</span>
+                      </div>
+                      {event.detail && (
+                        <p className="mt-1 break-words text-sm text-slate-300">{event.detail}</p>
+                      )}
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                        {event.cause && (
+                          <span className="rounded bg-[color:var(--oc-surface)] px-1.5 py-0.5 text-slate-400">
+                            {event.cause}
+                          </span>
+                        )}
+                        {event.token_cost != null && (
+                          <span className="rounded bg-[color:var(--oc-surface)] px-1.5 py-0.5 text-cyan-300">
+                            {event.token_cost} tokens
+                          </span>
+                        )}
+                        {event.task_id != null && (
+                          <span className="rounded bg-[color:var(--oc-surface)] px-1.5 py-0.5 text-slate-400">
+                            task #{event.task_id}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <p className="text-xs text-slate-500">{narrativeTimeline.source_note}</p>
+          </div>
+        )}
+      </div>
+
       {(offTrackMoment || repairGenealogy.length > 0) && (
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/45 border-l-4 border-l-amber-400 bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
@@ -2799,7 +2881,7 @@ export function SessionRecoveryCard({
 interface SessionDigestPanelProps {
   digest: SessionDigest | null;
   loading: boolean;
-  onGenerate: () => void;
+  onGenerate: (enrich?: boolean) => void;
 }
 
 export function SessionDigestPanel({
@@ -2829,6 +2911,7 @@ export function SessionDigestPanel({
       '',
       'WHAT TO DO NEXT',
       digest.next_actions.join('\n'),
+      digest.enriched_text ? `\nENRICHED DIGEST\n${digest.enriched_text}` : '',
     ].join('\n');
     void navigator.clipboard?.writeText(text);
   };
@@ -2864,7 +2947,7 @@ export function SessionDigestPanel({
           {!loading && !digest && (
             <button
               type="button"
-              onClick={onGenerate}
+              onClick={() => onGenerate(false)}
               className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-200 hover:border-slate-500"
             >
               Generate digest
@@ -2873,6 +2956,35 @@ export function SessionDigestPanel({
 
           {digest && (
             <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs text-slate-500">
+                  {digest.enriched ? 'LLM enriched' : 'Template digest'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onGenerate(true)}
+                  disabled={loading}
+                  className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-xs text-slate-300 hover:border-slate-500 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Generate enriched digest
+                </button>
+              </div>
+
+              {digest.enriched_text && (
+                <div className="rounded-md border border-cyan-800/50 bg-cyan-950/20 p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-cyan-300">
+                    Enriched digest
+                  </p>
+                  <p className="whitespace-pre-wrap text-sm text-slate-200">{digest.enriched_text}</p>
+                </div>
+              )}
+
+              {digest.enrichment_error && (
+                <p className="rounded-md border border-amber-800/60 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+                  Enrichment unavailable: {digest.enrichment_error}
+                </p>
+              )}
+
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">

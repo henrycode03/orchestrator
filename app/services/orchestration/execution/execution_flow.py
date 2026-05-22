@@ -160,6 +160,28 @@ def _execute_portable_posix_command(
     }
 
 
+def _python_test_files_exist(project_dir: Path) -> bool:
+    for candidate in project_dir.rglob("test*.py"):
+        if ".openclaw" not in candidate.parts and candidate.is_file():
+            return True
+    return False
+
+
+def _verification_success(
+    *,
+    project_dir: Path,
+    raw_command: str,
+    returncode: int,
+    output: str,
+) -> bool:
+    if returncode != 0:
+        return False
+    normalized = " ".join(raw_command.strip().split())
+    if "unittest" in normalized and "NO TESTS RAN" in output.upper():
+        return not _python_test_files_exist(project_dir)
+    return True
+
+
 # Minimum non-trivial file size in bytes.  Files smaller than this are
 # treated as "empty" (touch, echo '', placeholder stubs).
 _MIN_MEANINGFUL_BYTES = 4
@@ -301,8 +323,14 @@ def execute_verification_command(
             for part in [completed.stdout.strip(), completed.stderr.strip()]
             if part
         ).strip()
+        success = _verification_success(
+            project_dir=project_dir,
+            raw_command=raw_command,
+            returncode=completed.returncode,
+            output=output,
+        )
         return {
-            "success": completed.returncode == 0,
+            "success": success,
             "command": raw_command,
             "returncode": completed.returncode,
             "output": output[:4000],

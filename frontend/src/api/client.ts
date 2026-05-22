@@ -33,6 +33,7 @@ import type {
   ChangeSetReviewDecision,
   SessionRecoveryContext,
   SessionDigest,
+  SessionNarrativeTimeline,
 } from "../types/api";
 
 const API_BASE_URL =
@@ -705,8 +706,13 @@ export const sessionsAPI = {
   getRecoveryContext: (sessionId: number) =>
     apiClient.get<SessionRecoveryContext>(`/sessions/${sessionId}/recovery-context`),
 
-  getSessionDigest: (sessionId: number) =>
-    apiClient.get<SessionDigest>(`/sessions/${sessionId}/digest`),
+  getNarrativeTimeline: (sessionId: number) =>
+    apiClient.get<SessionNarrativeTimeline>(`/sessions/${sessionId}/timeline`),
+
+  getSessionDigest: (sessionId: number, enrich: boolean = false) =>
+    apiClient.get<SessionDigest>(`/sessions/${sessionId}/digest`, {
+      params: enrich ? { enrich: true } : undefined,
+    }),
 
   replayCheckpoint: (sessionId: number, checkpointName: string) =>
     apiClient.post<{

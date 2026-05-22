@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
 _STALE_RUNNING_SESSION_SWEEP_SECONDS = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS + 300
+_EXPLICIT_TASK_ID_RE = re.compile(r"\btask\s*#?(\d+)\b", re.IGNORECASE)
 
 
 def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
@@ -76,6 +78,19 @@ def _reset_running_session_tasks(
         session_id=session_id,
         next_status=next_status,
     )
+
+
+def _explicit_task_id_from_session(session: SessionModel) -> int | None:
+    text = " ".join(
+        part for part in [session.name or "", session.description or ""] if part
+    )
+    match = _EXPLICIT_TASK_ID_RE.search(text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
 
 
 def _recover_orphaned_running_session_if_needed(
@@ -1012,16 +1027,50 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 db.commit()
 
             pending_tasks = task_service.get_project_tasks(session.project_id)
-            reopen_failed_ordered_task_if_needed(
-                db,
-                session,
-                ignore_recovery_budget=(session.execution_mode == "automatic"),
-            )
-            pending_tasks = task_service.get_project_tasks(session.project_id)
-
             queued_tasks = []
             if session.execution_mode == "automatic":
-                next_task = task_service.get_next_pending_task(session.project_id)
+                explicit_task_id = _explicit_task_id_from_session(session)
+                next_task = None
+                if explicit_task_id is not None:
+                    next_task = next(
+                        (
+                            task
+                            for task in task_service.get_project_tasks(
+                                session.project_id
+                            )
+                            if task.id == explicit_task_id
+                        ),
+                        None,
+                    )
+                    if next_task and next_task.status != TaskStatus.RUNNING:
+                        mark_task_attempt_pending(
+                            task=next_task,
+                            reset_started_at=True,
+                            error_message=None,
+                        )
+                        db.add(
+                            LogEntry(
+                                session_id=session_id,
+                                session_instance_id=session_instance_id,
+                                level="INFO",
+                                message=(
+                                    f"Session explicitly scoped to task "
+                                    f"{explicit_task_id}"
+                                ),
+                            )
+                        )
+                        db.commit()
+
+                if next_task is None:
+                    pending_tasks = task_service.get_project_tasks(session.project_id)
+                    reopen_failed_ordered_task_if_needed(
+                        db,
+                        session,
+                        ignore_recovery_budget=(session.execution_mode == "automatic"),
+                    )
+                    pending_tasks = task_service.get_project_tasks(session.project_id)
+                    next_task = task_service.get_next_pending_task(session.project_id)
+
                 if next_task:
                     queued_tasks.append(
                         queue_task_for_session(

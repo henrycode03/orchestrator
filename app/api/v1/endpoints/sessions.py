@@ -66,6 +66,7 @@ from app.services import (
     get_session_dispatch_watchdog_payload as _get_session_dispatch_watchdog_payload,
     get_session_focus_mode_payload as _get_session_focus_mode_payload,
     get_session_mobile_interruptions_payload as _get_session_mobile_interruptions_payload,
+    get_session_timeline_payload as _get_session_timeline_payload,
     get_session_recovery_context_payload as _get_session_recovery_context_payload,
     get_session_digest_payload as _get_session_digest_payload,
     get_session_state_diff_payload as _get_session_state_diff_payload,
@@ -1558,6 +1559,17 @@ def get_session_mobile_interruptions(
     return _get_session_mobile_interruptions_payload(db, session_id)
 
 
+@router.get("/sessions/{session_id}/timeline")
+def get_session_timeline(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return a pre-aggregated operator narrative timeline for a session."""
+    _require_session_access(db, session_id, current_user)
+    return _get_session_timeline_payload(db, session_id)
+
+
 @router.get("/sessions/{session_id}/recovery-context")
 def get_session_recovery_context(
     session_id: int,
@@ -1576,6 +1588,7 @@ def get_session_recovery_context(
 @router.get("/sessions/{session_id}/digest")
 def get_session_digest(
     session_id: int,
+    enrich: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -1585,7 +1598,7 @@ def get_session_digest(
     and what to do next. Suitable for returning operators who weren't watching live.
     """
     _require_session_access(db, session_id, current_user)
-    return _get_session_digest_payload(db, session_id)
+    return _get_session_digest_payload(db, session_id, enrich=enrich)
 
 
 @router.get("/sessions/{session_id}/dispatch-watchdog")

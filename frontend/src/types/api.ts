@@ -808,6 +808,35 @@ export interface SessionRecoveryContext {
   source_note: string;
 }
 
+export interface SessionNarrativeTimelineEvent {
+  id: string;
+  at: string | null;
+  phase: string;
+  kind: 'milestone' | 'success' | 'warning' | 'failure' | 'checkpoint' | 'repair' | string;
+  title: string;
+  detail: string | null;
+  task_id: number | null;
+  token_cost: number | null;
+  cause: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface SessionNarrativeTimelinePhase {
+  phase: string;
+  title: string;
+  event_count: number;
+  events: SessionNarrativeTimelineEvent[];
+}
+
+export interface SessionNarrativeTimeline {
+  session_id: number;
+  session_status: string;
+  generated_at: string;
+  phases: SessionNarrativeTimelinePhase[];
+  event_count: number;
+  source_note: string;
+}
+
 export interface SessionDigest {
   session_id: number;
   session_name: string;
@@ -828,4 +857,8 @@ export interface SessionDigest {
   last_checkpoint_id: string | null;
   last_checkpoint_age_minutes: number | null;
   next_actions: string[];
+  enriched?: boolean;
+  enriched_text?: string | null;
+  enrichment_error?: string | null;
+  state_hash?: string | null;
 }

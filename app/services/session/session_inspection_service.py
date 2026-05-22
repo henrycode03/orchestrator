@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -68,6 +69,7 @@ from app.services.session.session_runtime_service import (
 from .session_lookup import get_session_or_404
 
 QUEUE_WATCHDOG_SLA_SECONDS = 30
+_DIGEST_ENRICHMENT_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def get_inspectable_session_or_404(db: Session, session_id: int) -> SessionModel:
@@ -1411,6 +1413,303 @@ _RECOVERY_ACTION_MAP: Dict[str, List[Dict[str, Any]]] = {
 }
 
 
+def _timeline_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _timeline_phase_for_log(entry: LogEntry, metadata: Dict[str, Any]) -> str:
+    event_type = str(metadata.get("event_type") or "").lower()
+    message = str(entry.message or "").lower()
+    if "checkpoint" in event_type or "checkpoint" in message:
+        return "checkpoint"
+    if any(term in event_type or term in message for term in ("repair", "retry")):
+        return "repair"
+    if any(
+        term in event_type or term in message
+        for term in ("validation", "validator", "contract")
+    ):
+        return "validation"
+    if any(term in event_type or term in message for term in ("planning", "plan_")):
+        return "planning"
+    if entry.level in {"ERROR", "WARNING"}:
+        return "failure"
+    return "execution"
+
+
+def _timeline_kind_for_phase(phase: str, level: str = "INFO") -> str:
+    if phase == "checkpoint":
+        return "checkpoint"
+    if phase == "repair":
+        return "repair"
+    if phase == "validation":
+        return "warning" if level != "ERROR" else "failure"
+    if phase == "failure" or level == "ERROR":
+        return "failure"
+    return "milestone"
+
+
+def _append_timeline_event(
+    events: List[Dict[str, Any]],
+    *,
+    at: Optional[str],
+    phase: str,
+    kind: str,
+    title: str,
+    detail: Optional[str] = None,
+    task_id: Optional[int] = None,
+    token_cost: Optional[int] = None,
+    cause: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    events.append(
+        {
+            "id": f"{phase}-{kind}-{len(events) + 1}",
+            "at": at,
+            "phase": phase,
+            "kind": kind,
+            "title": title,
+            "detail": detail,
+            "task_id": task_id,
+            "token_cost": token_cost,
+            "cause": cause,
+            "metadata": metadata or {},
+        }
+    )
+
+
+def get_session_timeline_payload(
+    db: Session,
+    session_id: int,
+) -> Dict[str, Any]:
+    """Return an operator-readable narrative timeline derived from existing evidence."""
+    from app.models import TaskExecution
+
+    session = get_inspectable_session_or_404(db, session_id)
+    events: List[Dict[str, Any]] = []
+
+    _append_timeline_event(
+        events,
+        at=_timeline_iso(session.started_at or session.created_at),
+        phase="session",
+        kind="milestone",
+        title="Session started" if session.started_at else "Session created",
+        detail=session.name,
+    )
+
+    links = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session_id)
+        .order_by(SessionTask.id.asc())
+        .all()
+    )
+    tasks_by_id = {
+        task.id: task
+        for task in db.query(Task)
+        .filter(Task.id.in_([link.task_id for link in links] or [-1]))
+        .all()
+    }
+
+    for link in links:
+        task = tasks_by_id.get(link.task_id)
+        if not task:
+            continue
+        status_value = (
+            link.status.value if hasattr(link.status, "value") else str(link.status)
+        )
+        task_status = (
+            task.status.value if hasattr(task.status, "value") else str(task.status)
+        )
+        phase = "execution"
+        kind = "milestone"
+        if task_status == TaskStatus.DONE.value:
+            title = "Task complete"
+            kind = "success"
+        elif task_status == TaskStatus.FAILED.value:
+            title = "Task failed"
+            phase = "failure"
+            kind = "failure"
+        elif task_status == TaskStatus.RUNNING.value:
+            title = "Task running"
+        else:
+            title = "Task queued"
+        _append_timeline_event(
+            events,
+            at=_timeline_iso(link.started_at or task.started_at or task.created_at),
+            phase=phase,
+            kind=kind,
+            title=title,
+            detail=task.title,
+            task_id=task.id,
+            metadata={"task_status": task_status, "session_task_status": status_value},
+        )
+
+    executions = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.session_id == session_id)
+        .order_by(TaskExecution.id.asc())
+        .all()
+    )
+    for execution in executions:
+        status_value = (
+            execution.status.value
+            if hasattr(execution.status, "value")
+            else str(execution.status or "")
+        )
+        if status_value not in {TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}:
+            continue
+        cause = str(execution.failure_category or "execution_failure")
+        _append_timeline_event(
+            events,
+            at=_timeline_iso(
+                execution.completed_at or execution.started_at or execution.created_at
+            ),
+            phase="failure",
+            kind="failure",
+            title="Execution failed",
+            detail=f"Attempt {execution.attempt_number}",
+            task_id=execution.task_id,
+            cause=cause,
+            metadata={"failure_category": cause, "backend_id": execution.backend_id},
+        )
+
+    log_entries = (
+        db.query(LogEntry)
+        .filter(LogEntry.session_id == session_id)
+        .order_by(LogEntry.created_at.asc(), LogEntry.id.asc())
+        .limit(200)
+        .all()
+    )
+    for entry in log_entries:
+        metadata: Dict[str, Any] = {}
+        if entry.log_metadata:
+            try:
+                parsed = json.loads(entry.log_metadata)
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except (TypeError, ValueError):
+                metadata = {}
+        event_type = str(metadata.get("event_type") or "")
+        if entry.level not in {"ERROR", "WARNING"} and not event_type:
+            continue
+        phase = _timeline_phase_for_log(entry, metadata)
+        token_cost = (
+            metadata.get("token_cost")
+            or metadata.get("tokens")
+            or metadata.get("estimated_tokens")
+        )
+        try:
+            token_cost_int = int(token_cost) if token_cost is not None else None
+        except (TypeError, ValueError):
+            token_cost_int = None
+        cause = metadata.get("reason") or metadata.get("failure_category")
+        _append_timeline_event(
+            events,
+            at=_timeline_iso(entry.created_at),
+            phase=phase,
+            kind=_timeline_kind_for_phase(phase, entry.level),
+            title=(
+                event_type.replace("_", " ").title()
+                if event_type
+                else entry.level.title()
+            ),
+            detail=str(entry.message or "")[:240],
+            task_id=entry.task_id,
+            token_cost=token_cost_int,
+            cause=str(cause) if cause else None,
+            metadata={
+                key: metadata[key]
+                for key in (
+                    "reason",
+                    "validation_reasons",
+                    "contract_violations",
+                    "checkpoint_name",
+                )
+                if key in metadata
+            },
+        )
+
+    checkpoint_service = CheckpointService(db)
+    for checkpoint in checkpoint_service.list_checkpoints(session_id):
+        _append_timeline_event(
+            events,
+            at=_timeline_iso(checkpoint.get("created_at")),
+            phase="checkpoint",
+            kind="checkpoint",
+            title="Checkpoint saved",
+            detail=str(
+                checkpoint.get("checkpoint_name")
+                or checkpoint.get("name")
+                or "checkpoint"
+            ),
+            task_id=checkpoint.get("task_id"),
+            metadata={
+                "checkpoint_name": checkpoint.get("checkpoint_name")
+                or checkpoint.get("name"),
+                "resumable": checkpoint.get("resumable"),
+                "progress_score": checkpoint.get("progress_score"),
+            },
+        )
+
+    if session.status in {
+        "paused",
+        "stopped",
+        "failed",
+        "cancelled",
+        "canceled",
+        "awaiting_input",
+    }:
+        stop_reasons, stop_category = _extract_stop_reasons(db, session)
+        _append_timeline_event(
+            events,
+            at=_timeline_iso(
+                session.stopped_at or session.paused_at or session.updated_at
+            ),
+            phase="failure" if session.status in {"failed", "stopped"} else "session",
+            kind="failure" if session.status in {"failed", "stopped"} else "warning",
+            title=f"Session {session.status}",
+            detail="; ".join(stop_reasons),
+            cause=stop_category,
+        )
+
+    events.sort(key=lambda event: event.get("at") or "")
+    phases: List[Dict[str, Any]] = []
+    for phase_name in (
+        "session",
+        "planning",
+        "execution",
+        "validation",
+        "repair",
+        "checkpoint",
+        "failure",
+    ):
+        phase_events = [event for event in events if event["phase"] == phase_name]
+        if phase_events:
+            phases.append(
+                {
+                    "phase": phase_name,
+                    "title": phase_name.replace("_", " ").title(),
+                    "event_count": len(phase_events),
+                    "events": phase_events,
+                }
+            )
+
+    return {
+        "session_id": session_id,
+        "session_status": session.status,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "phases": phases,
+        "event_count": len(events),
+        "source_note": (
+            "Narrative timeline derived from session status, task links, task executions, "
+            "structured logs, and checkpoints."
+        ),
+    }
+
+
 def _extract_stop_reasons(
     db: Session,
     session: SessionModel,
@@ -1698,9 +1997,118 @@ def get_session_recovery_context_payload(
     }
 
 
+def _session_digest_state_hash(
+    db: Session,
+    session_id: int,
+    recovery: Dict[str, Any],
+) -> str:
+    latest_log = (
+        db.query(LogEntry.id, LogEntry.created_at)
+        .filter(LogEntry.session_id == session_id)
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    latest_execution = (
+        db.query(TaskExecution.id, TaskExecution.updated_at, TaskExecution.completed_at)
+        .filter(TaskExecution.session_id == session_id)
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    basis = {
+        "session_id": session_id,
+        "status": recovery.get("session_status"),
+        "tasks": recovery.get("tasks"),
+        "stop_reasons": recovery.get("stop_reasons"),
+        "last_checkpoint_id": recovery.get("last_checkpoint_id"),
+        "latest_log": (
+            [latest_log.id, _timeline_iso(latest_log.created_at)]
+            if latest_log
+            else None
+        ),
+        "latest_execution": (
+            [
+                latest_execution.id,
+                _timeline_iso(latest_execution.updated_at),
+                _timeline_iso(latest_execution.completed_at),
+            ]
+            if latest_execution
+            else None
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(basis, sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+def _generate_enriched_digest(
+    db: Session,
+    session_id: int,
+    digest: Dict[str, Any],
+    recovery: Dict[str, Any],
+    state_hash: str,
+) -> Dict[str, Any]:
+    cached = _DIGEST_ENRICHMENT_CACHE.get(state_hash)
+    if cached:
+        return cached
+
+    try:
+        from app.services.agents.agent_runtime import invoke_runtime_prompt
+
+        log_rows = (
+            db.query(LogEntry)
+            .filter(LogEntry.session_id == session_id)
+            .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
+            .limit(30)
+            .all()
+        )
+        log_block = (
+            "\n".join(
+                f"[{row.level}] {str(row.message or '')[:220]}" for row in log_rows
+            )
+            or "(no logs)"
+        )
+        prompt = (
+            "Write a concise operator digest for this execution session. "
+            "Use exactly these headings: SUMMARY, WHAT CHANGED, WHY IT STOPPED, "
+            "WHAT WAS PRESERVED, WHAT TO DO NEXT. Keep it under 300 words. "
+            "Be specific and do not invent facts.\n\n"
+            f"Structured digest:\n{json.dumps(digest, indent=2, default=str)}\n\n"
+            f"Recovery context:\n{json.dumps(recovery, indent=2, default=str)}\n\n"
+            f"Recent logs:\n{log_block}"
+        )
+        result = invoke_runtime_prompt(
+            db,
+            prompt,
+            session_id=session_id,
+            timeout_seconds=20,
+            session_prefix="session_digest",
+        )
+        text = str(result.get("output") or result.get("content") or "").strip()
+        if len(text) < 40:
+            raise ValueError("digest enrichment returned empty output")
+        enriched = {
+            "enriched": True,
+            "enriched_text": text[:3000],
+            "enrichment_error": None,
+            "state_hash": state_hash,
+        }
+    except Exception as exc:
+        enriched = {
+            "enriched": False,
+            "enriched_text": None,
+            "enrichment_error": str(exc)[:500],
+            "state_hash": state_hash,
+        }
+
+    _DIGEST_ENRICHMENT_CACHE[state_hash] = enriched
+    return enriched
+
+
 def get_session_digest_payload(
     db: Session,
     session_id: int,
+    *,
+    enrich: bool = False,
 ) -> Dict[str, Any]:
     session = get_inspectable_session_or_404(db, session_id)
 
@@ -1735,7 +2143,7 @@ def get_session_digest_payload(
 
     next_actions = [a["label"] for a in recovery["recommended_actions"][:3]]
 
-    return {
+    payload = {
         "session_id": session_id,
         "session_name": session.name,
         "session_status": session.status,
@@ -1750,7 +2158,19 @@ def get_session_digest_payload(
         "last_checkpoint_id": cp_id,
         "last_checkpoint_age_minutes": cp_age,
         "next_actions": next_actions,
+        "enriched": False,
+        "enriched_text": None,
+        "enrichment_error": None,
+        "state_hash": None,
     }
+
+    state_hash = _session_digest_state_hash(db, session_id, recovery)
+    payload["state_hash"] = state_hash
+    if enrich:
+        payload.update(
+            _generate_enriched_digest(db, session_id, payload, recovery, state_hash)
+        )
+    return payload
 
 
 def cleanup_orphaned_checkpoints_payload(db: Session) -> Dict[str, Any]:
