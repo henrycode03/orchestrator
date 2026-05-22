@@ -15,6 +15,7 @@ import type {
   SessionDigest,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
+  SessionNarrativeTimeline,
   SessionReplayResponse,
   SessionRecoveryContext,
   SessionStateDiffResponse,
@@ -183,6 +184,7 @@ export default function SessionDetail() {
   const [recoveryContextLoading, setRecoveryContextLoading] = useState(false);
   const [sessionDigest, setSessionDigest] = useState<SessionDigest | null>(null);
   const [sessionDigestLoading, setSessionDigestLoading] = useState(false);
+  const [narrativeTimeline, setNarrativeTimeline] = useState<SessionNarrativeTimeline | null>(null);
   const [knowledgeUsage, setKnowledgeUsage] = useState<Record<string, KnowledgeUsageEntry[]>>({});
   const [failureSummaryLoading, setFailureSummaryLoading] = useState(false);
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
@@ -1264,15 +1266,24 @@ export default function SessionDetail() {
     }
   }, []);
 
-  const loadSessionDigest = useCallback(async (id: number) => {
+  const loadSessionDigest = useCallback(async (id: number, enrich: boolean = false) => {
     setSessionDigestLoading(true);
     try {
-      const res = await sessionsAPI.getSessionDigest(id);
+      const res = await sessionsAPI.getSessionDigest(id, enrich);
       setSessionDigest(res.data);
     } catch {
       setSessionDigest(null);
     } finally {
       setSessionDigestLoading(false);
+    }
+  }, []);
+
+  const loadNarrativeTimeline = useCallback(async (id: number) => {
+    try {
+      const res = await sessionsAPI.getNarrativeTimeline(id);
+      setNarrativeTimeline(res.data);
+    } catch {
+      setNarrativeTimeline(null);
     }
   }, []);
 
@@ -1632,6 +1643,7 @@ export default function SessionDetail() {
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
         await loadDecisionTimeline(sessionRes.data.id);
+        await loadNarrativeTimeline(sessionRes.data.id);
         await loadReplayInvestigation(sessionRes.data.id);
         await loadDispatchWatchdog(sessionRes.data.id);
         try {
@@ -1720,6 +1732,7 @@ export default function SessionDetail() {
               lastTimelineRefreshAt = now;
               await loadTimelineEvents(Number(sessionId), currentTasks.data || []);
               await loadDecisionTimeline(Number(sessionId));
+              await loadNarrativeTimeline(Number(sessionId));
             }
           }
           await loadReplayInvestigation(Number(sessionId));
@@ -1758,7 +1771,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadRecoveryContext, loadSessionDigest, loadReplayInvestigation, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadNarrativeTimeline, loadRecoveryContext, loadSessionDigest, loadReplayInvestigation, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSessionFresh = async () => {
     if (executionAction) return;
@@ -2504,7 +2517,7 @@ export default function SessionDetail() {
         <SessionDigestPanel
           digest={sessionDigest}
           loading={sessionDigestLoading}
-          onGenerate={() => loadSessionDigest(session.id)}
+          onGenerate={(enrich) => loadSessionDigest(session.id, Boolean(enrich))}
         />
       )}
 
@@ -2555,6 +2568,7 @@ export default function SessionDetail() {
             <SessionTimelinePanel
               decisionEvents={decisionEvents}
               formatDateTime={formatDateTime}
+              narrativeTimeline={narrativeTimeline}
               offTrackMoment={offTrackMoment}
               repairGenealogy={repairGenealogy}
               timelineEvents={timelineEvents}

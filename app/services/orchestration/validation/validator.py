@@ -375,6 +375,19 @@ class ValidatorService:
         ):
             return "mutation"
         implementation_markers = get_implementation_intent_markers()
+        if execution_profile == "full_lifecycle" and any(
+            marker in combined
+            for marker in (
+                "fix",
+                "repair",
+                "update",
+                "modify",
+                "write",
+                "change",
+                "preserve",
+            )
+        ):
+            return "implementation"
         if any(marker in combined for marker in implementation_markers):
             return "implementation"
 
