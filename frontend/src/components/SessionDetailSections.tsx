@@ -2743,9 +2743,13 @@ export function SessionRecoveryCard({
       case 'resume': return <RefreshCw className="h-3.5 w-3.5" />;
       case 'diagnostics': return <FileText className="h-3.5 w-3.5" />;
       case 'rollback': return <RotateCcw className="h-3.5 w-3.5" />;
+      case 'retry_stronger_lane': return <RefreshCw className="h-3.5 w-3.5" />;
       default: return null;
     }
   };
+
+  const isModelLaneLimitation = context.stop_category === 'model_lane_limitation';
+  const strongerLaneAvailable = context.stronger_lane_available ?? false;
 
   return (
     <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] shadow-sm shadow-black/20">
@@ -2789,6 +2793,32 @@ export function SessionRecoveryCard({
           </ul>
         </div>
 
+        {/* Model-lane limitation panel */}
+        {isModelLaneLimitation && (
+          <div className="rounded-md border border-amber-700/40 bg-amber-950/20 px-4 py-3">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-amber-400">
+              Model-lane limitation
+            </p>
+            <p className="text-sm text-slate-300">
+              The current planning model repeated stale patch text that could not be corrected
+              by prompt guidance. Source files were not changed.
+            </p>
+            {context.model_lane_label && (
+              <p className="mt-1.5 text-xs text-slate-500">
+                Lane: <span className="text-slate-400">{context.model_lane_label.replace(/_/g, ' ')}</span>
+                {context.model_lane_capability_tier && (
+                  <> · Tier: <span className="text-slate-400">{context.model_lane_capability_tier.replace(/_/g, ' ')}</span></>
+                )}
+              </p>
+            )}
+            <p className="mt-2 text-xs text-amber-500">
+              {strongerLaneAvailable
+                ? 'A stronger planning lane is configured. Use "Retry with stronger planning lane" to attempt with higher capability.'
+                : 'No stronger planning lane is configured. Manual review is required.'}
+            </p>
+          </div>
+        )}
+
         {/* Task progress */}
         {tasks.length > 0 && (
           <div>
@@ -2804,6 +2834,11 @@ export function SessionRecoveryCard({
                   <div className="flex min-w-0 items-center gap-2">
                     <TaskStatusIcon status={task.status} />
                     <span className="truncate text-sm text-slate-200">{task.title}</span>
+                    {task.model_lane_limitation && (
+                      <span className="rounded bg-amber-950/40 px-1.5 py-0.5 text-xs text-amber-400 border border-amber-700/40">
+                        model-lane limit
+                      </span>
+                    )}
                   </div>
                   <div className="shrink-0 text-right text-xs text-slate-400">
                     {task.status === 'completed' && task.files_changed.length > 0 && (
@@ -2862,18 +2897,32 @@ export function SessionRecoveryCard({
               Recommended actions
             </p>
             <div className="flex flex-wrap gap-2">
-              {recommended_actions.map((action, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  onClick={() => onAction(action)}
-                  className={actionBtnClass(action.variant)}
-                >
-                  {actionIcon(action.action)}
-                  {action.label}
-                </button>
-              ))}
+              {recommended_actions.map((action, i) => {
+                const needsStrongerLane = action.requires_stronger_lane;
+                const isDisabled = needsStrongerLane && !strongerLaneAvailable;
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => !isDisabled && onAction(action)}
+                    disabled={isDisabled}
+                    title={isDisabled ? 'No stronger planning lane is configured' : undefined}
+                    className={cn(
+                      actionBtnClass(action.variant),
+                      isDisabled && 'cursor-not-allowed opacity-40',
+                    )}
+                  >
+                    {actionIcon(action.action)}
+                    {action.label}
+                  </button>
+                );
+              })}
             </div>
+            {isModelLaneLimitation && !strongerLaneAvailable && (
+              <p className="mt-2 text-xs text-slate-500">
+                No stronger planning lane configured — manual review only.
+              </p>
+            )}
           </div>
         )}
       </div>

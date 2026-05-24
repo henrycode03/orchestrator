@@ -785,6 +785,8 @@ export interface RecoveryTaskInfo {
   repair_attempts: number;
   committed: boolean;
   validation_evidence?: ValidationEvidence | null;
+  model_lane_limitation?: string | null;
+  failure_cause_bucket?: string | null;
 }
 
 export interface IntegrityFinding {
@@ -811,6 +813,7 @@ export interface RecoveryAction {
   action: string;
   task_id: number | null;
   variant: 'primary' | 'secondary' | 'danger';
+  requires_stronger_lane?: boolean;
 }
 
 export interface SessionRecoveryContext {
@@ -836,6 +839,10 @@ export interface SessionRecoveryContext {
   recommended_actions: RecoveryAction[];
   validation_evidence?: ValidationEvidence | null;
   source_note: string;
+  model_lane_label?: string | null;
+  model_lane_capability_tier?: string | null;
+  stronger_lane_available?: boolean;
+  model_lane_rerun_payload?: Record<string, unknown> | null;
 }
 
 export interface SessionNarrativeTimelineEvent {

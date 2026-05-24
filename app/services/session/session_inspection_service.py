@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -232,6 +233,54 @@ def _extract_failure_summary(
         "stderr_preview": stderr_text[:240] or None,
         "output_preview": output_text[:240] or None,
     }
+
+
+def _extract_model_lane_limitation(error_message: Any) -> Optional[str]:
+    """Extract the model-lane limitation key from a task error message string."""
+    text = str(error_message or "")
+    m = re.search(r"model_lane_limitation=([^\s;,]+)", text)
+    if m:
+        return m.group(1)
+    if (
+        "repeated_stale_exact_patch_after_capsule" in text
+        or "model_lane_repeated_stale_exact_patch" in text
+    ):
+        return "repeated_stale_exact_patch_after_capsule"
+    return None
+
+
+def _stronger_lane_available() -> bool:
+    """Return True if a secondary stronger planning backend is configured."""
+    secondary = str(getattr(settings, "AGENT_SECONDARY_BACKEND", "") or "").strip()
+    return bool(secondary)
+
+
+def _find_stale_old_text_in_logs(db: Session, session_id: int) -> List[str]:
+    """Scan planning phase-event log entries for stale_old_text emitted at model-lane stop.
+
+    Returns the list (possibly empty) to include as operator evidence in rerun payload.
+    Must not be injected into model prompts.
+    """
+    entries = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.level == "ERROR",
+        )
+        .order_by(LogEntry.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    for entry in entries:
+        meta = entry.log_metadata or {}
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("reason") != "planning_invalid_commands_after_repair":
+            continue
+        texts = meta.get("stale_old_text")
+        if isinstance(texts, list) and texts:
+            return texts
+    return []
 
 
 def _classify_test_scaffold_failure(error_message: Any) -> Optional[str]:
@@ -1438,6 +1487,27 @@ _RECOVERY_ACTION_MAP: Dict[str, List[Dict[str, Any]]] = {
             "task_id": None,
         },
     ],
+    "model_lane_limitation": [
+        {
+            "label": "Review manually",
+            "action": "diagnostics",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Retry with stronger planning lane",
+            "action": "retry_stronger_lane",
+            "variant": "secondary",
+            "task_id": None,
+            "requires_stronger_lane": True,
+        },
+        {
+            "label": "Rollback to baseline",
+            "action": "rollback",
+            "variant": "danger",
+            "task_id": None,
+        },
+    ],
     "awaiting_input": [
         {
             "label": "Submit guidance",
@@ -1828,7 +1898,27 @@ def _extract_stop_reasons(
 
         reason_val = meta.get("reason") or ""
         reason_text = str(reason_val).lower()
-        if "repair_budget" in reason_text or "repair_budget_exhausted" in reason_text:
+        if (
+            meta.get("model_lane_limitation")
+            or meta.get("failure_cause_bucket")
+            == "model_lane_repeated_stale_exact_patch"
+        ):
+            if category not in {
+                "repair_budget_exhausted",
+                "backend_capacity_error",
+                "checkpoint_conflict",
+            }:
+                category = "model_lane_limitation"
+                limitation_key = str(
+                    meta.get("model_lane_limitation")
+                    or "repeated_stale_exact_patch_after_capsule"
+                )
+                reasons.append(
+                    f"Planning stopped: the current model lane repeated stale patch text "
+                    f"({limitation_key}) and could not be repaired by prompt guidance. "
+                    "Source files were not changed. Manual review or a stronger planning lane is required."
+                )
+        elif "repair_budget" in reason_text or "repair_budget_exhausted" in reason_text:
             category = "repair_budget_exhausted"
             attempts = meta.get("repair_attempts") or meta.get("attempt_count") or ""
             reasons.append(f"Repair budget exhausted ({attempts or '?'} attempts used)")
@@ -2000,6 +2090,9 @@ def get_session_recovery_context_payload(
                 "failure_cause_bucket": _classify_test_scaffold_failure(
                     task.error_message
                 ),
+                "model_lane_limitation": _extract_model_lane_limitation(
+                    task.error_message
+                ),
             }
         )
 
@@ -2064,6 +2157,51 @@ def get_session_recovery_context_payload(
     repair_churn_stopped = bool(getattr(session, "repair_churn_stopped", False))
     repair_churn_trigger = getattr(session, "repair_churn_trigger", None) or None
 
+    lane_label = getattr(session, "model_lane_label", None) or None
+    lane_metadata = getattr(session, "model_lane_metadata", None) or {}
+    lane_capability_tier = (
+        lane_metadata.get("capability_tier")
+        if isinstance(lane_metadata, dict)
+        else None
+    )
+    stronger_lane = _stronger_lane_available()
+
+    # Build rerun payload for model-lane limitation stops (operator evidence, not prompt injection)
+    model_lane_rerun_payload: Optional[Dict[str, Any]] = None
+    if stop_category == "model_lane_limitation" and failed_task_id is not None:
+        failed_task_entry = next(
+            (t for t in task_progress if t["task_id"] == failed_task_id), None
+        )
+        failed_task_obj = db.query(Task).filter(Task.id == failed_task_id).first()
+        bad_old_text = _find_stale_old_text_in_logs(db, session_id)
+        failure_reason = (
+            failed_task_entry.get("error_message") if failed_task_entry else None
+        )
+        model_lane_rerun_payload = {
+            "task_id": failed_task_id,
+            "task_title": failed_task_obj.title if failed_task_obj else None,
+            "task_intent": failed_task_obj.description if failed_task_obj else None,
+            "model_lane_limitation": (
+                failed_task_entry.get("model_lane_limitation")
+                if failed_task_entry
+                else None
+            ),
+            "failure_reason": failure_reason,
+            "bad_old_text": bad_old_text,
+            "capsule_available": True,
+            "current_file_evidence_available": True,
+            "source_mutation_confirmed_absent": (
+                not bool(failed_task_entry.get("files_changed"))
+                if failed_task_entry
+                else True
+            ),
+            "stronger_lane_configured": stronger_lane,
+            "note": (
+                "This payload is operator evidence. "
+                "bad_old_text is shown for manual review only and must not be injected into model prompts."
+            ),
+        }
+
     return {
         "session_id": session_id,
         "session_name": session.name,
@@ -2089,6 +2227,10 @@ def get_session_recovery_context_payload(
         "repair_churn_stopped": repair_churn_stopped,
         "repair_churn_trigger": repair_churn_trigger,
         "source_note": source_note,
+        "model_lane_label": lane_label,
+        "model_lane_capability_tier": lane_capability_tier,
+        "stronger_lane_available": stronger_lane,
+        "model_lane_rerun_payload": model_lane_rerun_payload,
     }
 
 

@@ -686,6 +686,30 @@ def _model_lane_limitation_for_invalid_planning_commands(
     }
 
 
+def _extract_stale_old_text_from_plan(
+    plan: list | None,
+    stale_step_numbers: list[int] | None,
+) -> list[str]:
+    """Return the `old` text values from stale replace_in_file ops in the plan.
+
+    Used only to surface operator evidence in the rerun payload.
+    Must not be injected into model prompts.
+    """
+    if not plan or not stale_step_numbers:
+        return []
+    stale_set = set(stale_step_numbers)
+    texts: list[str] = []
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        if step.get("step_number") not in stale_set:
+            continue
+        for op in step.get("ops") or []:
+            if op.get("op") == "replace_in_file" and "old" in op:
+                texts.append(op["old"])
+    return texts
+
+
 def _is_repairable_malformed_shell_quoting_violation(exc: Exception) -> bool:
     message = str(exc).lower()
     return "malformed shell quoting" in message

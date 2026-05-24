@@ -314,6 +314,7 @@ from app.services.orchestration.phases.planning_support import (
     _get_targeted_second_repair_reason,
     _is_repairable_malformed_shell_quoting_violation,
     _last_plan_output_snippet,
+    _extract_stale_old_text_from_plan,
     _model_lane_limitation_for_invalid_planning_commands,
     _plan_contract_diagnostics,
     _semantic_codes_for_immediate_repair_issues,
@@ -1699,6 +1700,12 @@ def execute_planning_phase(
                         details={
                             "reason": "planning_invalid_commands_after_repair",
                             "blocking_repair_issues": blocking_repair_issues,
+                            "stale_old_text": _extract_stale_old_text_from_plan(
+                                ctx.orchestration_state.plan,
+                                (blocking_repair_issues or {}).get(
+                                    "stale_replace_ops_steps"
+                                ),
+                            ),
                             **model_lane_limitation,
                         },
                     )
