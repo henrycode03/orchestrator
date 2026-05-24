@@ -1331,6 +1331,9 @@ export default function SessionDetail() {
       case 'rollback':
         setCheckpointActionIntent('start');
         break;
+      case 'retry_stronger_lane':
+        setActiveTab('timeline');
+        break;
       default:
         break;
     }
