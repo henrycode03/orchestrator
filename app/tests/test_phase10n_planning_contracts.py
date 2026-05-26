@@ -47,6 +47,51 @@ def test_phase10n_test_scaffold_guidance_is_in_planning_and_repair_prompts(
     assert len(compact) < PLANNING_REPAIR_PROMPT_MAX_CHARS
 
 
+def test_phase10n_minimal_planning_prompt_prefers_source_when_tests_exist(
+    tmp_path: Path,
+):
+    source_file = tmp_path / "src" / "small_cli" / "cli.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text(
+        "import argparse\n"
+        "\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        "    parser = argparse.ArgumentParser(description='Print a message.')\n"
+        "    parser.add_argument('message', help='Message to print')\n"
+        "    return parser\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    args = build_parser().parse_args(argv)\n"
+        "    print(args.message)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "tests" / "test_cli.py"
+    test_file.parent.mkdir()
+    test_file.write_text(
+        "from small_cli.cli import build_parser, main\n"
+        "\n"
+        "def test_uppercase_option_prints_uppercase_message(capsys):\n"
+        "    assert main(['--uppercase', 'hello']) == 0\n"
+        "    assert capsys.readouterr().out.strip() == 'HELLO'\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_minimal_planning_prompt(
+        "Add the --uppercase option to this small Python CLI.",
+        tmp_path,
+        workspace_has_existing_files=True,
+    )
+
+    assert "## TEST CONTRACT SUMMARY" in prompt
+    assert "tests/test_cli.py" in prompt
+    assert "main(['--uppercase', 'hello']) should equal 0" in prompt
+    assert "src/small_cli/cli.py" in prompt
+    assert "prefer source edits under src/" in prompt.lower()
+    assert "Preserve them." in prompt
+    assert len(prompt) < 12000
+
+
 def test_phase10n_unittest_inference_prefers_pytest_when_project_signal_exists():
     plan = [
         {

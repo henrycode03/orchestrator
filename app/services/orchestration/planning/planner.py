@@ -53,6 +53,7 @@ from app.services.project.index_service import (
     build_project_index,
     render_project_structure_capsule,
 )
+from app.services.project.source_imports import python_test_source_context_from_tests
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 _logger = logging.getLogger(__name__)
@@ -1978,6 +1979,7 @@ class PlannerService:
             if project_structure_capsule is not None
             else PlannerService._build_project_structure_capsule(project_dir)
         )
+        python_source_context = python_test_source_context_from_tests(project_dir)
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
@@ -1989,6 +1991,8 @@ Task:
 
 Project structure:
 {structure_capsule or "No structural project index was available for this planning attempt."}
+
+{python_source_context}
 
 Workflow:
 {workflow_guidance or "No explicit workflow phases. Use the smallest valid sequential plan."}
@@ -2022,6 +2026,8 @@ Rules:
 25. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For implementation-heavy steps, verification must prove behavior or content using current workspace evidence.
 26. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 27. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
+28. For Python projects with existing tests, preserve those tests unless coverage is missing; prefer source edits under src/ that make the existing assertions pass.
+29. Do not rewrite Python tests to satisfy imports or behavior when the source module can be fixed instead.
 
 Invalid outputs:
 - Markdown fences around JSON
