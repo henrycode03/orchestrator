@@ -231,6 +231,12 @@ def test_validate_plan_rejects_physical_src_import_in_src_layout(tmp_path):
     assert verdict.details["physical_src_import_materializations"] == [
         "tests/test_pkg.py"
     ]
+    assert verdict.details["physical_src_import_details"] == [
+        {
+            "path": "tests/test_pkg.py",
+            "invalid_imports": ["from src.pkg import value"],
+        }
+    ]
 
 
 def test_validate_plan_accepts_package_import_in_src_layout(tmp_path):
@@ -271,6 +277,111 @@ def test_validate_plan_accepts_package_import_in_src_layout(tmp_path):
 
     assert verdict.accepted is True
     assert "physical_src_import_materializations" not in verdict.details
+
+
+def test_validate_plan_rejects_missing_expected_src_file_without_materializing_op(
+    tmp_path,
+):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Declare missing operations module",
+                "commands": ["python3 -m pytest -q"],
+                "verification": "python3 -m pytest -q",
+                "rollback": None,
+                "expected_files": ["src/math_tools/operations.py"],
+                "ops": [],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Fix missing math_tools.operations import",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["expected_source_file_not_materialized"] == [
+        "src/math_tools/operations.py"
+    ]
+    assert "expected_source_file_not_materialized" in " ".join(verdict.reasons)
+
+
+def test_validate_plan_allows_missing_expected_src_file_with_write_op(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create operations module",
+                "commands": ["python3 -m py_compile src/math_tools/operations.py"],
+                "verification": "python3 -m py_compile src/math_tools/operations.py",
+                "rollback": "rm -f src/math_tools/operations.py",
+                "expected_files": ["src/math_tools/operations.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/math_tools/operations.py",
+                        "content": "def add(a, b):\n    return a + b\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Fix missing math_tools.operations import",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "expected_source_file_not_materialized" not in verdict.details
+
+
+def test_validate_plan_allows_existing_expected_src_file_without_write_op(tmp_path):
+    source_path = tmp_path / "src" / "math_tools" / "operations.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Verify existing operations module",
+                "commands": ["python3 -m py_compile src/math_tools/operations.py"],
+                "verification": "python3 -m py_compile src/math_tools/operations.py",
+                "rollback": None,
+                "expected_files": ["src/math_tools/operations.py"],
+                "ops": [],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Verify math_tools.operations import",
+        execution_profile="verification",
+        project_dir=tmp_path,
+    )
+
+    assert "expected_source_file_not_materialized" not in verdict.details
+
+
+def test_validate_plan_non_source_expected_file_behavior_unchanged(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Declare report file",
+                "commands": ["python3 -c \"print('ok')\""],
+                "verification": "python3 -c \"print('ok')\"",
+                "rollback": None,
+                "expected_files": ["docs/report.txt"],
+                "ops": [],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Create a report",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "expected_source_file_not_materialized" not in verdict.details
+    assert verdict.details["unmaterialized_expected_files"] == ["docs/report.txt"]
 
 
 def test_validate_plan_allows_src_import_outside_src_layout(tmp_path):

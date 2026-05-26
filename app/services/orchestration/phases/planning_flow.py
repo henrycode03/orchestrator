@@ -62,6 +62,51 @@ from app.services.orchestration.phases.read_only_fallbacks import (
     _read_only_stage_fallback_plan,
 )
 
+_SOURCE_MATERIALIZATION_EXTENSIONS = ".py .js .jsx .ts .tsx .css .html .md".split()
+
+
+def _plan_source_materialization_paths(plan: Any) -> set[str]:
+    """Return concrete source-like file write targets from a plan."""
+
+    if not isinstance(plan, list):
+        return set()
+
+    paths: set[str] = set()
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "") not in {
+                "write_file",
+                "append_file",
+                "replace_in_file",
+            }:
+                continue
+            path_text = (
+                str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
+            )
+            if not path_text:
+                continue
+            path = Path(path_text)
+            if path.suffix.lower() not in _SOURCE_MATERIALIZATION_EXTENSIONS:
+                continue
+            paths.add(path.as_posix())
+    return paths
+
+
+def _repair_removed_source_materialization(
+    previous_plan: Any, repaired_plan: Any
+) -> list[str]:
+    previous_source_paths = _plan_source_materialization_paths(previous_plan)
+    if not previous_source_paths:
+        return []
+    repaired_source_paths = _plan_source_materialization_paths(repaired_plan)
+    if repaired_source_paths:
+        return []
+    return sorted(previous_source_paths)
+
 
 def _split_repaired_single_step_full_lifecycle_plan(
     extracted_plan: Any,
@@ -240,6 +285,7 @@ from app.services.orchestration.phases.planning_support import (
     MAX_PLANNING_RETRIES,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     _PlanningRetryState,
+    _abort_repeated_physical_src_import_repair,
     _build_reasoning_artifact,
     _build_repair_rejection_reasons,
     _classify_planning_timeout_failure,
@@ -1102,9 +1148,70 @@ def execute_planning_phase(
                     and isinstance(extracted_plan, list)
                     and len(extracted_plan) == 1
                 ):
-                    normalized_plan = _split_repaired_single_step_full_lifecycle_plan(
-                        extracted_plan
+                    removed_source_paths = _repair_removed_source_materialization(
+                        ctx.orchestration_state.plan, extracted_plan
                     )
+                    if removed_source_paths:
+                        failure_type = "repair_removed_materialization"
+                        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                        ctx.orchestration_state.abort_reason = (
+                            "Planning repair removed source materialization"
+                        )
+                        emit_phase_event(
+                            ctx.orchestration_state,
+                            ctx.emit_live,
+                            level="ERROR",
+                            phase="planning",
+                            message=(
+                                "[ORCHESTRATION] Planning repair removed concrete "
+                                "source materialization from the rejected plan"
+                            ),
+                            details={
+                                "reason": failure_type,
+                                "removed_source_materialization_paths": (
+                                    removed_source_paths[:8]
+                                ),
+                            },
+                        )
+                        _emit_planning_diagnostics_contract_violation(
+                            ctx,
+                            reason=failure_type,
+                            contract_violations=[
+                                "repair_removed_materialization: repaired/salvaged "
+                                "plan removed concrete source write operations from "
+                                "the rejected plan"
+                            ],
+                            contract_diagnostics={
+                                "removed_source_materialization_paths": (
+                                    removed_source_paths[:8]
+                                ),
+                            },
+                            output_text=output_text,
+                            strategy_info=failure_type,
+                        )
+                        _finalize_planning_terminal_failure(
+                            ctx=ctx,
+                            failure_type=failure_type,
+                            failure_reason=(
+                                "Planning repair removed materializing source "
+                                "operations from the rejected plan: "
+                                + ", ".join(removed_source_paths[:4])
+                            ),
+                        )
+                        if ctx.restore_workspace_snapshot_if_needed:
+                            ctx.restore_workspace_snapshot_if_needed(
+                                "planning repair removed materialization"
+                            )
+                        return {
+                            "status": "failed",
+                            "reason": failure_type,
+                        }
+                    else:
+                        normalized_plan = (
+                            _split_repaired_single_step_full_lifecycle_plan(
+                                extracted_plan
+                            )
+                        )
                 if normalized_plan:
                     ctx.logger.warning(
                         "[ORCHESTRATION] Normalized repaired single-step full-lifecycle plan into %d deterministic steps",
@@ -1826,6 +1933,17 @@ def execute_planning_phase(
                 continue
 
             if not plan_verdict.accepted:
+                if retry_state.repair_prompt_used:
+                    repeated_src_import_result = (
+                        _abort_repeated_physical_src_import_repair(
+                            ctx=ctx,
+                            plan_verdict=plan_verdict,
+                            output_text=output_text,
+                        )
+                    )
+                    if repeated_src_import_result:
+                        return repeated_src_import_result
+
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
                     plan_verdict=plan_verdict,

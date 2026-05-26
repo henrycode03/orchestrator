@@ -9,6 +9,7 @@ from typing import Any, Dict
 
 from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import compress_orchestration_context
+from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,
@@ -17,6 +18,7 @@ from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ReasoningArtifact
 from app.services.orchestration.validation.validator import MAX_PLANNING_COMMAND_CHARS
+from app.services.prompt_templates import OrchestrationStatus
 
 MAX_PLANNING_RETRIES = 3
 TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
@@ -235,6 +237,23 @@ def _build_repair_rejection_reasons(
             "or placeholders. Replace TODO/pass/stub/touch-only content with real "
             "minimal behavior and verify it."
         )
+        placeholder_ops = [
+            item
+            for item in (details.get("placeholder_source_write_ops") or [])
+            if isinstance(item, dict)
+        ]
+        for item in placeholder_ops[:3]:
+            path = str(item.get("path") or "").strip()
+            excerpt = " ".join(str(item.get("content_excerpt") or "").split())[:220]
+            if not path:
+                continue
+            targeted_reasons.append(
+                "placeholder_only_implementation source write: preserve source "
+                f"write path `{path}`; replace placeholder/stub content with real "
+                "implementation; do not convert package imports to `src.*` imports; "
+                "do not remove materializing source operations. "
+                f"Offending content excerpt: {excerpt}"
+            )
 
     if "too_many_lines" in subcodes:
         too_many_line_steps = [
@@ -285,6 +304,31 @@ def _build_repair_rejection_reasons(
             "npm run, pytest, or an ops write_file/replace_in_file operation. "
             "If the step already has a valid verification command, copy that "
             "same command into commands instead of leaving commands empty."
+        )
+
+    physical_src_details = [
+        item
+        for item in (details.get("physical_src_import_details") or [])
+        if isinstance(item, dict)
+    ]
+    if details.get("physical_src_import_materializations"):
+        invalid_lines: list[str] = []
+        for item in physical_src_details[:5]:
+            for line in item.get("invalid_imports") or []:
+                line_text = str(line or "").strip()
+                if line_text and line_text not in invalid_lines:
+                    invalid_lines.append(line_text)
+        invalid_clause = (
+            " Invalid import line(s): " + "; ".join(invalid_lines[:5])
+            if invalid_lines
+            else ""
+        )
+        targeted_reasons.append(
+            "physical_src_import: Do not use `src.` as a Python import prefix in "
+            "src-layout projects. Keep tests importing package paths such as "
+            "`from math_tools.operations import add`; create or edit "
+            "`src/math_tools/operations.py` instead of rewriting tests to "
+            "`from src.math_tools import ...`." + invalid_clause
         )
 
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []
@@ -387,6 +431,86 @@ def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
     details.update(_truncated_multistep_diagnostic_details(plan_verdict.details))
     details.update(_shadow_warning_details(plan_verdict.details))
     return details
+
+
+def _repeated_physical_src_import_repair_details(
+    plan_verdict: Any,
+) -> dict[str, Any] | None:
+    details = getattr(plan_verdict, "details", None) or {}
+    files = details.get("physical_src_import_materializations") or []
+    if not files:
+        return None
+    invalid_lines: list[str] = []
+    for item in details.get("physical_src_import_details") or []:
+        if not isinstance(item, dict):
+            continue
+        for line in item.get("invalid_imports") or []:
+            line_text = str(line or "").strip()
+            if line_text and line_text not in invalid_lines:
+                invalid_lines.append(line_text)
+    return {
+        "reason": "repeated_physical_src_import",
+        "physical_src_import_materializations": list(files)[:10],
+        "invalid_imports": invalid_lines[:10],
+    }
+
+
+def _abort_repeated_physical_src_import_repair(
+    *,
+    ctx: OrchestrationRunContext,
+    plan_verdict: Any,
+    output_text: str,
+) -> dict[str, str] | None:
+    details = _repeated_physical_src_import_repair_details(plan_verdict)
+    if not details:
+        return None
+
+    failure_type = "repeated_physical_src_import"
+    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+    ctx.orchestration_state.abort_reason = (
+        "Planning repair repeated physical src-prefixed Python imports"
+    )
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason=failure_type,
+        contract_violations=plan_verdict.reasons,
+        semantic_violation_codes=["physical_src_import"],
+        contract_diagnostics=details,
+        output_text=output_text,
+        strategy_info=failure_type,
+    )
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="ERROR",
+        phase="planning",
+        message=(
+            "[ORCHESTRATION] Planning repair repeated a physical "
+            "src-prefixed Python import"
+        ),
+        details={
+            **details,
+            "validation_reasons": list(plan_verdict.reasons or [])[:5],
+        },
+    )
+    invalid_imports = details.get("invalid_imports") or []
+    failure_reason = (
+        "Planning repair repeated physical src-prefixed Python imports after "
+        "explicit repair guidance"
+    )
+    if invalid_imports:
+        failure_reason += ": " + "; ".join(str(line) for line in invalid_imports[:4])
+    _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type=failure_type,
+        failure_reason=failure_reason,
+    )
+    if ctx.restore_workspace_snapshot_if_needed:
+        ctx.restore_workspace_snapshot_if_needed("repeated physical src import")
+    return {
+        "status": "failed",
+        "reason": failure_type,
+    }
 
 
 def _post_repair_missing_verification_steps(plan_verdict: Any) -> list[int]:

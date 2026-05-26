@@ -4,6 +4,7 @@ from app.services.orchestration.phases.planning_flow import (
     _looks_like_verification_only_task,
     _prune_unmaterialized_expected_files,
     _read_only_stage_fallback_plan,
+    _repair_removed_source_materialization,
     _split_repaired_single_step_full_lifecycle_plan,
 )
 from app.services.orchestration.validation.validator import ValidatorService
@@ -61,6 +62,79 @@ def test_repaired_single_step_split_uses_actual_edit_paths_not_speculative_expec
     )
     assert verdict.accepted
     assert "unmaterialized_expected_files" not in verdict.details
+
+
+def test_repair_removed_source_materialization_detects_no_op_salvage():
+    rejected_plan = [
+        {
+            "step_number": 2,
+            "description": "Create missing operations module",
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/math_tools/operations.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/math_tools/operations.py",
+                    "content": "# Placeholder\n\ndef add(a, b):\n    return a + b\n",
+                }
+            ],
+        }
+    ]
+    salvaged_plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect current workspace",
+            "commands": ["rg --files . | sort"],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+
+    assert _repair_removed_source_materialization(rejected_plan, salvaged_plan) == [
+        "src/math_tools/operations.py"
+    ]
+
+
+def test_repair_removed_source_materialization_allows_preserved_source_write():
+    rejected_plan = [
+        {
+            "step_number": 2,
+            "description": "Create missing operations module",
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/math_tools/operations.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/math_tools/operations.py",
+                    "content": "# Placeholder\n\ndef add(a, b):\n    return a + b\n",
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 2,
+            "description": "Create missing operations module",
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/math_tools/operations.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/math_tools/operations.py",
+                    "content": "def add(a, b):\n    return a + b\n",
+                }
+            ],
+        }
+    ]
+
+    assert _repair_removed_source_materialization(rejected_plan, repaired_plan) == []
 
 
 def test_prune_unmaterialized_expected_files_keeps_concrete_edit_scope(tmp_path):
