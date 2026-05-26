@@ -709,23 +709,54 @@ class ValidatorService:
     def _plan_contains_placeholder_intent(
         plan: List[Dict[str, Any]], task_prompt: str = ""
     ) -> bool:
+        return bool(
+            ValidatorService._plan_placeholder_source_write_ops(plan, task_prompt)
+        ) or ValidatorService._plan_contains_placeholder_commands(plan, task_prompt)
+
+    @staticmethod
+    def _plan_placeholder_source_write_ops(
+        plan: List[Dict[str, Any]], task_prompt: str = ""
+    ) -> List[Dict[str, Any]]:
         allow_todo_fixme_literals = ValidatorService._task_allows_todo_fixme_literals(
             task_prompt
         )
+        findings: List[Dict[str, Any]] = []
 
-        for step in plan:
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
             for operation in step.get("ops", []) or []:
                 if not isinstance(operation, dict):
                     continue
                 if operation.get("op") != "write_file":
                     continue
-                if ValidatorService._write_file_content_has_placeholder_implementation(
-                    str(operation.get("path", "")),
-                    str(operation.get("content", "")),
+                path_text = str(operation.get("path", "")).strip().lstrip("./")
+                content = str(operation.get("content", ""))
+                if not ValidatorService._write_file_content_has_placeholder_implementation(
+                    path_text,
+                    content,
                     allow_todo_fixme_literals=allow_todo_fixme_literals,
                 ):
-                    return True
+                    continue
+                findings.append(
+                    {
+                        "step_number": step_number,
+                        "op": "write_file",
+                        "path": path_text,
+                        "content_excerpt": " ".join(content.split())[:260],
+                    }
+                )
 
+        return findings
+
+    @staticmethod
+    def _plan_contains_placeholder_commands(
+        plan: List[Dict[str, Any]], task_prompt: str = ""
+    ) -> bool:
+        allow_todo_fixme_literals = ValidatorService._task_allows_todo_fixme_literals(
+            task_prompt
+        )
+
+        for step in plan:
             for command in step.get("commands", []) or []:
                 if ValidatorService._command_writes_placeholder_implementation(
                     str(command or ""),
@@ -887,6 +918,29 @@ class ValidatorService:
                     if path:
                         files.add(path)
         return files
+
+    @classmethod
+    def _expected_source_files_not_materialized(
+        cls,
+        *,
+        declared_expected_files: set[str],
+        materialized_targets: set[str],
+        existing_expected_files: set[str],
+    ) -> List[str]:
+        missing_sources: List[str] = []
+        for path_text in sorted(declared_expected_files):
+            normalized = str(path_text or "").strip().rstrip("/").lstrip("./")
+            if not normalized or normalized in materialized_targets:
+                continue
+            if normalized in existing_expected_files:
+                continue
+            path = Path(normalized)
+            if path.suffix.lower() not in SOURCE_EXTENSIONS:
+                continue
+            if not normalized.startswith("src/"):
+                continue
+            missing_sources.append(normalized)
+        return missing_sources
 
     @staticmethod
     def _step_uses_fake_verification_artifact(step: Dict[str, Any]) -> bool:
@@ -1276,10 +1330,26 @@ class ValidatorService:
         plan: List[Dict[str, Any]],
         project_dir: Optional[Path],
     ) -> List[str]:
+        return sorted(
+            {
+                str(item.get("path") or "")
+                for item in cls._plan_physical_src_python_import_details(
+                    plan, project_dir
+                )
+                if str(item.get("path") or "")
+            }
+        )
+
+    @classmethod
+    def _plan_physical_src_python_import_details(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> List[Dict[str, Any]]:
         if project_dir is None or not cls._project_has_python_src_layout(project_dir):
             return []
 
-        bad_paths: List[str] = []
+        findings: List[Dict[str, Any]] = []
         package_names = cls._python_src_layout_package_names(project_dir)
         for step in plan:
             for operation in step.get("ops", []) or []:
@@ -1299,12 +1369,18 @@ class ValidatorService:
                 content = str(raw_content or "")
                 if not content.strip():
                     continue
-                if cls._python_text_uses_physical_src_import_prefix(
+                invalid_lines = cls._python_physical_src_import_lines(
                     content,
                     package_names=package_names,
-                ):
-                    bad_paths.append(path_text or "(missing path)")
-        return sorted(set(bad_paths))
+                )
+                if invalid_lines:
+                    findings.append(
+                        {
+                            "path": path_text or "(missing path)",
+                            "invalid_imports": invalid_lines[:5],
+                        }
+                    )
+        return findings
 
     @classmethod
     def _project_has_python_src_layout(cls, project_dir: Path) -> bool:
@@ -1362,15 +1438,35 @@ class ValidatorService:
         *,
         package_names: set[str],
     ) -> bool:
+        if cls._python_physical_src_import_lines(text, package_names=package_names):
+            return True
+        return False
+
+    @classmethod
+    def _python_physical_src_import_lines(
+        cls,
+        text: str,
+        *,
+        package_names: set[str],
+    ) -> List[str]:
+        lines: List[str] = []
+        line_pattern = re.compile(
+            r"^\s*(?:from\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b.*|import\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b.*)$"
+        )
+        for raw_line in str(text or "").splitlines():
+            match = line_pattern.match(raw_line)
+            if not match:
+                continue
+            package = match.group(1) or match.group(2) or ""
+            if not package_names or package in package_names:
+                rendered = raw_line.strip()
+                if rendered and rendered not in lines:
+                    lines.append(rendered)
+
         try:
             tree = ast.parse(text)
         except SyntaxError:
-            pattern = r"(?m)^\s*(?:from\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b|import\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b)"
-            for match in re.finditer(pattern, text):
-                package = match.group(1) or match.group(2) or ""
-                if not package_names or package in package_names:
-                    return True
-            return False
+            return lines
 
         for node in ast.walk(tree):
             package = ""
@@ -1378,15 +1474,23 @@ class ValidatorService:
                 "src."
             ):
                 package = str(node.module or "").split(".", 2)[1]
+                rendered = f"from {node.module} import ..."
             elif isinstance(node, ast.Import):
+                rendered = ""
                 for alias in node.names:
                     name = str(alias.name or "")
                     if name.startswith("src."):
                         package = name.split(".", 2)[1]
+                        rendered = f"import {name}"
                         break
             if package and (not package_names or package in package_names):
-                return True
-        return False
+                if isinstance(node, ast.ImportFrom) and any(
+                    line.startswith(f"from {node.module} import ") for line in lines
+                ):
+                    continue
+                if rendered and rendered not in lines:
+                    lines.append(rendered)
+        return lines
 
     @classmethod
     def _python_module_has_import_time_parse_args(cls, tree: ast.AST) -> bool:
@@ -2941,6 +3045,26 @@ class ValidatorService:
             for path in declared_expected_files
             if project_dir is not None and (Path(project_dir) / path).exists()
         }
+        expected_source_file_not_materialized = (
+            cls._expected_source_files_not_materialized(
+                declared_expected_files=declared_expected_files,
+                materialized_targets=materialized_targets,
+                existing_expected_files=existing_expected_files,
+            )
+        )
+        if (
+            expected_source_file_not_materialized
+            and workflow_stage not in READ_ONLY_WORKFLOW_STAGES
+        ):
+            repairable.append(
+                "Plan declares expected source files that do not exist but are not "
+                "materialized by file operations "
+                "(expected_source_file_not_materialized; files: "
+                f"{expected_source_file_not_materialized[:5]})"
+            )
+            details["expected_source_file_not_materialized"] = (
+                expected_source_file_not_materialized[:20]
+            )
         unmaterialized_expected_files = sorted(
             declared_expected_files.difference(
                 materialized_targets | existing_expected_files
@@ -3172,6 +3296,11 @@ class ValidatorService:
                     "Plan appears to generate placeholder or stub implementations"
                 )
                 details["placeholder_only_implementation"] = True
+                placeholder_source_ops = cls._plan_placeholder_source_write_ops(
+                    plan, task_prompt
+                )
+                if placeholder_source_ops:
+                    details["placeholder_source_write_ops"] = placeholder_source_ops[:5]
             frontend_wrong_stack_files = cls._frontend_wrong_stack_materializations(
                 plan,
                 workflow_profile,
@@ -3240,6 +3369,9 @@ class ValidatorService:
                 )
                 details["physical_src_import_materializations"] = (
                     physical_src_import_files[:20]
+                )
+                details["physical_src_import_details"] = (
+                    cls._plan_physical_src_python_import_details(plan, project_dir)[:10]
                 )
         elif profile == "verification":
             mutated_source_assets = cls._verification_plan_mutates_app_source_assets(
@@ -3352,6 +3484,8 @@ class ValidatorService:
             semantic_violation_codes.append("fake_verification_artifact")
         if details.get("unmaterialized_expected_files"):
             semantic_violation_codes.append("unmaterialized_expected_files")
+        if details.get("expected_source_file_not_materialized"):
+            semantic_violation_codes.append("expected_source_file_not_materialized")
         if details.get("physical_src_import_materializations"):
             semantic_violation_codes.append("physical_src_import")
         if semantic_violation_codes:

@@ -22,6 +22,9 @@ from app.services.orchestration.phases.planning_flow import (
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     execute_planning_phase,
 )
+from app.services.orchestration.phases.planning_support import (
+    _repeated_physical_src_import_repair_details,
+)
 from app.services.orchestration.planning.planner import (
     PlannerService,
     MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD,
@@ -1743,6 +1746,44 @@ def test_validator_treats_placeholder_stub_plan_as_repairable(tmp_path):
     )
 
 
+def test_validator_records_placeholder_source_write_context(tmp_path):
+    plan = [
+        {
+            "step_number": 2,
+            "description": "Create the missing import path",
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/math_tools/operations.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/math_tools/operations.py",
+                    "content": "# Placeholder for operations\n\ndef add(x, y):\n    return x + y\n",
+                }
+            ],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Fix missing math_tools.operations import",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.details["placeholder_only_implementation"] is True
+    assert verdict.details["placeholder_source_write_ops"] == [
+        {
+            "step_number": 2,
+            "op": "write_file",
+            "path": "src/math_tools/operations.py",
+            "content_excerpt": "# Placeholder for operations def add(x, y): return x + y",
+        }
+    ]
+
+
 def test_validator_treats_placeholder_stub_plus_oversized_plan_as_repairable(
     tmp_path,
 ):
@@ -2477,6 +2518,82 @@ def test_planning_repair_reasons_include_heredoc_and_inline_python_subcodes():
     assert "tiny test file with ops" in rendered
     assert "placeholder_only_implementation:" in rendered
     assert reasons[-1] == "Plan contains brittle heredoc-heavy or malformed commands"
+
+
+def test_placeholder_repair_reasons_include_offending_source_write_context():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan appears to generate placeholder or stub implementations"],
+        {
+            "placeholder_only_implementation": True,
+            "placeholder_source_write_ops": [
+                {
+                    "step_number": 2,
+                    "op": "write_file",
+                    "path": "src/math_tools/operations.py",
+                    "content_excerpt": "# Placeholder for operations def add(x, y): return x + y",
+                }
+            ],
+        },
+    )
+
+    rendered = "\n".join(reasons)
+    assert "preserve source write path `src/math_tools/operations.py`" in rendered
+    assert "replace placeholder/stub content with real implementation" in rendered
+    assert "do not convert package imports to `src.*` imports" in rendered
+    assert "do not remove materializing source operations" in rendered
+    assert "# Placeholder for operations" in rendered
+
+
+def test_physical_src_import_repair_reasons_include_invalid_line_and_guidance():
+    reasons = _build_repair_rejection_reasons(
+        [
+            "Plan writes Python imports using the physical `src.` prefix in a "
+            "src-layout project"
+        ],
+        {
+            "physical_src_import_materializations": ["tests/test_operations_import.py"],
+            "physical_src_import_details": [
+                {
+                    "path": "tests/test_operations_import.py",
+                    "invalid_imports": ["from src.math_tools import operations"],
+                }
+            ],
+        },
+    )
+
+    rendered = "\n".join(reasons)
+    assert "Invalid import line(s): from src.math_tools import operations" in rendered
+    assert "Do not use `src.` as a Python import prefix" in rendered
+    assert "from math_tools.operations import add" in rendered
+    assert "src/math_tools/operations.py" in rendered
+
+
+def test_repeated_physical_src_import_repair_details_reports_clear_reason():
+    plan_verdict = type(
+        "PlanVerdict",
+        (),
+        {
+            "details": {
+                "physical_src_import_materializations": [
+                    "tests/test_operations_import.py"
+                ],
+                "physical_src_import_details": [
+                    {
+                        "path": "tests/test_operations_import.py",
+                        "invalid_imports": ["from src.math_tools import operations"],
+                    }
+                ],
+            }
+        },
+    )()
+
+    details = _repeated_physical_src_import_repair_details(plan_verdict)
+
+    assert details == {
+        "reason": "repeated_physical_src_import",
+        "physical_src_import_materializations": ["tests/test_operations_import.py"],
+        "invalid_imports": ["from src.math_tools import operations"],
+    }
 
 
 def test_compact_planning_repair_prompt_preserves_phase7k_contract_rules():
