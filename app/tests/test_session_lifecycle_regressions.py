@@ -1155,6 +1155,10 @@ def test_pause_session_saves_rich_checkpoint_when_only_hollow_checkpoint_exists(
     result = asyncio.run(pause_session_lifecycle(db_session, session.id))
 
     assert result["status"] == "paused"
+    db_session.refresh(session)
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert session.paused_at is not None
     saved = captured["saved"]
     assert saved["context_data"]["task_id"] == task.id
     assert saved["context_data"]["task_subfolder"] == "backend"

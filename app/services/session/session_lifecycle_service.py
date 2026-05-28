@@ -46,6 +46,7 @@ from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
+    resolve_session_transition,
 )
 from app.services.task_service import TaskService
 from app.services.task_execution_service import create_task_execution
@@ -1381,10 +1382,14 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             )
             await runtime.pause_session()
 
+        pause_transition = resolve_session_transition(
+            "running" if session.status == "active" else session.status,
+            "pause",
+        )
         mark_session_paused(
             session,
             paused_at=datetime.now(timezone.utc),
-            is_active=True,
+            is_active=pause_transition.is_active,
         )
         reset_count = _reset_running_session_tasks(
             db,
