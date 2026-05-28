@@ -212,7 +212,13 @@ def build_planning_repair_prompt(
                 prompt_profile=prompt_profile,
                 apply_prompt_profile=None,
             )
-        return _apply_profile(specialized_prompt, prompt_profile, apply_prompt_profile)
+        return _apply_profile_or_compact_fallback(
+            specialized_prompt,
+            malformed_output=malformed_output,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=apply_prompt_profile,
+        )
     validation_error = ""
     validation_char_limit = PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
     if rejection_reasons:
@@ -306,7 +312,13 @@ Rules:
             prompt_profile=prompt_profile,
             apply_prompt_profile=None,
         )
-    return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    return _apply_profile_or_compact_fallback(
+        prompt,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+    )
 
 
 def build_python_test_source_context_block(
@@ -520,6 +532,25 @@ def _apply_profile(prompt: str, prompt_profile: str, apply_prompt_profile: Any) 
     if callable(apply_prompt_profile):
         return apply_prompt_profile(prompt, prompt_profile)
     return prompt
+
+
+def _apply_profile_or_compact_fallback(
+    prompt: str,
+    *,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+    prompt_profile: str,
+    apply_prompt_profile: Any,
+) -> str:
+    profiled_prompt = _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    if len(profiled_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        return profiled_prompt
+    return build_compact_planning_repair_prompt(
+        malformed_output,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+    )
 
 
 def _build_project_structure_capsule(project_dir: Path) -> str:

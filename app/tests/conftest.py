@@ -98,9 +98,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def isolated_workspace_root(monkeypatch, tmp_path):
+def isolated_workspace_root(monkeypatch, tmp_path, db_session_factory):
     workspace_root = tmp_path / "workspace-root"
     monkeypatch.setenv("OPENCLAW_WORKSPACE", str(workspace_root))
+    monkeypatch.setattr(
+        "app.services.workspace.system_settings.get_db_session",
+        db_session_factory,
+    )
     return workspace_root
 
 
