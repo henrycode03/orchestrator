@@ -2859,6 +2859,126 @@ def test_planning_repair_prompt_has_deterministic_compact_limit():
     assert len(excerpt) < PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS + 400
 
 
+def test_profiled_planning_repair_prompt_over_budget_falls_back_to_compact(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.planning import repair_prompts
+
+    malformed_output = '[{"bad": true}]'
+    rejection_reasons = ["schema rejected"]
+    full_prompt = PlannerService.build_planning_repair_prompt(
+        "Build a page",
+        malformed_output=malformed_output,
+        project_dir=tmp_path,
+        rejection_reasons=rejection_reasons,
+    )
+    profiled_full_prompt = PlannerService.apply_prompt_profile(
+        full_prompt, "local_qwen_small_json_array"
+    )
+    compact_prompt = PlannerService.build_compact_planning_repair_prompt(
+        malformed_output,
+        rejection_reasons=rejection_reasons,
+        prompt_profile="local_qwen_small_json_array",
+    )
+    prompt_cap = len(compact_prompt) + 20
+
+    assert len(full_prompt) <= prompt_cap
+    assert len(profiled_full_prompt) > prompt_cap
+    assert len(compact_prompt) <= prompt_cap
+
+    monkeypatch.setattr(
+        repair_prompts,
+        "PLANNING_REPAIR_PROMPT_MAX_CHARS",
+        prompt_cap,
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a page",
+        malformed_output=malformed_output,
+        project_dir=tmp_path,
+        rejection_reasons=rejection_reasons,
+        prompt_profile="local_qwen_small_json_array",
+    )
+
+    assert "Repair this invalid plan into 3 to 4 executable steps." in prompt
+    assert "Output discipline for this model:" in prompt
+    assert "15. Use the smallest valid plan shape" in prompt
+    assert len(prompt) <= prompt_cap
+
+
+def test_compact_profiled_repair_prompt_over_budget_still_fails_fast(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.planning import planner as planner_module
+    from app.services.orchestration.planning import repair_prompts
+
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "execute_task": lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("repair should be skipped before runtime call")
+            )
+        },
+    )()
+    prompt_cap = 200
+    monkeypatch.setattr(
+        repair_prompts,
+        "PLANNING_REPAIR_PROMPT_MAX_CHARS",
+        prompt_cap,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "PLANNING_REPAIR_PROMPT_MAX_CHARS",
+        prompt_cap,
+    )
+
+    with pytest.raises(PlanningRepairBudgetExceeded):
+        PlannerService.repair_output(
+            runtime_service=runtime,
+            task_description="Build a page",
+            malformed_output='[{"bad": true}]',
+            project_dir=tmp_path,
+            timeout_seconds=300,
+            logger=logging.getLogger("test"),
+            emit_live=lambda *args, **kwargs: None,
+            reason="json_parse_failed",
+            rejection_reasons=["schema rejected"],
+            prompt_profile="local_qwen_small_json_array",
+        )
+
+
+def test_non_profile_planning_repair_over_budget_compaction_is_unchanged(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.planning import repair_prompts
+
+    malformed_output = '[{"bad": true}]'
+    rejection_reasons = ["schema rejected"]
+    compact_prompt = PlannerService.build_compact_planning_repair_prompt(
+        malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    prompt_cap = len(compact_prompt) + 20
+
+    monkeypatch.setattr(
+        repair_prompts,
+        "PLANNING_REPAIR_PROMPT_MAX_CHARS",
+        prompt_cap,
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a page",
+        malformed_output=malformed_output,
+        project_dir=tmp_path,
+        rejection_reasons=rejection_reasons,
+    )
+
+    assert "Repair this invalid plan into 3 to 4 executable steps." in prompt
+    assert "Output discipline for this model:" not in prompt
+    assert len(prompt) <= prompt_cap
+
+
 def test_validator_rejects_brittle_python_c_with_nested_quotes(tmp_path):
     verdict = ValidatorService.validate_plan(
         [
