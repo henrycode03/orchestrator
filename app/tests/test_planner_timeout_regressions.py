@@ -3390,6 +3390,31 @@ def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
     assert "secret prompt" not in json.dumps(metadata)
 
 
+def test_phase7f_openclaw_diagnostics_classify_boundary_and_redact_stream_tail():
+    assert (
+        OpenClawSessionService._diagnostic_invocation_kind("PHASE7F_DEBUG_REPAIR")
+        == "phase7f_debug_repair"
+    )
+    assert (
+        OpenClawSessionService._diagnostic_timeout_boundary("PHASE7F_DEBUG_REPAIR")
+        == "phase7f_debug_repair_wait_for"
+    )
+    assert OpenClawSessionService._diagnostic_invocation_kind("PLANNING") == "planning"
+    assert (
+        OpenClawSessionService._diagnostic_timeout_boundary("PLANNING")
+        == "planning_wait_for"
+    )
+
+    tail = OpenClawSessionService._diagnostic_text_tail(
+        "[tools] read failed\nAuthorization: Bearer abc.def.ghi\npassword=secret"
+    )
+
+    assert "[tools] read failed" in tail
+    assert "abc.def.ghi" not in tail
+    assert "password=secret" not in tail
+    assert "password=<redacted>" in tail
+
+
 def test_planning_repair_timeout_uses_effective_runtime_profile_timeout(monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 
