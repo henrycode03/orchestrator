@@ -400,6 +400,42 @@ class OpenClawSessionService:
             return 0
         return max(1, (len(text) + 3) // 4)
 
+    @staticmethod
+    def _diagnostic_invocation_kind(diagnostic_label: Optional[str]) -> str:
+        """Classify labeled OpenClaw calls without changing the CLI invocation."""
+
+        if diagnostic_label == "PHASE7F_DEBUG_REPAIR":
+            return "phase7f_debug_repair"
+        return "planning"
+
+    @staticmethod
+    def _diagnostic_timeout_boundary(diagnostic_label: Optional[str]) -> str:
+        """Name the owner of an OpenClaw wait timeout for runtime diagnostics."""
+
+        if diagnostic_label == "PHASE7F_DEBUG_REPAIR":
+            return "phase7f_debug_repair_wait_for"
+        return "planning_wait_for"
+
+    @staticmethod
+    def _diagnostic_text_tail(text: str, max_chars: int = 500) -> str:
+        """Return a bounded, redacted stream tail for timeout diagnostics."""
+
+        if not text:
+            return ""
+        tail = text[-max_chars:]
+        tail = re.sub(
+            r"(?i)(api[_-]?key|access[_-]?token|secret|password|bearer)\s*[:=]\s*"
+            r"['\"]?[^'\"\s,}]+",
+            r"\1=<redacted>",
+            tail,
+        )
+        tail = re.sub(
+            r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+",
+            "bearer <redacted>",
+            tail,
+        )
+        return tail
+
     async def _run_cli_prompt_with_diagnostics(
         self,
         full_cmd: List[str],
@@ -1247,10 +1283,14 @@ class OpenClawSessionService:
             cancelled = False
             timeout_boundary: Optional[str] = None
             process: Optional[asyncio.subprocess.Process] = None
+            process_pid: Optional[int] = None
+            subprocess_start_seconds: Optional[float] = None
+            subprocess_started_after_seconds: Optional[float] = None
 
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
             cli_lock_diagnostics: Dict[str, Any] = {}
+            invocation_kind = self._diagnostic_invocation_kind(diagnostic_label)
 
             async def stream_output(
                 stream,
@@ -1299,12 +1339,21 @@ class OpenClawSessionService:
                     stdout_chunks.clear()
                     stderr_chunks.clear()
                     return_code = None
+                    subprocess_start_started_at = time.monotonic()
                     process = await asyncio.create_subprocess_exec(
                         *full_cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         limit=self.STREAM_READ_LIMIT,
                         cwd=execution_cwd,
+                    )
+                    subprocess_started_at = time.monotonic()
+                    process_pid = process.pid
+                    subprocess_start_seconds = (
+                        subprocess_started_at - subprocess_start_started_at
+                    )
+                    subprocess_started_after_seconds = (
+                        subprocess_started_at - started_at
                     )
 
                     await asyncio.wait_for(
@@ -1378,7 +1427,7 @@ class OpenClawSessionService:
                     break
             except asyncio.TimeoutError:
                 timed_out = True
-                timeout_boundary = "planning_wait_for"
+                timeout_boundary = self._diagnostic_timeout_boundary(diagnostic_label)
                 try:
                     if process is not None:
                         process.kill()
@@ -1395,6 +1444,8 @@ class OpenClawSessionService:
                     f"Task timed out after {timeout_seconds}s"
                 )
                 timeout_error.runtime_diagnostics = {
+                    **(diagnostic_metadata or {}),
+                    "diagnostic_label": diagnostic_label,
                     "timeout_seconds": timeout_seconds,
                     "timeout_with_cleanup_seconds": timeout_seconds + 30,
                     "duration_seconds": round(time.monotonic() - started_at, 3),
@@ -1402,11 +1453,24 @@ class OpenClawSessionService:
                     "stderr_chars": len(stderr_text),
                     "stdout_lines": len([line for line in stdout_chunks if line]),
                     "stderr_lines": len([line for line in stderr_chunks if line]),
+                    "stdout_tail": self._diagnostic_text_tail(stdout_text),
+                    "stderr_tail": self._diagnostic_text_tail(stderr_text),
                     **self._channel_metadata(stdout_text, stderr_text),
                     **cli_lock_diagnostics,
                     "timed_out": True,
                     "cancelled": False,
                     "return_code": return_code,
+                    "process_pid": process_pid,
+                    "subprocess_start_seconds": (
+                        None
+                        if subprocess_start_seconds is None
+                        else round(subprocess_start_seconds, 3)
+                    ),
+                    "subprocess_started_after_seconds": (
+                        None
+                        if subprocess_started_after_seconds is None
+                        else round(subprocess_started_after_seconds, 3)
+                    ),
                     "timeout_boundary": timeout_boundary,
                 }
                 raise timeout_error
@@ -1456,6 +1520,8 @@ class OpenClawSessionService:
                         "stderr_chars": len(stderr_text),
                         "stdout_lines": len([line for line in stdout_chunks if line]),
                         "stderr_lines": len([line for line in stderr_chunks if line]),
+                        "stdout_tail": self._diagnostic_text_tail(stdout_text),
+                        "stderr_tail": self._diagnostic_text_tail(stderr_text),
                         **channel_metadata,
                         **cli_lock_diagnostics,
                         "output_token_estimate": self._estimate_token_count(
@@ -1471,6 +1537,17 @@ class OpenClawSessionService:
                         "timed_out": timed_out,
                         "cancelled": cancelled,
                         "return_code": return_code,
+                        "process_pid": process_pid,
+                        "subprocess_start_seconds": (
+                            None
+                            if subprocess_start_seconds is None
+                            else round(subprocess_start_seconds, 3)
+                        ),
+                        "subprocess_started_after_seconds": (
+                            None
+                            if subprocess_started_after_seconds is None
+                            else round(subprocess_started_after_seconds, 3)
+                        ),
                         "timeout_boundary": timeout_boundary,
                         "contract_violation_type": None,
                         "invocation": self._openclaw_invocation_metadata(
@@ -1478,7 +1555,7 @@ class OpenClawSessionService:
                             prompt=prompt,
                             timeout_seconds=timeout_seconds,
                             cwd=execution_cwd,
-                            invocation_kind="planning",
+                            invocation_kind=invocation_kind,
                             isolate_workspace_context=False,
                             no_output_timeout_seconds=None,
                         ),
