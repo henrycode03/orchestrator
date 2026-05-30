@@ -1,0 +1,18 @@
+{
+  "result": {
+    "blockers": [
+      "historical_fixture"
+    ],
+    "clean_success": false,
+    "path_observed": true
+  },
+  "path_observability": {
+    "debug_repair_reached": true,
+    "execution_reached": true,
+    "intended_path_observed": true,
+    "phase7f_used": false,
+    "phase7g_used": true,
+    "planning_reached": true,
+    "primary_failure_phase": "debug_repair"
+  }
+}
