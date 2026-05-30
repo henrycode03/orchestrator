@@ -1,0 +1,23 @@
+[
+  {
+    "details": {},
+    "event_type": "debug_feedback_captured"
+  },
+  {
+    "details": {
+      "debug_prompt_mode": "phase7f_bounded_debug_repair"
+    },
+    "event_type": "debug_repair_attempted"
+  },
+  {
+    "details": {
+      "phase7f_parsed_shape": {
+        "type": "text"
+      },
+      "phase7f_raw_output_excerpt": "not json",
+      "phase7f_rejection_reason": "invalid_json",
+      "reason": "phase7f_debug_repair_output_invalid"
+    },
+    "event_type": "repair_rejected"
+  }
+]

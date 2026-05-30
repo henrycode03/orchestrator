@@ -1,0 +1,13 @@
+[
+  {
+    "details": {},
+    "event_type": "debug_feedback_captured"
+  },
+  {
+    "details": {
+      "debug_prompt_mode": "phase7g_diff_repair",
+      "diff_capsule_line_count": 8
+    },
+    "event_type": "debug_repair_attempted"
+  }
+]

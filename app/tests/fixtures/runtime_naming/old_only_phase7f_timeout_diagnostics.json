@@ -1,0 +1,7 @@
+{
+  "debug_failure_class": "source_step_validation",
+  "debug_prompt_mode": "phase7f_bounded_debug_repair",
+  "failure_phase": "debug_repair",
+  "phase7f_bounded_debug_timeout": true,
+  "timed_out": true
+}
