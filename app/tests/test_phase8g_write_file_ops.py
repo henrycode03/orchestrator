@@ -1662,6 +1662,73 @@ def test_python_c_mutating_pathlib_script_is_not_simple_local_verification():
     assert _is_simple_verification_command(command) is False
 
 
+def test_compileall_files_command_is_simple_local_verification(tmp_path):
+    pkg_dir = tmp_path / "src" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (pkg_dir / "b.py").write_text("B = 2\n", encoding="utf-8")
+
+    command = "python -m compileall src/pkg/a.py src/pkg/b.py"
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is True
+
+
+def test_compileall_package_dir_command_is_simple_local_verification(tmp_path):
+    pkg_dir = tmp_path / "src" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    command = "python3 -m compileall src/pkg"
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is True
+
+
+def test_compileall_rejects_absolute_paths(tmp_path):
+    command = "python -m compileall /tmp/outside.py"
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is False
+
+
+def test_compileall_rejects_traversal(tmp_path):
+    command = "python -m compileall ../outside.py"
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is False
+
+
+def test_compileall_rejects_shell_operators(tmp_path):
+    pkg_dir = tmp_path / "src" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "a.py").write_text("A = 1\n", encoding="utf-8")
+
+    commands = [
+        "python -m compileall src/pkg/a.py; echo unsafe",
+        "python -m compileall src/pkg/a.py && echo unsafe",
+        "python -m compileall src/pkg/a.py | cat",
+        "python -m compileall src/pkg/a.py > out.txt",
+    ]
+
+    assert all(
+        _is_simple_verification_command(command, project_dir=tmp_path) is False
+        for command in commands
+    )
+
+
+def test_compileall_verification_runs_locally(tmp_path):
+    pkg_dir = tmp_path / "src" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (pkg_dir / "b.py").write_text("B = 2\n", encoding="utf-8")
+
+    result = _execute_simple_verification_step(
+        project_dir=tmp_path,
+        commands=["python -m compileall src/pkg/a.py src/pkg/b.py"],
+        verification_command="python -m compileall src/pkg/a.py src/pkg/b.py",
+    )
+
+    assert result is not None
+    assert result["status"] == "completed"
+
+
 def test_unittest_command_with_pathlib_verification_runs_locally(tmp_path):
     scripts_dir = tmp_path / "scripts"
     tests_dir = tmp_path / "tests"

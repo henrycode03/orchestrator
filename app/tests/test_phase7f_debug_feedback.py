@@ -321,6 +321,45 @@ def test_structured_write_file_safe_open_read_verification_runs_locally(
     assert ctx.orchestration_state.current_step_index == 1
 
 
+def test_structured_write_file_compileall_verification_runs_locally(
+    db_session, tmp_path
+):
+    command = "python -m compileall src/pkg/a.py"
+    runtime = _FakeRuntime([])
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/pkg/a.py"],
+        step_overrides={
+            "description": "Write Python source and compile it",
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/pkg/a.py",
+                    "content": "VALUE = 1\n",
+                }
+            ],
+            "commands": [command],
+            "verification": command,
+        },
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert runtime.prompts == []
+    assert ctx.orchestration_state.current_step_index == 1
+
+
 def test_phase7f_classifies_runtime_failures():
     assert (
         classify_debug_failure(stderr="ModuleNotFoundError: No module named 'main'")
