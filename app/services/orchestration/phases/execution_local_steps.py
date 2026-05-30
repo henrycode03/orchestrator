@@ -105,6 +105,8 @@ def _is_simple_verification_command(
     normalized = " ".join(str(command or "").strip().split())
     if not normalized:
         return False
+    if _is_safe_compileall_command(normalized, project_dir=project_dir):
+        return True
     if normalized.startswith(("python -c ", "python3 -c ")):
         return (
             _python_inline_verification_script(normalized, project_dir=project_dir)
@@ -127,6 +129,61 @@ def _is_simple_verification_command(
     return not any(
         token in normalized for token in (" >", ">>", ";", "&&", "||", "$(", "`")
     )
+
+
+def _is_safe_compileall_command(
+    command: str, *, project_dir: Path | None = None
+) -> bool:
+    normalized = " ".join(str(command or "").strip().split())
+    blocked_fragments = ("<", ">", "|", ";", "&", "$(", "`")
+    if any(fragment in normalized for fragment in blocked_fragments):
+        return False
+
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return False
+
+    if len(tokens) < 4 or tokens[:3] not in (
+        ["python", "-m", "compileall"],
+        ["python3", "-m", "compileall"],
+    ):
+        return False
+
+    operands = tokens[3:]
+    if not operands:
+        return False
+    if any(token.startswith("-") for token in operands):
+        return False
+
+    for operand in operands:
+        path_text = str(operand or "").strip()
+        if not path_text:
+            return False
+        candidate = Path(path_text)
+        if (
+            candidate.is_absolute()
+            or ".." in candidate.parts
+            or re.match(r"^[A-Za-z]:[\\/]", path_text)
+            or path_text.startswith(("~", "\\\\", "//"))
+        ):
+            return False
+        if project_dir is not None:
+            try:
+                resolved = project_dir / normalize_path_reference(
+                    path_text, project_dir
+                )
+            except TaskWorkspaceViolationError:
+                return False
+            if resolved.is_dir():
+                continue
+            if resolved.is_file() and resolved.suffix == ".py":
+                continue
+            return False
+        elif candidate.suffix != ".py":
+            return False
+
+    return True
 
 
 def _open_read_path_is_safe(path_value: str, project_dir: Path | None) -> bool:
