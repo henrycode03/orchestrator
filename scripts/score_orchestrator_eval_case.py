@@ -382,6 +382,58 @@ def _planning_validation_blocked(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _planning_root_cause_from_details(details: dict[str, Any]) -> str | None:
+    root_cause = str(details.get("planning_root_cause") or "").strip()
+    if root_cause:
+        return root_cause
+    text = _details_text(details)
+    if "python_source_syntax_invalid" in text or "invalid_python" in text:
+        return "invalid_python"
+    if "missing_source_materialization" in text:
+        return "missing_source_materialization"
+    if "missing verification" in text or "missing_verification" in text:
+        return "missing_verification"
+    if "stale_replace" in text or "patch_strategy_fallback_required" in text:
+        return "stale_replace"
+    if "framework_mismatch" in text or "undefined decorator" in text:
+        return "framework_mismatch"
+    if "repair_timeout" in text:
+        return "repair_timeout"
+    return None
+
+
+def _planning_terminal_attribution(
+    events: list[dict[str, Any]],
+) -> dict[str, str | None]:
+    terminal_state: str | None = None
+    root_cause: str | None = None
+    for event in events:
+        details = _event_details(event)
+        if str(details.get("phase") or "").lower() == "planning":
+            status = str(details.get("status") or "").strip()
+            if status:
+                terminal_state = status
+        reason = str(details.get("terminal_state") or details.get("reason") or "")
+        if reason.startswith("planning_") or reason in {
+            "repair_removed_materialization",
+            "op_contract_violation",
+            "workspace_isolation_violation",
+            "reasoning_artifact_validation_failed",
+        }:
+            terminal_state = reason
+        candidate_root_cause = _planning_root_cause_from_details(details)
+        if candidate_root_cause:
+            root_cause = candidate_root_cause
+    if str(terminal_state or "").lower() in {"accepted", "completed", "success"}:
+        root_cause = None
+    if terminal_state == "planning_circuit_breaker_opened" and not root_cause:
+        root_cause = "retry_exhausted"
+    return {
+        "terminal_state": terminal_state,
+        "planning_root_cause": root_cause or "unknown",
+    }
+
+
 def _phase7f_used(events: list[dict[str, Any]]) -> bool:
     for event in events:
         details = _event_details(event)
@@ -545,6 +597,7 @@ def _path_observability(
         checkpoint_loaded=checkpoint_loaded,
         intended_path_observed=intended_path_observed,
     )
+    planning_attribution = _planning_terminal_attribution(events)
     return {
         "planning_reached": planning_reached,
         "execution_reached": execution_reached,
@@ -558,6 +611,8 @@ def _path_observability(
         "checkpoint_loaded": checkpoint_loaded,
         "intended_path_observed": intended_path_observed,
         "primary_failure_phase": primary_failure_phase,
+        "planning_terminal_state": planning_attribution["terminal_state"],
+        "planning_root_cause": planning_attribution["planning_root_cause"],
     }
 
 
@@ -684,6 +739,10 @@ def _score_case(
             "task_failed_event_present": event_summary["task_failed"],
             "expected_signals_met": required_events["expected_signals_met"],
             "path_observed": required_events["path_observed"],
+            "planning_terminal_state": path_observability[
+                "planning_terminal_state"
+            ],
+            "planning_root_cause": path_observability["planning_root_cause"],
         },
         "path_observability": path_observability,
         "verifier": verifier,

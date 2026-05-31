@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -469,11 +470,99 @@ def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
     details = {
         "reason": "planning_validation_failed_after_repair",
         "validation_reasons": list(plan_verdict.reasons or [])[:5],
+        "planning_root_cause": _planning_root_cause_from_plan_verdict(plan_verdict),
     }
     details.update(_brittle_command_diagnostic_details(plan_verdict.details))
     details.update(_truncated_multistep_diagnostic_details(plan_verdict.details))
     details.update(_shadow_warning_details(plan_verdict.details))
     return details
+
+
+PLANNING_ROOT_CAUSES = {
+    "invalid_python",
+    "missing_verification",
+    "missing_source_materialization",
+    "stale_replace",
+    "framework_mismatch",
+    "retry_exhausted",
+    "repair_timeout",
+    "unknown",
+}
+
+
+def _normalize_planning_root_cause(value: Any) -> str:
+    root_cause = str(value or "").strip()
+    return root_cause if root_cause in PLANNING_ROOT_CAUSES else "unknown"
+
+
+def _planning_root_cause_from_issue_key(issue_key: str | None) -> str:
+    if issue_key == "stale_replace_ops_steps":
+        return "stale_replace"
+    if issue_key == "weak_verification_steps":
+        return "missing_verification"
+    return "unknown"
+
+
+def _planning_root_cause_from_immediate_repair_issues(
+    immediate_repair_issues: dict[str, Any] | None,
+) -> str:
+    issues = immediate_repair_issues or {}
+    if issues.get("stale_replace_ops_steps"):
+        return "stale_replace"
+    if issues.get("weak_verification_steps"):
+        return "missing_verification"
+    return "unknown"
+
+
+def _planning_root_cause_from_plan_verdict(plan_verdict: Any) -> str:
+    details = getattr(plan_verdict, "details", None) or {}
+    codes = {
+        str(code or "").strip().lower()
+        for code in details.get("semantic_violation_codes") or []
+    }
+    reasons = "\n".join(
+        str(reason or "") for reason in getattr(plan_verdict, "reasons", []) or []
+    )
+    text = (json.dumps(details, default=str, sort_keys=True) + "\n" + reasons).lower()
+    if "python_source_syntax_invalid" in codes or "python source syntax" in text:
+        return "invalid_python"
+    if details.get("missing_verification_steps") or "missing verification" in text:
+        return "missing_verification"
+    if "patch_strategy_fallback_required" in codes or "stale_replace" in text:
+        return "stale_replace"
+    if (
+        details.get("undefined_python_decorator_materializations")
+        or "framework_mismatch" in text
+        or "undefined decorator" in text
+    ):
+        return "framework_mismatch"
+    if (
+        details.get("missing_source_materialization")
+        or "missing_source_materialization" in codes
+        or "source materialization" in text
+    ):
+        return "missing_source_materialization"
+    return "unknown"
+
+
+def _record_planning_root_cause(retry_state: Any, root_cause: Any) -> str:
+    normalized = _normalize_planning_root_cause(root_cause)
+    if normalized != "unknown":
+        retry_state.planning_root_cause = normalized
+    return getattr(retry_state, "planning_root_cause", "unknown")
+
+
+def _terminal_planning_root_cause(
+    retry_state: Any,
+    *,
+    fallback: str = "retry_exhausted",
+) -> str:
+    root_cause = _normalize_planning_root_cause(
+        getattr(retry_state, "planning_root_cause", None)
+    )
+    if root_cause != "unknown":
+        return root_cause
+    return _normalize_planning_root_cause(fallback)
 
 
 def _repeated_physical_src_import_repair_details(
@@ -573,6 +662,10 @@ def _abort_missing_source_materialization_repair(
         return None
 
     failure_type = "planning_repair_missing_source_materialization"
+    root_cause = _record_planning_root_cause(
+        retry_state,
+        "missing_source_materialization",
+    )
     ctx.orchestration_state.status = OrchestrationStatus.ABORTED
     ctx.orchestration_state.abort_reason = (
         "Planning repair removed required source materialization"
@@ -589,6 +682,7 @@ def _abort_missing_source_materialization_repair(
         details={
             "reason": failure_type,
             "repair_reason": retry_state.last_repair_reason,
+            "planning_root_cause": root_cause,
         },
     )
     _emit_planning_diagnostics_contract_violation(
@@ -603,6 +697,7 @@ def _abort_missing_source_materialization_repair(
         semantic_violation_codes=["missing_source_materialization"],
         contract_diagnostics={
             "repair_reason": retry_state.last_repair_reason,
+            "planning_root_cause": root_cause,
         },
         output_text=output_text,
         strategy_info=failure_type,
@@ -615,6 +710,7 @@ def _abort_missing_source_materialization_repair(
             "concrete source materialization under src/ or the existing project "
             "package."
         ),
+        planning_root_cause=root_cause,
     )
     if ctx.restore_workspace_snapshot_if_needed:
         ctx.restore_workspace_snapshot_if_needed(
@@ -974,6 +1070,7 @@ class _PlanningRetryState:
         self.source_materialization_required_after_repair = False
         self.last_repair_reason = ""
         self.last_multistep_plan_step_count = 0
+        self.planning_root_cause = "unknown"
 
     @property
     def circuit_open(self) -> bool:
@@ -1508,7 +1605,9 @@ def _finalize_planning_terminal_failure(
     failure_type: str,
     failure_reason: str,
     generate_failure_summary: bool = False,
+    planning_root_cause: str | None = None,
 ) -> bool:
+    root_cause = _normalize_planning_root_cause(planning_root_cause)
     completed_at = datetime.now(UTC)
     task_execution = None
     if ctx.task_execution_id:
@@ -1564,20 +1663,24 @@ def _finalize_planning_terminal_failure(
     except Exception as knowledge_exc:
         ctx.logger.warning(
             "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
-            "handle_task_failure_called=False knowledge_recorded=False error=%s",
+            "planning_root_cause=%s handle_task_failure_called=False "
+            "knowledge_recorded=False error=%s",
             ctx.session_id,
             ctx.task_id,
             failure_type,
+            root_cause,
             knowledge_exc,
         )
         return False
 
     ctx.logger.warning(
         "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
-        "handle_task_failure_called=False knowledge_recorded=%s",
+        "planning_root_cause=%s handle_task_failure_called=False "
+        "knowledge_recorded=%s",
         ctx.session_id,
         ctx.task_id,
         failure_type,
+        root_cause,
         knowledge_recorded,
     )
     return knowledge_recorded
@@ -1588,12 +1691,14 @@ def _finalize_planning_timeout_failure(
     ctx: OrchestrationRunContext,
     failure_type: str,
     failure_reason: str,
+    planning_root_cause: str | None = None,
 ) -> bool:
     return _finalize_planning_terminal_failure(
         ctx=ctx,
         failure_type=failure_type,
         failure_reason=failure_reason,
         generate_failure_summary=True,
+        planning_root_cause=planning_root_cause,
     )
 
 

@@ -65,86 +65,12 @@ from app.services.orchestration.phases.planning_knowledge import (
 from app.services.orchestration.phases.read_only_fallbacks import (
     _read_only_stage_fallback_plan,
 )
-
-
-def _split_repaired_single_step_full_lifecycle_plan(
-    extracted_plan: Any,
-) -> list[dict[str, Any]] | None:
-    if not isinstance(extracted_plan, list) or len(extracted_plan) != 1:
-        return None
-    original = extracted_plan[0]
-    if not isinstance(original, dict):
-        return None
-
-    ops = original.get("ops") if isinstance(original.get("ops"), list) else []
-    commands = (
-        original.get("commands") if isinstance(original.get("commands"), list) else []
-    )
-    commands = [
-        str(command or "").strip() for command in commands if str(command or "").strip()
-    ]
-    expected_files = (
-        original.get("expected_files")
-        if isinstance(original.get("expected_files"), list)
-        else []
-    )
-    expected_files = [
-        str(path or "").strip().lstrip("./")
-        for path in expected_files
-        if str(path or "").strip()
-    ]
-    op_paths = [
-        str(operation.get("path") or "").strip().lstrip("./")
-        for operation in ops
-        if isinstance(operation, dict)
-        and str(operation.get("op") or "")
-        in {"write_file", "append_file", "replace_in_file"}
-        and str(operation.get("path") or "").strip()
-    ]
-    # When splitting a repaired single-step full-lifecycle plan, keep the
-    # implementation contract anchored to concrete file edits. Repair models
-    # often preserve broad/speculative expected_files from the rejected plan;
-    # carrying those into the split causes false unmaterialized-output failures.
-    material_paths = list(dict.fromkeys(op_paths or expected_files))
-    original_verification = str(original.get("verification") or "").strip()
-    verifier = (
-        _python_exists_verification_command(material_paths)
-        if material_paths
-        else original_verification
-    )
-    if not (ops or commands) or not verifier:
-        return None
-
-    implementation_step: dict[str, Any] = {
-        "step_number": 2,
-        "description": str(original.get("description") or "Apply requested change"),
-        "commands": commands,
-        "verification": verifier,
-        "rollback": original.get("rollback"),
-        "expected_files": material_paths,
-    }
-    if ops:
-        implementation_step["ops"] = ops
-
-    return [
-        {
-            "step_number": 1,
-            "description": "Inspect the current workspace",
-            "commands": ["rg --files . | sort"],
-            "verification": 'python -c "import sys; sys.exit(0)"',
-            "rollback": None,
-            "expected_files": [],
-        },
-        implementation_step,
-        {
-            "step_number": 3,
-            "description": "Verify the requested change",
-            "commands": [verifier],
-            "verification": verifier,
-            "rollback": None,
-            "expected_files": [],
-        },
-    ]
+from app.services.orchestration.phases.planning_repair_arbitration_control import (
+    arbitrate_planning_repair_candidate,
+)
+from app.services.orchestration.phases.planning_plan_shape import (
+    split_repaired_single_step_full_lifecycle_plan as _split_repaired_single_step_full_lifecycle_plan,
+)
 
 
 def _prune_unmaterialized_expected_files(
@@ -260,9 +186,14 @@ from app.services.orchestration.phases.planning_support import (
     _extract_stale_old_text_from_plan,
     _model_lane_limitation_for_invalid_planning_commands,
     _plan_contract_diagnostics,
+    _planning_root_cause_from_immediate_repair_issues,
+    _planning_root_cause_from_issue_key,
+    _planning_root_cause_from_plan_verdict,
+    _record_planning_root_cause,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
+    _terminal_planning_root_cause,
     _truncated_multistep_collapse_diagnostics,
 )
 
@@ -608,6 +539,7 @@ def execute_planning_phase(
                 total_failures = (
                     retry_state.consecutive_failures + retry_state.persisted_failures
                 )
+                root_cause = _terminal_planning_root_cause(retry_state)
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
                     f"Planning failed {total_failures} time(s) "
@@ -631,6 +563,8 @@ def execute_planning_phase(
                         "persisted_failures": retry_state.persisted_failures,
                         "consecutive_failures": retry_state.consecutive_failures,
                         "total_failures": total_failures,
+                        "terminal_state": cb_reason,
+                        "planning_root_cause": root_cause,
                     },
                 )
                 last_snippet = _last_plan_output_snippet(planning_result)
@@ -651,12 +585,17 @@ def execute_planning_phase(
                     failure_type=cb_reason,
                     failure_reason=cb_failure_reason,
                     generate_failure_summary=True,
+                    planning_root_cause=root_cause,
                 )
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "planning circuit breaker opened"
                     )
-                return {"status": "failed", "reason": cb_reason}
+                return {
+                    "status": "failed",
+                    "reason": cb_reason,
+                    "planning_root_cause": root_cause,
+                }
 
             output_result = planning_result.get("output", {})
             ctx.logger.info(
@@ -1279,6 +1218,12 @@ def execute_planning_phase(
                     f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                 )
 
+            previous_plan_for_repair_arbitration = (
+                list(ctx.orchestration_state.plan or [])
+                if retry_state.repair_prompt_used
+                and isinstance(ctx.orchestration_state.plan, list)
+                else []
+            )
             sanitized_plan = PlannerService.sanitize_common_plan_issues(
                 extracted_plan, task_prompt=ctx.prompt
             )
@@ -1400,6 +1345,23 @@ def execute_planning_phase(
                 ctx.orchestration_state.plan,
                 project_dir=ctx.orchestration_state.project_dir,
             )
+            if retry_state.repair_prompt_used:
+                arbitration_control = arbitrate_planning_repair_candidate(
+                    ctx=ctx,
+                    retry_state=retry_state,
+                    previous_plan=previous_plan_for_repair_arbitration,
+                    immediate_repair_issues=immediate_repair_issues,
+                    planning_phase_event=planning_phase_event,
+                    output_text=output_text,
+                    planning_timeout_seconds=planning_timeout_seconds,
+                    prompt_profile=prompt_profile,
+                    repair_planning_output=__repair_planning_output,
+                )
+                if arbitration_control.get("action") == "continue":
+                    planning_result = arbitration_control.get("planning_result")
+                    continue
+                if arbitration_control.get("action") == "return":
+                    return arbitration_control["result"]
             blocking_issue_keys = (
                 "non_runnable_steps",
                 "background_process_steps",
@@ -1414,6 +1376,13 @@ def execute_planning_phase(
                 for key, value in immediate_repair_issues.items()
                 if key in blocking_issue_keys and value
             }
+            if blocking_repair_issues:
+                _record_planning_root_cause(
+                    retry_state,
+                    _planning_root_cause_from_immediate_repair_issues(
+                        blocking_repair_issues
+                    ),
+                )
             if blocking_repair_issues and not retry_state.repair_prompt_used:
                 contract_violations = (
                     PlannerService.describe_planning_contract_violations(
@@ -1550,6 +1519,12 @@ def execute_planning_phase(
                     project_dir=ctx.orchestration_state.project_dir,
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
+                    _record_planning_root_cause(
+                        retry_state,
+                        _planning_root_cause_from_issue_key(
+                            second_repair_reason.issue_key
+                        ),
+                    )
                     issue_fragments = [second_repair_reason.rejection_text]
                     if second_repair_reason.issue_key == "stale_replace_ops_steps":
                         issue_fragments.extend(
@@ -1676,6 +1651,9 @@ def execute_planning_phase(
                         details={
                             "reason": "planning_invalid_commands_after_repair",
                             "blocking_repair_issues": blocking_repair_issues,
+                            "planning_root_cause": _terminal_planning_root_cause(
+                                retry_state
+                            ),
                             "stale_old_text": _extract_stale_old_text_from_plan(
                                 ctx.orchestration_state.plan,
                                 (blocking_repair_issues or {}).get(
@@ -1689,6 +1667,7 @@ def execute_planning_phase(
                     ctx=ctx,
                     failure_type="planning_invalid_commands_after_repair",
                     failure_reason=failure_reason,
+                    planning_root_cause=_terminal_planning_root_cause(retry_state),
                 )
                 return {
                     "status": "failed",
@@ -1818,6 +1797,11 @@ def execute_planning_phase(
                         exc,
                     )
             ctx.db.commit()
+            if not plan_verdict.accepted:
+                _record_planning_root_cause(
+                    retry_state,
+                    _planning_root_cause_from_plan_verdict(plan_verdict),
+                )
             schema_validation = (plan_verdict.details or {}).get("plan_schema") or {}
             if not schema_validation.get("valid", True):
                 ctx.logger.warning(
@@ -1936,6 +1920,12 @@ def execute_planning_phase(
                     project_dir=ctx.orchestration_state.project_dir,
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
+                    _record_planning_root_cause(
+                        retry_state,
+                        _planning_root_cause_from_issue_key(
+                            second_repair_reason.issue_key
+                        ),
+                    )
                     issue_fragments = [second_repair_reason.rejection_text]
                     contract_diagnostics = _plan_contract_diagnostics(
                         plan_verdict.details
@@ -2039,7 +2029,12 @@ def execute_planning_phase(
                     level="ERROR",
                     phase="planning",
                     message="[ORCHESTRATION] Plan validation failed after repair",
-                    details=_terminal_validation_failure_details(plan_verdict),
+                    details={
+                        **_terminal_validation_failure_details(plan_verdict),
+                        "planning_root_cause": _terminal_planning_root_cause(
+                            retry_state
+                        ),
+                    },
                 )
                 failure_reason = "Plan validation failed after repair: " + "; ".join(
                     plan_verdict.reasons[:4]
@@ -2048,6 +2043,7 @@ def execute_planning_phase(
                     ctx=ctx,
                     failure_type="planning_validation_failed_after_repair",
                     failure_reason=failure_reason,
+                    planning_root_cause=_terminal_planning_root_cause(retry_state),
                 )
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
@@ -2281,6 +2277,7 @@ def execute_planning_phase(
             "repair_timeout" in failure_type
             or failure_type == "planning_repair_no_output_timeout"
         )
+        root_cause = "repair_timeout" if is_repair_timeout else "unknown"
         if is_repair_timeout:
             ctx.logger.error(
                 "[ORCHESTRATION] Planning repair timed out before a valid plan was produced: %s",
@@ -2311,7 +2308,7 @@ def execute_planning_phase(
             level="ERROR",
             phase="planning",
             message=failure_message,
-            details={"reason": failure_type},
+            details={"reason": failure_type, "planning_root_cause": root_cause},
         )
         try:
             phase_finished_event = append_orchestration_event(
@@ -2327,6 +2324,7 @@ def execute_planning_phase(
                         if is_repair_timeout
                         else "timeout_or_context_overflow"
                     ),
+                    "planning_root_cause": root_cause,
                 },
             )
             write_orchestration_state_snapshot(
@@ -2346,6 +2344,7 @@ def execute_planning_phase(
             ctx=ctx,
             failure_type=failure_type,
             failure_reason=str(timeout_exc),
+            planning_root_cause=root_cause,
         )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed(
@@ -2356,6 +2355,7 @@ def execute_planning_phase(
         return {"status": "failed", "reason": failure_type}
     except SoftTimeLimitExceeded as exc:
         failure_type = _classify_planning_timeout_failure(exc, retry_state)
+        root_cause = "repair_timeout" if "repair" in failure_type else "unknown"
         ctx.logger.error(
             "[ORCHESTRATION] Planning was interrupted by the Celery soft time limit: %s",
             exc,
@@ -2371,7 +2371,7 @@ def execute_planning_phase(
                 "[ORCHESTRATION] Planning exceeded the worker soft time limit "
                 "before a valid plan was produced"
             ),
-            details={"reason": failure_type},
+            details={"reason": failure_type, "planning_root_cause": root_cause},
         )
         try:
             phase_finished_event = append_orchestration_event(
@@ -2383,6 +2383,7 @@ def execute_planning_phase(
                 details={
                     "phase": "planning",
                     "status": "soft_time_limit_exceeded",
+                    "planning_root_cause": root_cause,
                 },
             )
             write_orchestration_state_snapshot(
@@ -2405,6 +2406,7 @@ def execute_planning_phase(
                 "Planning exceeded the worker soft time limit before a valid plan "
                 "was produced"
             ),
+            planning_root_cause=root_cause,
         )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed(

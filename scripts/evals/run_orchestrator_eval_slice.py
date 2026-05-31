@@ -507,6 +507,16 @@ def _blocker_key(report: dict[str, Any]) -> str:
     return _primary_failure_phase(report)
 
 
+def _planning_root_cause(report: dict[str, Any]) -> str:
+    path_observability = report.get("path_observability") or {}
+    root_cause = path_observability.get("planning_root_cause")
+    if root_cause:
+        return str(root_cause)
+    result = report.get("result") or {}
+    root_cause = result.get("planning_root_cause")
+    return str(root_cause or "unknown")
+
+
 def _rate(count: int, total: int) -> float:
     if total <= 0:
         return 0.0
@@ -581,6 +591,9 @@ def _aggregate_case_reports(
     repeat_count = len(reports)
     phase_distribution = Counter(_primary_failure_phase(report) for report in reports)
     blocker_distribution = Counter(_blocker_key(report) for report in reports)
+    planning_root_cause_distribution = Counter(
+        _planning_root_cause(report) for report in reports
+    )
     clean_success_count = sum(1 for report in reports if _clean_success(report))
     path_observed_count = sum(
         1 for report in reports if _result_bool(report, "path_observed")
@@ -647,6 +660,12 @@ def _aggregate_case_reports(
         ),
         "most_common_blocker": _most_common(blocker_distribution),
         "blocker_distribution": dict(sorted(blocker_distribution.items())),
+        "most_common_planning_root_cause": _most_common(
+            planning_root_cause_distribution
+        ),
+        "planning_root_cause_distribution": dict(
+            sorted(planning_root_cause_distribution.items())
+        ),
         "score_readiness_summary": _aggregate_score_readiness(
             score_readiness or [],
             repeat_count,
