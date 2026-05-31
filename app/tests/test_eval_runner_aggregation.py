@@ -44,6 +44,7 @@ def _report(
     phase7f_used: bool,
     phase7g_used: bool,
     blockers: list[str],
+    planning_root_cause: str = "unknown",
 ) -> dict:
     return {
         "result": {
@@ -58,6 +59,7 @@ def _report(
             "debug_repair_reached": debug_repair_reached,
             "phase7f_used": phase7f_used,
             "phase7g_used": phase7g_used,
+            "planning_root_cause": planning_root_cause,
         },
     }
 
@@ -74,6 +76,7 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
             phase7f_used=True,
             phase7g_used=False,
             blockers=["verifier_failed"],
+            planning_root_cause="missing_verification",
         ),
         _report(
             clean_success=False,
@@ -85,6 +88,7 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
             phase7f_used=True,
             phase7g_used=True,
             blockers=["verifier_failed"],
+            planning_root_cause="missing_verification",
         ),
         _report(
             clean_success=True,
@@ -158,6 +162,11 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
     assert "phase7g_exercised_rate" not in aggregate
     assert aggregate["diff_scoped_debug_repair_exercised_rate"] == 1 / 3
     assert aggregate["most_common_blocker"] == "verifier_failed"
+    assert aggregate["most_common_planning_root_cause"] == "missing_verification"
+    assert aggregate["planning_root_cause_distribution"] == {
+        "missing_verification": 2,
+        "unknown": 1,
+    }
     assert aggregate["score_readiness_summary"] == {
         "all_runs_scoreable": False,
         "readiness_recorded_count": 3,

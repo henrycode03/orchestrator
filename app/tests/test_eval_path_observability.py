@@ -62,6 +62,85 @@ def test_path_observability_classifies_planning_validation_only_failure():
     assert result["primary_failure_phase"] == "planning_validation"
 
 
+def test_path_observability_reports_planning_terminal_root_cause():
+    case = {
+        "case_id": "python_cli_small_feature",
+        "category": "baseline_success",
+        "required_events": ["task_started"],
+    }
+    events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "planning"}},
+        {
+            "event_type": "validation_result",
+            "details": {"stage": "plan", "status": "repair_required"},
+        },
+        {
+            "event_type": "phase_event",
+            "details": {
+                "phase": "planning",
+                "reason": "planning_circuit_breaker_opened",
+                "terminal_state": "planning_circuit_breaker_opened",
+                "planning_root_cause": "missing_verification",
+            },
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "planning"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["planning_terminal_state"] == "planning_circuit_breaker_opened"
+    assert result["planning_root_cause"] == "missing_verification"
+
+
+def test_path_observability_does_not_report_historical_root_cause_after_planning_acceptance():
+    case = {
+        "case_id": "debug_import_error_repair",
+        "category": "debug_repair",
+        "required_events": ["debug_feedback_captured"],
+    }
+    events = [
+        {"event_type": "phase_started", "details": {"phase": "planning"}},
+        {
+            "event_type": "phase_event",
+            "details": {
+                "phase": "planning",
+                "reason": "post_repair_python_source_syntax_second_pass",
+                "planning_root_cause": "invalid_python",
+            },
+        },
+        {
+            "event_type": "phase_finished",
+            "details": {"phase": "planning", "status": "accepted"},
+        },
+        {"event_type": "phase_started", "details": {"phase": "execution"}},
+        {"event_type": "debug_feedback_captured", "details": {}},
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["planning_terminal_state"] == "accepted"
+    assert result["planning_root_cause"] == "unknown"
+    assert result["primary_failure_phase"] == "debug_repair"
+
+
 def test_path_observability_detects_phase7f_debug_repair():
     case = {
         "case_id": "debug_import_error_repair",

@@ -1,0 +1,255 @@
+"""Planning repair arbitration behavior controls."""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.events.telemetry import emit_phase_event
+from app.services.orchestration.phases.planning_knowledge import (
+    _log_knowledge_usage,
+    _retrieve_knowledge,
+)
+from app.services.orchestration.phases.planning_support import (
+    _PlanningRetryState,
+    _emit_planning_diagnostics_contract_violation,
+    _finalize_planning_terminal_failure,
+    _get_targeted_second_repair_reason,
+    _plan_contract_diagnostics,
+    _record_planning_root_cause,
+    _terminal_validation_failure_details,
+    _terminal_planning_root_cause,
+)
+from app.services.orchestration.planning.repair_arbitration import (
+    classify_planning_repair_candidate,
+)
+from app.services.orchestration.planning.source_api_contract import (
+    build_source_api_contract_capsule,
+)
+from app.services.orchestration.state.persistence import append_orchestration_event
+from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.validation.validator import ValidatorService
+from app.services.prompt_templates import OrchestrationStatus
+
+
+def arbitrate_planning_repair_candidate(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    previous_plan: Any,
+    immediate_repair_issues: dict[str, list[int]],
+    planning_phase_event: dict[str, Any] | None,
+    output_text: str,
+    planning_timeout_seconds: int,
+    prompt_profile: str | None,
+    repair_planning_output: Callable[..., Any],
+) -> dict[str, Any]:
+    source_api_capsule = None
+    try:
+        source_api_capsule = build_source_api_contract_capsule(
+            ctx.orchestration_state.project_dir,
+        )
+    except Exception as exc:
+        ctx.logger.debug(
+            "[ORCHESTRATION] Failed to build source/API capsule for "
+            "planning repair arbitration: %s",
+            exc,
+        )
+    arbitration = classify_planning_repair_candidate(
+        previous_plan=previous_plan,
+        repaired_plan=ctx.orchestration_state.plan,
+        project_dir=ctx.orchestration_state.project_dir,
+        source_api_capsule=source_api_capsule,
+        immediate_repair_issues=immediate_repair_issues,
+    )
+    arbitration["repair_reason"] = retry_state.last_repair_reason
+    arbitration["repair_attempts"] = retry_state.consecutive_failures
+    invalid_python_repair_candidate = "invalid_output" in arbitration.get(
+        "regression_labels", []
+    ) and (arbitration.get("python_syntax") or {}).get("status") in {
+        "regressed",
+        "still_invalid",
+    }
+    arbitration["invalid_output"] = invalid_python_repair_candidate
+    arbitration["arbitration_action"] = "none"
+    if not invalid_python_repair_candidate:
+        _emit_planning_repair_arbitration(
+            ctx,
+            arbitration=arbitration,
+            planning_phase_event=planning_phase_event,
+        )
+        return {"action": "none"}
+
+    arbitration["reason"] = "invalid_python_repair_candidate"
+    _record_planning_root_cause(retry_state, "invalid_python")
+    arbitration["planning_root_cause"] = _terminal_planning_root_cause(retry_state)
+    arbitration_plan_verdict = ValidatorService.validate_plan(
+        ctx.orchestration_state.plan,
+        output_text=output_text,
+        task_prompt=ctx.prompt,
+        execution_profile=ctx.execution_profile,
+        project_dir=ctx.orchestration_state.project_dir,
+        title=ctx.task.title if ctx.task else None,
+        description=ctx.task.description if ctx.task else None,
+        validation_severity=ctx.validation_severity,
+        workflow_profile=ctx.workflow_profile,
+        workflow_stage=ctx.workflow_stage,
+    )
+    second_repair_reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=arbitration_plan_verdict,
+        project_dir=ctx.orchestration_state.project_dir,
+    )
+    if second_repair_reason and not second_repair_reason.cap_used:
+        arbitration["arbitration_action"] = "syntax_retry"
+        _emit_planning_repair_arbitration(
+            ctx,
+            arbitration=arbitration,
+            planning_phase_event=planning_phase_event,
+        )
+        issue_fragments = [second_repair_reason.rejection_text]
+        contract_diagnostics = _plan_contract_diagnostics(
+            arbitration_plan_verdict.details
+        )
+        _emit_planning_diagnostics_contract_violation(
+            ctx,
+            reason=second_repair_reason.event_reason,
+            contract_violations=arbitration_plan_verdict.reasons,
+            semantic_violation_codes=[second_repair_reason.semantic_violation_code],
+            contract_diagnostics=contract_diagnostics,
+            output_text=output_text,
+            strategy_info=second_repair_reason.event_reason,
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="WARN",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Planning repair arbitration rejected invalid "
+                "Python candidate; starting syntax second repair pass"
+            ),
+            details={
+                "reason": "invalid_python_repair_candidate",
+                "arbitration_action": "syntax_retry",
+                "planning_root_cause": _terminal_planning_root_cause(retry_state),
+                "python_syntax": arbitration.get("python_syntax"),
+                "validation_reasons": list(arbitration_plan_verdict.reasons or [])[:5],
+                "repair_attempts": retry_state.consecutive_failures + 1,
+            },
+        )
+        validation_knowledge_ctx = _retrieve_knowledge(
+            ctx,
+            trigger_phase="validation",
+            knowledge_types=["failure_memory", "format_guide", "debug_case"],
+            query="Plan validation failed after repair: "
+            + "; ".join(arbitration_plan_verdict.reasons[:3]),
+            failure_signature=(
+                arbitration_plan_verdict.reasons[0]
+                if arbitration_plan_verdict.reasons
+                else None
+            ),
+        )
+        if validation_knowledge_ctx:
+            _log_knowledge_usage(ctx, validation_knowledge_ctx, used_in_prompt=True)
+        retry_state.last_repair_reason = second_repair_reason.event_reason
+        planning_result = repair_planning_output(
+            ctx=ctx,
+            retry_state=retry_state,
+            planning_timeout_seconds=planning_timeout_seconds,
+            malformed_output=output_text,
+            reason=f"{second_repair_reason.retry_reason}: "
+            + "; ".join(issue_fragments),
+            rejection_reasons=issue_fragments,
+            prompt_profile=prompt_profile,
+            knowledge_context=(
+                validation_knowledge_ctx
+                if (
+                    validation_knowledge_ctx
+                    and validation_knowledge_ctx.retrieved_items
+                )
+                else None
+            ),
+        )
+        setattr(retry_state, second_repair_reason.cap_attribute, True)
+        retry_state.consecutive_failures += 1
+        return {"action": "continue", "planning_result": planning_result}
+
+    arbitration["arbitration_action"] = "reject_after_retry"
+    _emit_planning_repair_arbitration(
+        ctx,
+        arbitration=arbitration,
+        planning_phase_event=planning_phase_event,
+    )
+    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+    ctx.orchestration_state.abort_reason = (
+        "Planning validation failed after repair: "
+        + "; ".join(arbitration_plan_verdict.reasons[:3])
+    )
+    ctx.logger.warning(
+        "[ORCHESTRATION] Planning repair arbitration rejected invalid Python "
+        "candidate after syntax retry was exhausted"
+    )
+    failure_details = _terminal_validation_failure_details(arbitration_plan_verdict)
+    failure_details["planning_repair_arbitration"] = arbitration
+    failure_details["planning_root_cause"] = _terminal_planning_root_cause(retry_state)
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="ERROR",
+        phase="planning",
+        message="[ORCHESTRATION] Plan validation failed after repair",
+        details=failure_details,
+    )
+    failure_reason = "Plan validation failed after repair: " + "; ".join(
+        arbitration_plan_verdict.reasons[:4]
+    )
+    _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type="planning_validation_failed_after_repair",
+        failure_reason=failure_reason,
+        planning_root_cause=_terminal_planning_root_cause(retry_state),
+    )
+    if ctx.restore_workspace_snapshot_if_needed:
+        ctx.restore_workspace_snapshot_if_needed("planning validation failure")
+    return {
+        "action": "return",
+        "result": {
+            "status": "failed",
+            "reason": "planning_validation_failed_after_repair",
+        },
+    }
+
+
+def _emit_planning_repair_arbitration(
+    ctx: OrchestrationRunContext,
+    *,
+    arbitration: dict[str, Any],
+    planning_phase_event: dict[str, Any] | None,
+) -> None:
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="INFO",
+        phase="planning",
+        message=(
+            "[ORCHESTRATION] Planning repair arbitration classified "
+            "candidate progress"
+        ),
+        details=arbitration,
+    )
+    try:
+        append_orchestration_event(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.PLANNING_REPAIR_ARBITRATION,
+            parent_event_id=(planning_phase_event or {}).get("event_id"),
+            details=arbitration,
+        )
+    except Exception as exc:
+        ctx.logger.debug(
+            "[ORCHESTRATION] Failed to persist planning repair "
+            "arbitration event: %s",
+            exc,
+        )

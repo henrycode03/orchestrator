@@ -98,11 +98,19 @@ def _patch_planning_flow_external_writes(monkeypatch):
         lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control.append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
         "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control.emit_phase_event",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
@@ -6704,6 +6712,11 @@ def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
     )
 
     _patch_planning_flow_external_writes(monkeypatch)
+    persisted_events = []
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control.append_orchestration_event",
+        lambda *args, **kwargs: persisted_events.append(kwargs) or {},
+    )
     monkeypatch.setattr(
         "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
         lambda *args, **kwargs: {
@@ -6758,6 +6771,19 @@ def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
     assert "src/app.py" in repair_calls[1]["rejection_reasons"][0]
     assert "compile(content, path, 'exec')" in repair_calls[1]["rejection_reasons"][0]
     assert ctx.orchestration_state.plan == second_repair_plan
+    arbitration_events = [
+        event
+        for event in persisted_events
+        if str(event.get("event_type")) == "planning_repair_arbitration"
+    ]
+    assert [event["details"]["arbitration_action"] for event in arbitration_events] == [
+        "syntax_retry",
+        "none",
+    ]
+    assert arbitration_events[0]["details"]["invalid_output"] is True
+    assert arbitration_events[0]["details"]["reason"] == (
+        "invalid_python_repair_candidate"
+    )
 
 
 def test_post_repair_python_source_syntax_second_repair_is_capped(
@@ -6829,6 +6855,11 @@ def test_post_repair_python_source_syntax_second_repair_is_capped(
     )
 
     _patch_planning_flow_external_writes(monkeypatch)
+    persisted_events = []
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control.append_orchestration_event",
+        lambda *args, **kwargs: persisted_events.append(kwargs) or {},
+    )
     monkeypatch.setattr(
         PlannerService,
         "should_start_with_minimal_prompt",
@@ -6862,6 +6893,19 @@ def test_post_repair_python_source_syntax_second_repair_is_capped(
     assert session_task_link.status == TaskStatus.FAILED
     assert session.status == "paused"
     assert session.is_active is False
+    arbitration_events = [
+        event
+        for event in persisted_events
+        if str(event.get("event_type")) == "planning_repair_arbitration"
+    ]
+    assert [event["details"]["arbitration_action"] for event in arbitration_events] == [
+        "syntax_retry",
+        "reject_after_retry",
+    ]
+    assert arbitration_events[-1]["details"]["invalid_output"] is True
+    assert arbitration_events[-1]["details"]["reason"] == (
+        "invalid_python_repair_candidate"
+    )
 
 
 def test_post_repair_argparse_framework_mismatch_gets_one_targeted_second_repair(
@@ -9362,6 +9406,7 @@ def test_terminal_validation_failure_details_omit_brittle_keys_when_absent():
 
     assert details == {
         "reason": "planning_validation_failed_after_repair",
+        "planning_root_cause": "unknown",
         "validation_reasons": [
             "Plan contains brittle heredoc-heavy or malformed commands"
         ],
