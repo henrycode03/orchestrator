@@ -188,7 +188,7 @@ _GLOB_META_CHARS = {"*", "?", "["}
 
 
 def _is_allowed_empty_sentinel_file(path: Path) -> bool:
-    return path.name == ".gitkeep"
+    return path.name in {".gitkeep", "__init__.py"}
 
 
 def _resolve_expected_path(

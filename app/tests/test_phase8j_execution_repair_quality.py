@@ -727,6 +727,13 @@ def test_stub_expected_files_allows_empty_gitkeep_sentinel(tmp_path):
     assert stub_expected_files(tmp_path, ["logs/.gitkeep"]) == []
 
 
+def test_stub_expected_files_allows_empty_python_package_marker(tmp_path):
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text("")
+
+    assert stub_expected_files(tmp_path, ["src/pkg/__init__.py"]) == []
+
+
 def test_stub_expected_files_still_flags_ordinary_empty_expected_file(tmp_path):
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "marker.txt").write_text("")
