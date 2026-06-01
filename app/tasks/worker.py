@@ -319,6 +319,56 @@ def execute_orchestration_task(
                 task_execution_id=task_execution_id,
             )
 
+        def _task_is_first_ordered() -> bool:
+            return getattr(task, "plan_position", None) == 1
+
+        def _project_has_blocked_after_task1() -> bool:
+            if not _task_is_first_ordered() or not project:
+                return False
+            return (
+                db.query(Task)
+                .filter(
+                    Task.project_id == project.id,
+                    Task.plan_position.isnot(None),
+                    Task.plan_position > 1,
+                    Task.status.notin_([TaskStatus.DONE, TaskStatus.CANCELLED]),
+                )
+                .first()
+                is not None
+            )
+
+        def _emit_task1_product_event(
+            event_type: str,
+            *,
+            reason: Optional[str] = None,
+            level: str = "INFO",
+        ) -> None:
+            if not _task_is_first_ordered():
+                return
+            emit_live(
+                level,
+                f"[ORCHESTRATION] Task 1 product metric: {event_type}",
+                metadata={
+                    "event_type": event_type,
+                    "phase": "task1_product_metrics",
+                    "reason": reason,
+                    "plan_position": getattr(task, "plan_position", None),
+                },
+            )
+            if (
+                event_type == "task1_execution_failed"
+                and _project_has_blocked_after_task1()
+            ):
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Project is blocked after Task 1 failure",
+                    metadata={
+                        "event_type": "project_blocked_after_task1",
+                        "phase": "task1_product_metrics",
+                        "reason": reason,
+                    },
+                )
+
         execution_profile = (
             getattr(task, "execution_profile", None)
             or getattr(session, "default_execution_profile", None)
@@ -1283,6 +1333,7 @@ def execute_orchestration_task(
                     description=task.description if task else None,
                     validation_severity=active_policy.validation_severity,
                     workflow_stage=getattr(task, "workflow_stage", None),
+                    is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                 )
                 _record_validation_verdict(
                     db,
@@ -1461,6 +1512,7 @@ def execute_orchestration_task(
                         description=task.description if task else None,
                         validation_severity=active_policy.validation_severity,
                         workflow_stage=getattr(task, "workflow_stage", None),
+                        is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                     )
                     _record_validation_verdict(
                         db,
@@ -1615,6 +1667,13 @@ def execute_orchestration_task(
                     status_message=str(planning_phase_result.get("reason") or "")[:500]
                     or None,
                 )
+                _emit_task1_product_event(
+                    "task1_execution_failed",
+                    reason=str(
+                        planning_phase_result.get("reason") or "planning_failed"
+                    ),
+                    level="WARN",
+                )
                 return planning_phase_result
 
         _save_orchestration_checkpoint(
@@ -1701,6 +1760,11 @@ def execute_orchestration_task(
             status_message=str(step_loop_result.get("reason") or "")[:500] or None,
         )
         if step_loop_result.get("status") == "failed":
+            _emit_task1_product_event(
+                "task1_execution_failed",
+                reason=str(step_loop_result.get("reason") or "task_failed"),
+                level="WARN",
+            )
             mark_session_paused(
                 session,
                 alert_level="error",
@@ -1709,6 +1773,11 @@ def execute_orchestration_task(
                 ],
             )
             db.commit()
+        elif step_loop_result.get("status") == "completed":
+            _emit_task1_product_event(
+                "task1_execution_succeeded",
+                reason=str(step_loop_result.get("reason") or "completed"),
+            )
         return step_loop_result
 
     except Exception as exc:

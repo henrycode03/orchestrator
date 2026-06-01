@@ -161,6 +161,7 @@ def arbitrate_planning_repair_candidate(
         validation_severity=ctx.validation_severity,
         workflow_profile=ctx.workflow_profile,
         workflow_stage=ctx.workflow_stage,
+        is_first_ordered_task=getattr(ctx.task, "plan_position", None) == 1,
     )
     second_repair_reason = _get_targeted_second_repair_reason(
         retry_state=retry_state,

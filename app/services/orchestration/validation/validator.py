@@ -54,6 +54,9 @@ from .integrity import (
     scan_test_file_changes,
 )
 from app.services.project.source_imports import extract_python_test_contract
+from app.services.orchestration.planning.task_bootstrap_contract import (
+    validate_task1_bootstrap_contract,
+)
 
 MAX_INITIAL_PLAN_STEPS = 4
 MAX_PLANNING_COMMAND_CHARS = 900
@@ -3362,6 +3365,7 @@ class ValidatorService:
         validation_severity: str = "standard",
         workflow_profile: Optional[str] = None,
         workflow_stage: Optional[str] = None,
+        is_first_ordered_task: bool = False,
     ) -> PlanOutcome:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -3660,6 +3664,35 @@ class ValidatorService:
             )
             details["duplicated_root_paths"] = duplicated_root_paths
 
+        task1_bootstrap_contract = None
+        task1_forbidden_path_drift: List[str] = []
+        for issue_group in (
+            unsafe_paths,
+            nested_workspace_steps,
+            nested_project_root_steps,
+            list(duplicated_root_paths.keys()) if duplicated_root_paths else [],
+        ):
+            task1_forbidden_path_drift.extend(str(item) for item in issue_group)
+        stage_allows_materialization = workflow_stage not in READ_ONLY_WORKFLOW_STAGES
+        if (
+            is_first_ordered_task
+            and profile == "implementation"
+            and stage_allows_materialization
+        ):
+            task1_bootstrap_contract = validate_task1_bootstrap_contract(
+                plan=plan,
+                task_prompt=" ".join(
+                    str(value or "") for value in (title, description, task_prompt)
+                ),
+                forbidden_path_drift=task1_forbidden_path_drift,
+            )
+            details["task1_bootstrap_contract"] = task1_bootstrap_contract.to_dict()
+            if not task1_bootstrap_contract.passed:
+                repairable.append(
+                    "Task 1 bootstrap planning contract failed: "
+                    + "; ".join(task1_bootstrap_contract.violations[:4])
+                )
+
         negative_existing_checks = cls._plan_negative_existing_file_checks(
             plan, project_dir
         )
@@ -3694,7 +3727,6 @@ class ValidatorService:
                     "missing_phases"
                 ]
 
-        stage_allows_materialization = workflow_stage not in READ_ONLY_WORKFLOW_STAGES
         if profile == "implementation":
             if (
                 cls._task_prompt_requires_materialization(
@@ -3971,8 +4003,12 @@ class ValidatorService:
             semantic_violation_codes.append("unsafe_python_append_fragment")
         if details.get("python_source_syntax_invalid"):
             semantic_violation_codes.append("python_source_syntax_invalid")
+        if task1_bootstrap_contract and task1_bootstrap_contract.violation_codes:
+            semantic_violation_codes.extend(task1_bootstrap_contract.violation_codes)
         if semantic_violation_codes:
-            details["semantic_violation_codes"] = semantic_violation_codes
+            details["semantic_violation_codes"] = list(
+                dict.fromkeys(semantic_violation_codes)
+            )
 
         verdict = ValidationVerdict(
             stage="plan",

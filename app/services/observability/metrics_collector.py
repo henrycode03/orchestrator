@@ -16,6 +16,7 @@ from app.models import (
     LogEntry,
     Project,
     Session,
+    Task,
     TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
@@ -212,6 +213,124 @@ class MetricsCollector:
                 round(success_count / repair_count, 3) if repair_count > 0 else None
             ),
             "total_repair_events": total_events,
+        }
+
+    # ------------------------------------------------------------------
+    # Task-1 product health
+    # ------------------------------------------------------------------
+
+    def task1_product_health(self, days: int = 7) -> dict[str, Any]:
+        cutoff = self._cutoff(days)
+        event_names = {
+            "task1_bootstrap_contract_passed",
+            "task1_bootstrap_contract_failed",
+            "task1_execution_succeeded",
+            "task1_execution_failed",
+            "project_blocked_after_task1",
+        }
+        event_counters = {name: 0 for name in sorted(event_names)}
+        event_rows = (
+            self.db.query(LogEntry.log_metadata)
+            .filter(
+                LogEntry.log_metadata.isnot(None),
+                LogEntry.created_at >= cutoff,
+            )
+            .all()
+        )
+        for (raw,) in event_rows:
+            event_type = str(_parse_meta(raw).get("event_type") or "")
+            if event_type in event_counters:
+                event_counters[event_type] += 1
+
+        first_tasks = (
+            self.db.query(Task)
+            .filter(
+                Task.plan_position == 1,
+                Task.created_at >= cutoff,
+            )
+            .all()
+        )
+        first_task_count = len(first_tasks)
+        first_task_done = sum(
+            1 for task in first_tasks if task.status == TaskStatus.DONE
+        )
+        first_task_failed = sum(
+            1 for task in first_tasks if task.status == TaskStatus.FAILED
+        )
+
+        blocked_after_task1 = 0
+        clean_project_completion = 0
+        for task in first_tasks:
+            later_tasks = (
+                self.db.query(Task)
+                .filter(
+                    Task.project_id == task.project_id,
+                    Task.plan_position.isnot(None),
+                    Task.plan_position > 1,
+                )
+                .all()
+            )
+            if task.status == TaskStatus.FAILED and any(
+                item.status not in {TaskStatus.DONE, TaskStatus.CANCELLED}
+                for item in later_tasks
+            ):
+                blocked_after_task1 += 1
+
+            project_tasks = (
+                self.db.query(Task)
+                .filter(
+                    Task.project_id == task.project_id,
+                    Task.plan_position.isnot(None),
+                )
+                .all()
+            )
+            if project_tasks and all(
+                item.status == TaskStatus.DONE for item in project_tasks
+            ):
+                clean_project_completion += 1
+
+        contract_passed = event_counters["task1_bootstrap_contract_passed"]
+        contract_failed = event_counters["task1_bootstrap_contract_failed"]
+        contract_total = contract_passed + contract_failed
+        execution_succeeded = event_counters["task1_execution_succeeded"]
+        execution_failed = event_counters["task1_execution_failed"]
+        execution_total = execution_succeeded + execution_failed
+
+        return {
+            "event_counters": event_counters,
+            "first_task_count": first_task_count,
+            "first_task_done": first_task_done,
+            "first_task_failed": first_task_failed,
+            "ordered_project_first_task_success_rate": (
+                round(first_task_done / first_task_count, 3)
+                if first_task_count
+                else None
+            ),
+            "task1_bootstrap_contract_failure_rate": (
+                round(contract_failed / contract_total, 3) if contract_total else None
+            ),
+            "task1_execution_failure_rate": (
+                round(execution_failed / execution_total, 3)
+                if execution_total
+                else (
+                    round(first_task_failed / first_task_count, 3)
+                    if first_task_count
+                    else None
+                )
+            ),
+            "blocked_after_task1_rate": (
+                round(blocked_after_task1 / first_task_count, 3)
+                if first_task_count
+                else None
+            ),
+            "clean_project_completion_rate": (
+                round(clean_project_completion / first_task_count, 3)
+                if first_task_count
+                else None
+            ),
+            "task1_debug_repair_recovery_rate": None,
+            "blocked_after_task1_count": blocked_after_task1,
+            "clean_project_completion_count": clean_project_completion,
         }
 
     # ------------------------------------------------------------------

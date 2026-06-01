@@ -74,6 +74,74 @@ from app.services.orchestration.phases.planning_plan_shape import (
 )
 
 
+def _is_first_ordered_task(task: Any) -> bool:
+    return getattr(task, "plan_position", None) == 1
+
+
+def _emit_task1_bootstrap_contract_event(
+    ctx: OrchestrationRunContext,
+    plan_verdict: Any,
+) -> None:
+    contract = (getattr(plan_verdict, "details", None) or {}).get(
+        "task1_bootstrap_contract"
+    )
+    if not contract or not _is_first_ordered_task(ctx.task):
+        return
+    passed = bool(contract.get("passed"))
+    event_type = (
+        "task1_bootstrap_contract_passed"
+        if passed
+        else "task1_bootstrap_contract_failed"
+    )
+    ctx.emit_live(
+        "INFO" if passed else "WARN",
+        (
+            "[ORCHESTRATION] Task 1 bootstrap contract passed"
+            if passed
+            else "[ORCHESTRATION] Task 1 bootstrap contract failed"
+        ),
+        metadata={
+            "event_type": event_type,
+            "phase": "planning",
+            "task1_bootstrap_contract": contract,
+        },
+    )
+
+
+def _task1_bootstrap_contract_passed(plan_verdict: Any) -> bool:
+    contract = (getattr(plan_verdict, "details", None) or {}).get(
+        "task1_bootstrap_contract"
+    )
+    return bool(contract and contract.get("passed"))
+
+
+def _task1_plan_failed_only_brittle_command_shape(plan_verdict: Any) -> bool:
+    details = getattr(plan_verdict, "details", None) or {}
+    reasons = list(getattr(plan_verdict, "reasons", None) or [])
+    if reasons != ["Plan contains brittle heredoc-heavy or malformed commands"]:
+        return False
+    semantic_codes = set(details.get("semantic_violation_codes") or [])
+    return not any(str(code).startswith("task1_bootstrap_") for code in semantic_codes)
+
+
+def _normalize_task1_bootstrap_plan_for_json_stability(
+    plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for step in plan:
+        updated = dict(step)
+        ops = [
+            operation
+            for operation in (updated.get("ops") or [])
+            if isinstance(operation, dict)
+            and str(operation.get("op") or "") in {"write_file", "append_file"}
+        ]
+        if ops:
+            updated["commands"] = []
+        normalized.append(updated)
+    return normalized
+
+
 from app.services.orchestration.phases.planning_support import (
     MAX_PLANNING_RETRIES,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
@@ -1423,6 +1491,7 @@ def execute_planning_phase(
                     validation_severity=ctx.validation_severity,
                     workflow_profile=ctx.workflow_profile,
                     workflow_stage=ctx.workflow_stage,
+                    is_first_ordered_task=_is_first_ordered_task(ctx.task),
                 )
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
@@ -1603,6 +1672,7 @@ def execute_planning_phase(
                 validation_severity=ctx.validation_severity,
                 workflow_profile=ctx.workflow_profile,
                 workflow_stage=ctx.workflow_stage,
+                is_first_ordered_task=_is_first_ordered_task(ctx.task),
             )
             if not plan_verdict.accepted and (plan_verdict.details or {}).get(
                 "unmaterialized_expected_files"
@@ -1638,6 +1708,7 @@ def execute_planning_phase(
                         validation_severity=ctx.validation_severity,
                         workflow_profile=ctx.workflow_profile,
                         workflow_stage=ctx.workflow_stage,
+                        is_first_ordered_task=_is_first_ordered_task(ctx.task),
                     )
             if not plan_verdict.accepted and (
                 (plan_verdict.details or {}).get("read_only_stage_mutation_steps")
@@ -1693,6 +1764,47 @@ def execute_planning_phase(
                         validation_severity=ctx.validation_severity,
                         workflow_profile=ctx.workflow_profile,
                         workflow_stage=ctx.workflow_stage,
+                        is_first_ordered_task=_is_first_ordered_task(ctx.task),
+                    )
+            if (
+                _is_first_ordered_task(ctx.task)
+                and not plan_verdict.accepted
+                and _task1_bootstrap_contract_passed(plan_verdict)
+                and _task1_plan_failed_only_brittle_command_shape(plan_verdict)
+            ):
+                normalized_plan = _normalize_task1_bootstrap_plan_for_json_stability(
+                    ctx.orchestration_state.plan
+                )
+                if normalized_plan != ctx.orchestration_state.plan:
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="INFO",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Normalized Task 1 bootstrap plan "
+                            "before repair by preferring typed file ops over "
+                            "malformed shell command text"
+                        ),
+                        details={
+                            "reason": "task1_bootstrap_json_stability_normalized",
+                            "step_count": len(normalized_plan),
+                        },
+                    )
+                    ctx.orchestration_state.plan = normalized_plan
+                    output_text = json.dumps(normalized_plan)
+                    plan_verdict = ValidatorService.validate_plan(
+                        ctx.orchestration_state.plan,
+                        output_text=output_text,
+                        task_prompt=ctx.prompt,
+                        execution_profile=ctx.execution_profile,
+                        project_dir=ctx.orchestration_state.project_dir,
+                        title=ctx.task.title if ctx.task else None,
+                        description=ctx.task.description if ctx.task else None,
+                        validation_severity=ctx.validation_severity,
+                        workflow_profile=ctx.workflow_profile,
+                        workflow_stage=ctx.workflow_stage,
+                        is_first_ordered_task=_is_first_ordered_task(ctx.task),
                     )
             record_validation_verdict(
                 ctx.db,
@@ -1702,6 +1814,7 @@ def execute_planning_phase(
                 plan_verdict.verdict,
                 parent_event_id=(planning_phase_event or {}).get("event_id"),
             )
+            _emit_task1_bootstrap_contract_event(ctx, plan_verdict)
             if not plan_verdict.accepted or plan_verdict.warning:
                 try:
                     maybe_emit_divergence_detected(

@@ -2604,6 +2604,8 @@ def execute_step_loop(
                     description=task.description if task else None,
                     validation_severity=ctx.validation_severity,
                     workflow_profile=getattr(ctx, "workflow_profile", None),
+                    workflow_stage=getattr(ctx, "workflow_stage", None),
+                    is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                 )
                 record_validation_verdict(
                     db,
