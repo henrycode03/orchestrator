@@ -117,19 +117,32 @@ def test_phase12c_negative_gate_accepts_verifier_backed_failure(tmp_path):
     assert case["evidence"]["verifier_backed_guard_evidence"] is True
 
 
-def test_phase12c_current_phase12b_evidence_is_simulation_clean(tmp_path):
-    report_dir = Path("docs/roadmap/reports/evals")
+def test_phase12c_phase12b_case_roles_are_simulation_clean(tmp_path):
     summary = tmp_path / "summary.json"
-    reports = [
-        report_dir
-        / "orchestrator-eval-v1-debug-import-error-repair-queue-20260601-010627-aggregate.json",
-        report_dir
-        / "orchestrator-eval-v1-missing-report-artifact-queue-20260601-005610-aggregate.json",
-        report_dir
-        / "orchestrator-eval-v1-fake-verification-artifact-guard-queue-20260601-010941-aggregate.json",
-        report_dir
-        / "orchestrator-eval-v1-stale-replace-repair-queue-20260601-005610-aggregate.json",
+    reports = []
+    case_rates = [
+        ("debug_import_error_repair", 2 / 3, 1.0, True, "clean_success"),
+        ("missing_report_artifact", 1.0, 1.0, True, "clean_success"),
+        (
+            "fake_verification_artifact_guard",
+            0.0,
+            1.0,
+            False,
+            "verifier_failed",
+        ),
+        ("stale_replace_repair", 1 / 3, 2 / 3, False, "verifier_failed"),
     ]
+    for case_id, clean_rate, intended_rate, stable_phase, blocker in case_rates:
+        aggregate = tmp_path / f"{case_id}.json"
+        _write_aggregate(
+            aggregate,
+            case_id=case_id,
+            clean_success_rate=clean_rate,
+            intended_path_observed_rate=intended_rate,
+            stable_primary_failure_phase=stable_phase,
+            most_common_blocker=blocker,
+        )
+        reports.append(aggregate)
 
     result = subprocess.run(
         [
