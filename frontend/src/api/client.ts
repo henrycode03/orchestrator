@@ -180,7 +180,8 @@ export const settingsAPI = {
 
 // Projects API
 export const projectsAPI = {
-  getAll: () => apiClient.get<Project[]>("/projects"),
+  getAll: (params?: { limit?: number; skip?: number }) =>
+    apiClient.get<Project[]>("/projects", { params }),
 
   getById: (id: number) => apiClient.get<Project>(`/projects/${id}`),
 
@@ -444,7 +445,8 @@ export const planningAPI = {
 
 // Tasks API
 export const tasksAPI = {
-  getAll: () => apiClient.get<Task[]>("/tasks"),
+  getAll: (params?: { limit?: number; skip?: number; status?: string }) =>
+    apiClient.get<Task[]>("/tasks", { params }),
 
   create: (data: {
     project_id: number;
