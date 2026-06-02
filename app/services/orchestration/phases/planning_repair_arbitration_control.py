@@ -362,6 +362,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
     ) or {}
     failed_requirements = bootstrap_contract.get("violation_codes") or []
     bootstrap_task_type = bootstrap_contract.get("bootstrap_task_type")
+    expected_test_reason = bootstrap_contract.get("expected_test_reason")
 
     emit_phase_event(
         ctx.orchestration_state,
@@ -376,6 +377,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
             "event": "repair_candidate_rejected_by_bootstrap_contract",
             "bootstrap_task_type": bootstrap_task_type,
             "failed_requirements": failed_requirements,
+            "expected_test_reason": expected_test_reason,
         },
     )
 
@@ -420,6 +422,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
                 "reason": second_repair_reason.event_reason,
                 "bootstrap_task_type": bootstrap_task_type,
                 "failed_requirements": failed_requirements,
+                "expected_test_reason": expected_test_reason,
                 "repair_attempts": retry_state.consecutive_failures + 1,
             },
         )
