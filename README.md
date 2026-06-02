@@ -59,7 +59,7 @@ back to `AGENT_BACKEND`. Direct planning repair is configured separately with
 - **Knowledge layer** — SQLite/Qdrant runtime with task-type and failure-signature gates; session logs expose `knowledge_used`, retrieval reason, top items, and phase
 - **Security audit** — command, path, quota, and retention policy checks; shadow-mode audit on every execution
 - **Outcome classification** — terminal reasons tracked, aggregated at `/admin/outcome-rates`
-- **Production observability** — `/health`, `/ops/metrics/summary`, `/ops/backends`, Langfuse tracing optional
+- **Production observability** — `/health`, `/ops/build-identity`, `/ops/metrics/summary`, `/ops/backends`, Langfuse tracing optional
 - **Session lifecycle** — start, pause, resume, stop, checkpoint, retry, cross-session diff
 - **Mobile bridge** — `/api/v1/mobile/*` endpoints for ClawMobile and OpenClaw status queries
 - **React dashboard** — projects, tasks, sessions, settings, operator review queue
@@ -142,6 +142,28 @@ GET /health
 ```
 Returns `200 healthy` or `503 degraded` with a per-dependency breakdown.
 
+## Build Identity
+
+Docker validation evidence should include the running build identity:
+
+```http
+GET /api/v1/ops/build-identity
+```
+
+For WSL/Docker validation, set the optional identity variables before rebuilding
+so the endpoint can prove which commit is running:
+
+```bash
+export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
+export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
+./wsl-start.sh --ollama --build --force-recreate --no-frontend
+```
+
+If `stale_container_check` is `unknown`, the container did not receive enough
+metadata to prove freshness. If it is `stale`, rebuild before using the run as
+audit or eval evidence.
+
 ## Workspace Paths
 
 Projects store `workspace_path` as a root-relative slug. API responses also include `resolved_workspace_path`; use that field when a script needs filesystem access. In Docker, resolved paths are under `/app/projects`. Host-side scripts should map that to the configured host project root, normally e.g. `/home/user/projects`, instead of resolving the slug against the repository checkout.
@@ -167,6 +189,7 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | `SECRET_KEY is unset` | Set a real `SECRET_KEY` in `.env` |
 | API calls fail from frontend | Check `VITE_API_URL` and `logs/backend.log` |
 | Login calls hit `/auth/session/login` | Rebuild/restart backend/frontend; current frontend normalizes API base to `/api/v1`, and backend keeps `/auth/*` as compatibility |
+| Validation results contradict recent code changes | Capture `/api/v1/ops/build-identity`; rebuild with identity env vars if `stale_container_check` is `unknown` or `stale` |
 | Celery jobs don't run | Confirm Redis is up; check `logs/worker.log` |
 | Project files appear inside repo checkout | Use API `resolved_workspace_path`; do not resolve relative `workspace_path` against the current shell directory |
 | Ollama not reachable from container | Set `OLLAMA_HOST=0.0.0.0` on Windows host |

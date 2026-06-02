@@ -249,6 +249,13 @@ without manual database cleanup.
 curl -fsS http://127.0.0.1:8080/health
 ```
 
+For Docker/WSL validation, also capture build identity before accepting eval or
+audit evidence:
+
+```bash
+curl -fsS http://127.0.0.1:8080/api/v1/ops/build-identity
+```
+
 4. Run backend tests:
 
 ```bash
@@ -402,10 +409,15 @@ RUNTIME_PROFILE=compact_local
 
 ```bash
 ./wsl-start.sh --ollama --check
+export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
+export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
 ./wsl-start.sh --ollama --build
 ```
 
 For backend-only validation, add `--no-frontend`.
+For audit/eval validation, capture `/api/v1/ops/build-identity` after startup
+and require `stale_container_check` to be `ok` when commit freshness matters.
 
 To ingest local `knowledge/` into the active Docker runtime during startup,
 use:
@@ -810,11 +822,19 @@ Start the backend stack through plain `wsl-start.sh`. `--ollama` is reserved
 for the compact Windows laptop Ollama path:
 
 ```bash
+export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
+export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
 LLAMA_CTX=4096 \
 LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
 LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
 ./wsl-start.sh --backend-only
 ```
+
+For audit/eval validation, capture `/api/v1/ops/build-identity` after startup.
+If `stale_container_check` is `unknown`, the running container lacks enough
+metadata to prove freshness. If it is `stale`, rebuild before using the run as
+validation evidence.
 
 To ingest `knowledge/` into the active Docker runtime while starting, run:
 
@@ -827,6 +847,7 @@ First build takes several minutes. Verify all containers are up:
 ```bash
 docker compose -f docker-compose.windows.yml ps
 curl http://localhost:8080/health
+curl http://localhost:8080/api/v1/ops/build-identity
 ```
 
 Expected health response:
