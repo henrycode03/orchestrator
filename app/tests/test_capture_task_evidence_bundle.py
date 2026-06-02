@@ -729,6 +729,157 @@ def test_capture_task_evidence_bundle_runtime_identity_structure(tmp_path):
     assert "config_source" in ri["config"]
 
 
+def test_run_replay_bundle_manifest_canonical_shape(tmp_path):
+    """run_replay_bundle.json follows the canonical RunReplayBundle v1 shape."""
+    workspace = tmp_path / "workspace"
+    journal_dir = workspace / ".openclaw" / "events"
+    journal_dir.mkdir(parents=True)
+
+    journal_events = [
+        {
+            "event_type": "checkpoint_saved",
+            "timestamp": "2026-06-02T10:01:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"checkpoint_name": "pre_repair_step_2"},
+        },
+        {
+            "event_type": "validation_result",
+            "timestamp": "2026-06-02T10:02:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "stage": "completion_validation",
+                "status": "failed",
+                "reason": "missing_test_file",
+            },
+        },
+        {
+            "event_type": "repair_generated",
+            "timestamp": "2026-06-02T10:02:30Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"attempt": 1},
+        },
+        {
+            "event_type": "repair_rejected",
+            "timestamp": "2026-06-02T10:03:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"attempt": 1, "reason": "bootstrap_contract_violation"},
+        },
+    ]
+    (journal_dir / "session_10_task_20.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in journal_events) + "\n",
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(conn, str(workspace))
+    _seed_change_set(conn)
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    manifest = _load(bundle_dir, "run_replay_bundle.json")
+
+    # top-level shape
+    assert manifest["schema_version"] == 1
+    assert "captured_at" in manifest
+    assert manifest["capture_tool"] == "scripts/capture_task_evidence_bundle.py"
+    assert "run_replay_bundle.json" in manifest["bundle_files"]
+    assert "run_replay_bundle.txt" in manifest["bundle_files"]
+
+    # ids
+    ids = manifest["ids"]
+    assert ids["session_id"] == 10
+    assert ids["task_id"] == 20
+    assert ids["task_execution_id"] == 30
+    assert ids["attempt_number"] == 1
+
+    # prompt
+    assert manifest["prompt"]["task_title"] == "Bundle Task"
+    assert "FastAPI" in (manifest["prompt"]["task_description"] or "")
+
+    # runtime_identity sections present
+    ri = manifest["runtime_identity"]
+    assert ri["source"] == "capture_time_fallback"
+    assert "build_identity" in ri
+    assert "backend_lanes" in ri
+    assert "model_names" in ri
+
+    # workspace
+    ws = manifest["workspace"]
+    assert ws["event_journal_available"] is True
+    assert "session_10_task_20.jsonl" in (ws["event_journal_path"] or "")
+    assert "session_10_task_20_state_snapshots.jsonl" in (
+        ws["state_snapshot_path"] or ""
+    )
+    assert ws["checkpoint_refs"] == ["pre_repair_step_2"]
+    assert ws["change_set"]["available"] is True
+    assert ws["change_set"]["changed_count"] == 3
+
+    # verification: contract verdicts extracted from timeline
+    verdicts = manifest["verification"]["contract_verdicts"]
+    assert len(verdicts) == 1
+    assert verdicts[0]["stage"] == "completion_validation"
+    assert verdicts[0]["status"] == "failed"
+
+    # repair counts
+    counts = manifest["repair"]["repair_event_counts"]
+    assert counts.get("repair_generated") == 1
+    assert counts.get("repair_rejected") == 1
+
+    # terminal
+    terminal = manifest["terminal"]
+    assert terminal["status"] == "failed"
+    assert terminal["failure_category"] == "completion_validation_failed"
+
+    # integrity present (may be partial when workspace exists)
+    assert "integrity" in manifest
+    assert "confidence" in manifest["integrity"]
+
+
+def test_run_replay_bundle_text_human_readable(tmp_path):
+    """run_replay_bundle.txt is a human-readable summary with key sections."""
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(conn, str(tmp_path / "missing-workspace"))
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    text_path = bundle_dir / "run_replay_bundle.txt"
+    assert text_path.exists()
+    text = text_path.read_text(encoding="utf-8")
+
+    assert "RunReplayBundle v1" in text
+    assert "Session 10 / Task 20 / Execution 30" in text
+    assert "Runtime Identity" in text
+    assert "Failure Summary" in text
+    assert "Repair Events" in text
+    assert "Replay Integrity" in text
+    assert "Bundle Files" in text
+    assert "run_replay_bundle.json" in text
+
+
 def test_capture_task_evidence_bundle_runtime_identity_with_migrations(tmp_path):
     db_path = tmp_path / "bundle.db"
     conn = sqlite3.connect(db_path)

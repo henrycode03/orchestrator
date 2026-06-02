@@ -37,8 +37,16 @@ back to `AGENT_BACKEND`. Direct planning repair is configured separately with
 
 ## Current Architecture Notes
 
-- **Bootstrap Contract** — first ordered implementation tasks are validated by
-  a deterministic bootstrap contract before execution.
+- **Bootstrap Contract** — the first ordered implementation task in a session
+  is validated by a deterministic contract before execution begins. The contract
+  checks that the planned output files match the task type: a `SOURCE_CODE` task
+  must produce implementation files; an `ARTIFACT_ONLY` task (report, checklist,
+  docs) does not require them. `MIXED` and `UNKNOWN` tasks are treated
+  conservatively. A plan that violates the contract is rejected before the agent
+  runs, and any repaired plan candidate is also checked before being accepted.
+  Diagnostics are logged under the `planning_contract` / `bootstrap_contract`
+  event types. If a run fails with `repair_candidate_rejected_by_bootstrap_contract`,
+  check the planning contract summary in the evidence bundle.
 - **BootstrapTaskType** — Phase 12T classifies bootstrap tasks as
   `SOURCE_CODE`, `ARTIFACT_ONLY`, `MIXED`, or `UNKNOWN`. Artifact-only tasks do
   not require source-code implementation files; source-code, mixed, and unknown
@@ -50,6 +58,79 @@ back to `AGENT_BACKEND`. Direct planning repair is configured separately with
 - **Test-file calibration** — Phase 12V added `expected_test_reason`
   diagnostics so checklist/report lifecycle language does not automatically
   become a source-code test-file requirement.
+
+## Stabilization Window (current)
+
+Orchestrator is in a stabilization window. No new capability phases open until
+a specific failure class repeats at least three times with a clear root cause.
+
+During this window:
+- Run ordered-project smoke using the existing post-12V workload mix (simple
+  Python CLI, `src/` layout, report/docs/checklist artifacts, Python script,
+  mixed artifact/code).
+- Classify every failure by exact class, broad family, and task position (Task 1,
+  Task 2, Task 3+). Do not act on one or two observations.
+- Feature energy for new user-facing work shifts to ClawMobile. Orchestrator
+  work is judged by whether it improves ClawMobile development and reliability.
+
+## Evidence and Replay Capture
+
+After a run completes or fails, capture a replay bundle from the host
+(outside Docker, using the host-side database file):
+
+```bash
+PYTHONPATH=. python scripts/capture_task_evidence_bundle.py \
+  --db orchestrator.db \
+  --session-id <session_id> \
+  --task-id <task_id> \
+  --task-execution-id <task_execution_id>
+```
+
+The bundle lands in `docs/roadmap/reports/evidence-bundles/` and contains:
+
+| File | Contents |
+|---|---|
+| `run_replay_bundle.json` | Canonical RunReplayBundle v1 manifest — start here |
+| `run_replay_bundle.txt` | Human-readable summary for quick review |
+| `metadata.json` | IDs, event journal ref, runtime identity |
+| `failure_summary.json` | Stored or fallback failure description |
+| `decision_timeline.json` | Merged event journal + log metadata timeline |
+| `replay_report.semantic.json` | Replay reducer output (state, integrity, drift) |
+| `workspace_evidence_summary.json` | Evidence capsule commands and file list |
+| `change_set_summary.json` | Added/modified/deleted files |
+| `planning_contract_summary.json` | Bootstrap Contract verdict for this execution |
+| `logs_summary.json` | Level counts and warning/error excerpts |
+
+For replay reducer output only (no database required):
+
+```bash
+PYTHONPATH=. python scripts/capture_replay_report.py \
+  --project-dir <workspace_path> \
+  --session-id <session_id> \
+  --task-id <task_id>
+```
+
+## Docker Rebuild After Python Changes
+
+Any change to Python source requires a container rebuild before the change is
+active in Docker/WSL deployments:
+
+```bash
+export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
+export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
+./wsl-start.sh --ollama --build          # Ollama path
+./wsl-start.sh --build --backend-only    # llama.cpp path
+```
+
+Verify the running build matches the repo commit:
+
+```bash
+curl -fsS http://127.0.0.1:8080/api/v1/ops/build-identity
+```
+
+If `stale_container_check` is `stale` or `unknown`, rebuild before treating run
+evidence as authoritative.
 
 ## Key Features
 
@@ -180,7 +261,8 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | `./stop_all.sh` | Stop all processes |
 | `./scripts/orchestrator-mobile-api.sh` | Query mobile API from shell |
 | `./scripts/security_check.sh` | Run security audit |
-| `./scripts/capture_replay_report.py` | Replay and report execution evidence |
+| `./scripts/capture_replay_report.py` | Replay reducer report from event journal |
+| `./scripts/capture_task_evidence_bundle.py` | Full evidence bundle for one TaskExecution |
 
 ## Troubleshooting
 

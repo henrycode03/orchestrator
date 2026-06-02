@@ -232,6 +232,52 @@ so ingest targets the active container runtime rather than a host-side database:
 ./wsl-start.sh --ingest-knowledge            # llama.cpp Windows device
 ```
 
+## Evidence Capture After a Run
+
+Use these commands from the host (outside the Docker container), pointing at the
+host-side `orchestrator.db` file. IDs are shown in the dashboard or returned by
+the sessions/tasks API.
+
+```bash
+# Full evidence bundle (recommended starting point)
+PYTHONPATH=. python scripts/capture_task_evidence_bundle.py \
+  --db orchestrator.db \
+  --session-id <session_id> \
+  --task-id <task_id> \
+  --task-execution-id <task_execution_id>
+
+# Replay reducer only (no database needed, just the workspace .openclaw/events/ dir)
+PYTHONPATH=. python scripts/capture_replay_report.py \
+  --project-dir <workspace_path> \
+  --session-id <session_id> \
+  --task-id <task_id>
+```
+
+The evidence bundle lands in `docs/roadmap/reports/evidence-bundles/`. Open
+`run_replay_bundle.txt` for a quick human-readable overview, or
+`run_replay_bundle.json` for the canonical machine-readable manifest.
+
+## Rebuilding After Python Source Changes
+
+Any change to Python source is **not active** until the Docker image is rebuilt.
+Running `./wsl-start.sh` without `--build` uses the cached image.
+
+```bash
+export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
+export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
+
+./wsl-start.sh --ollama --build          # compact Ollama laptop
+./wsl-start.sh --build --backend-only    # llama.cpp Windows device
+```
+
+After rebuild, confirm the running image matches the repo commit:
+
+```bash
+curl -fsS http://127.0.0.1:8080/api/v1/ops/build-identity
+# stale_container_check must be "ok"
+```
+
 ## Alpha Operator Verification Path
 
 Use this path after setup to verify the current alpha baseline. The goal is not

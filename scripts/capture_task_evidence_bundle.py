@@ -29,6 +29,8 @@ EXPECTED_FILES = (
     "change_set_summary.json",
     "planning_contract_summary.json",
     "logs_summary.json",
+    "run_replay_bundle.json",
+    "run_replay_bundle.txt",
 )
 
 
@@ -72,6 +74,10 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
 
 
 def _execution_context(
@@ -415,7 +421,9 @@ def _failure_summary(
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {str(row["name"]) for row in conn.execute(f"pragma table_info({table_name})")}
+    return {
+        str(row["name"]) for row in conn.execute(f"pragma table_info({table_name})")
+    }
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -699,6 +707,238 @@ def _replay_report_semantic(context: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _extract_checkpoint_refs(timeline: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    checkpoint_event_types = {
+        "checkpoint_saved",
+        "checkpoint_loaded",
+        "checkpoint_redirected",
+    }
+    for event in timeline.get("events") or []:
+        if event.get("event_type") in checkpoint_event_types:
+            name = str((event.get("details") or {}).get("checkpoint_name") or "")
+            if name and name not in seen:
+                refs.append(name)
+                seen.add(name)
+    return refs
+
+
+def _extract_contract_verdicts(timeline: dict[str, Any]) -> list[dict[str, Any]]:
+    verdicts: list[dict[str, Any]] = []
+    for event in timeline.get("events") or []:
+        if event.get("event_type") == "validation_result":
+            details = event.get("details") or {}
+            verdicts.append(
+                {
+                    "stage": details.get("stage"),
+                    "status": details.get("status"),
+                    "reason": details.get("reason"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+    return verdicts
+
+
+def _extract_repair_event_counts(timeline: dict[str, Any]) -> dict[str, int]:
+    _REPAIR_TYPES = {
+        "repair_generated",
+        "repair_applied",
+        "repair_rejected",
+        "debug_repair_attempted",
+        "debug_feedback_captured",
+    }
+    counts: Counter[str] = Counter()
+    for event in timeline.get("events") or []:
+        etype = str(event.get("event_type") or "")
+        if etype in _REPAIR_TYPES:
+            counts[etype] += 1
+    return dict(counts)
+
+
+def _run_replay_bundle_manifest(
+    *,
+    context: dict[str, Any],
+    runtime_identity: dict[str, Any],
+    journal: dict[str, Any],
+    failure_summary: dict[str, Any],
+    replay_report: dict[str, Any],
+    decision_timeline: dict[str, Any],
+    change_set_summary: dict[str, Any],
+) -> dict[str, Any]:
+    ri = runtime_identity
+    workspace_path = context.get("resolved_workspace_path") or context.get(
+        "workspace_path"
+    )
+
+    state_snapshot_path = None
+    if workspace_path and context.get("session_id") and context.get("task_id"):
+        state_snapshot_path = str(
+            Path(workspace_path)
+            / ".openclaw"
+            / "events"
+            / f"session_{context['session_id']}_task_{context['task_id']}_state_snapshots.jsonl"
+        )
+
+    integrity: dict[str, Any] = (
+        (replay_report.get("integrity") or {})
+        if isinstance(replay_report, dict)
+        else {}
+    )
+    artifact_state: dict[str, Any] = (
+        (replay_report.get("artifact_state") or {})
+        if isinstance(replay_report, dict)
+        else {}
+    )
+    cs = change_set_summary
+
+    return {
+        "schema_version": 1,
+        "captured_at": ri.get("captured_at"),
+        "capture_tool": "scripts/capture_task_evidence_bundle.py",
+        "bundle_files": list(EXPECTED_FILES),
+        "ids": {
+            "project_id": context.get("project_id"),
+            "project_name": context.get("project_name"),
+            "session_id": context.get("session_id"),
+            "task_id": context.get("task_id"),
+            "task_execution_id": context.get("task_execution_id"),
+            "attempt_number": context.get("attempt_number"),
+        },
+        "prompt": {
+            "task_title": context.get("task_title"),
+            "task_description": context.get("task_description"),
+            "planning_prompt_ref": None,
+        },
+        "runtime_identity": {
+            "source": ri.get("source"),
+            "build_identity": ri.get("build"),
+            "backend_lanes": ri.get("lanes"),
+            "model_names": ri.get("models"),
+            "config_source": (ri.get("config") or {}).get("config_source"),
+            "capture_note": (ri.get("config") or {}).get("capture_note"),
+        },
+        "workspace": {
+            "path": workspace_path,
+            "event_journal_path": journal.get("path"),
+            "event_journal_available": journal.get("available", False),
+            "state_snapshot_path": state_snapshot_path,
+            "checkpoint_refs": _extract_checkpoint_refs(decision_timeline),
+            "workspace_hashes": artifact_state.get("workspace_hashes") or [],
+            "change_set": {
+                "available": cs.get("available", False),
+                "changed_count": cs.get("changed_count"),
+                "added_count": cs.get("added_count"),
+                "modified_count": cs.get("modified_count"),
+                "deleted_count": cs.get("deleted_count"),
+            },
+        },
+        "verification": {
+            "commands": [],
+            "contract_verdicts": _extract_contract_verdicts(decision_timeline),
+            "scorer_result_ref": None,
+        },
+        "repair": {
+            "repair_event_counts": _extract_repair_event_counts(decision_timeline),
+        },
+        "terminal": {
+            "status": context.get("task_execution_status"),
+            "failure_category": context.get("task_error_message"),
+            "failure_summary_available": failure_summary.get("available", False),
+            "failure_summary": failure_summary.get("summary"),
+        },
+        "integrity": {
+            "confidence": integrity.get("confidence"),
+            "event_count_applied": integrity.get("event_count_applied"),
+            "findings": integrity.get("findings") or [],
+        },
+    }
+
+
+def _run_replay_bundle_text(
+    *,
+    context: dict[str, Any],
+    runtime_identity: dict[str, Any],
+    failure_summary: dict[str, Any],
+    replay_report: dict[str, Any],
+    decision_timeline: dict[str, Any],
+) -> str:
+    lines: list[str] = [
+        "RunReplayBundle v1",
+        "=" * 50,
+        "",
+    ]
+
+    session_id = context.get("session_id", "?")
+    task_id = context.get("task_id", "?")
+    te_id = context.get("task_execution_id", "?")
+    attempt = context.get("attempt_number", "?")
+    lines.append(
+        f"Session {session_id} / Task {task_id} / Execution {te_id} (Attempt {attempt})"
+    )
+    title = context.get("task_title") or ""
+    if title:
+        lines.append(f"Task:   {title}")
+    lines.append(f"Status: {context.get('task_execution_status') or 'unknown'}")
+    fc = context.get("task_error_message") or ""
+    if fc:
+        lines.append(f"Failure category: {fc}")
+    lines.append(f"Captured: {runtime_identity.get('captured_at', 'unknown')}")
+    lines.append("")
+
+    lines.append("Runtime Identity")
+    lines.append("-" * 30)
+    build = runtime_identity.get("build") or {}
+    lines.append(f"  Build SHA:    {build.get('build_git_sha', 'unknown')}")
+    lines.append(f"  Repo SHA:     {build.get('repo_git_sha', 'unknown')}")
+    lines.append(f"  Stale check:  {build.get('stale_container_check', 'unknown')}")
+    lanes = runtime_identity.get("lanes") or {}
+    lines.append(f"  Planning:     {lanes.get('planning', 'unknown')}")
+    lines.append(f"  Execution:    {lanes.get('execution', 'unknown')}")
+    lines.append(f"  Debug repair: {lanes.get('debug_repair', 'unknown')}")
+    lines.append("")
+
+    lines.append("Failure Summary")
+    lines.append("-" * 30)
+    summary_text = failure_summary.get("summary") or ""
+    if summary_text:
+        for line in str(summary_text)[:600].splitlines():
+            lines.append(f"  {line}")
+    else:
+        lines.append("  (no stored failure summary)")
+    lines.append("")
+
+    lines.append("Repair Events")
+    lines.append("-" * 30)
+    repair_counts = _extract_repair_event_counts(decision_timeline)
+    if repair_counts:
+        for etype, count in sorted(repair_counts.items()):
+            lines.append(f"  {etype}: {count}")
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append("Replay Integrity")
+    lines.append("-" * 30)
+    integrity: dict[str, Any] = (
+        (replay_report.get("integrity") or {})
+        if isinstance(replay_report, dict)
+        else {}
+    )
+    lines.append(f"  Confidence:     {integrity.get('confidence', 'unavailable')}")
+    applied = integrity.get("event_count_applied")
+    lines.append(f"  Events applied: {applied if applied is not None else 'N/A'}")
+    lines.append("")
+
+    lines.append("Bundle Files")
+    lines.append("-" * 30)
+    for fname in EXPECTED_FILES:
+        lines.append(f"  {fname}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def capture_bundle(
     *,
     db_path: str,
@@ -729,7 +969,7 @@ def capture_bundle(
         journal = _read_event_journal(context)
         runtime_identity = _runtime_identity(conn)
 
-        payloads = {
+        payloads: dict[str, Any] = {
             "metadata.json": _metadata_payload(context, journal, runtime_identity),
             "logs_summary.json": _logs_summary(rows),
             "failure_summary.json": _failure_summary(
@@ -749,11 +989,31 @@ def capture_bundle(
                 conn, task_execution_id
             ),
         }
+        payloads["run_replay_bundle.json"] = _run_replay_bundle_manifest(
+            context=context,
+            runtime_identity=runtime_identity,
+            journal=journal,
+            failure_summary=payloads["failure_summary.json"],
+            replay_report=payloads["replay_report.semantic.json"],
+            decision_timeline=payloads["decision_timeline.json"],
+            change_set_summary=payloads["change_set_summary.json"],
+        )
+        payloads["run_replay_bundle.txt"] = _run_replay_bundle_text(
+            context=context,
+            runtime_identity=runtime_identity,
+            failure_summary=payloads["failure_summary.json"],
+            replay_report=payloads["replay_report.semantic.json"],
+            decision_timeline=payloads["decision_timeline.json"],
+        )
     finally:
         conn.close()
 
     for filename in EXPECTED_FILES:
-        _write_json(bundle_dir / filename, payloads[filename])
+        payload = payloads[filename]
+        if filename.endswith(".txt"):
+            _write_text(bundle_dir / filename, payload)
+        else:
+            _write_json(bundle_dir / filename, payload)
     return bundle_dir
 
 
