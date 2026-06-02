@@ -123,52 +123,40 @@ function SessionsList() {
   const [filter, setFilter] = useState<SessionFilter>('all');
   const [query, setQuery] = useState('');
 
+  const fetchData = async (initial = false) => {
+    try {
+      const [projectsResponse, sessionsResponse, tasksResponse] = await Promise.all([
+        projectsAPI.getAll({ limit: 500 }),
+        sessionsAPI.getAll({ limit: 500 }),
+        tasksAPI.getAll({ limit: 500 }),
+      ]);
+
+      const projectMap: Record<number, Project> = {};
+      (projectsResponse.data || []).forEach(project => {
+        projectMap[project.id] = project;
+      });
+      setProjects(projectMap);
+      setSessions(sessionsResponse.data || []);
+
+      const tasksByProjectMap: Record<number, Task[]> = {};
+      (tasksResponse.data || []).forEach(task => {
+        if (!tasksByProjectMap[task.project_id]) {
+          tasksByProjectMap[task.project_id] = [];
+        }
+        tasksByProjectMap[task.project_id].push(task);
+      });
+      setTasksByProject(tasksByProjectMap);
+    } catch (error) {
+      console.error('Failed to fetch sessions:', error);
+    } finally {
+      if (initial) setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchSessions = async () => {
-      try {
-        const projectsResponse = await projectsAPI.getAll();
-        const allProjects = projectsResponse.data || [];
-
-        const projectMap: Record<number, Project> = {};
-        allProjects.forEach(project => {
-          projectMap[project.id] = project;
-        });
-        setProjects(projectMap);
-
-        const sessionPromises = allProjects.map(async (project) => {
-          try {
-            const sessionsResponse = await sessionsAPI.getByProject(project.id);
-            return sessionsResponse.data || [];
-          } catch (error) {
-            console.error(`Failed to fetch sessions for project ${project.id}:`, error);
-            return [];
-          }
-        });
-
-        const taskPromises = allProjects.map(async (project) => {
-          try {
-            const tasksResponse = await tasksAPI.getByProject(project.id);
-            return [project.id, tasksResponse.data || []] as const;
-          } catch (error) {
-            console.error(`Failed to fetch tasks for project ${project.id}:`, error);
-            return [project.id, []] as const;
-          }
-        });
-
-        const [allSessionsArrays, taskEntries] = await Promise.all([
-          Promise.all(sessionPromises),
-          Promise.all(taskPromises),
-        ]);
-        setSessions(allSessionsArrays.flat());
-        setTasksByProject(Object.fromEntries(taskEntries));
-      } catch (error) {
-        console.error('Failed to fetch sessions:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchSessions();
+    fetchData(true);
+    const id = setInterval(() => fetchData(false), 30_000);
+    return () => clearInterval(id);
   }, []);
 
   const visibleSessions = sessions

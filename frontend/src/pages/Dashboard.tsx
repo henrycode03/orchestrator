@@ -77,6 +77,13 @@ function Dashboard() {
     }
   }, [isAuthChecked, user]);
 
+  // Refresh tasks every 30s so running status stays current
+  useEffect(() => {
+    if (!isAuthChecked || !user) return;
+    const id = setInterval(fetchTasks, 30_000);
+    return () => clearInterval(id);
+  }, [isAuthChecked, user]);
+
   const fetchOutcomeRates = async () => {
     try {
       const response = await adminAPI.getOutcomeRates(50);
@@ -86,22 +93,27 @@ function Dashboard() {
     }
   };
 
-  const fetchProjects = async () => {
+  const fetchTasks = async () => {
     try {
-      const response = await projectsAPI.getAll();
-      const projectsData = response.data;
-      setProjects(projectsData);
-      
-      // Fetch tasks for all projects
-      const allTasks: Task[] = [];
-      for (const project of projectsData) {
-        const tasksResponse = await tasksAPI.getByProject(project.id);
-        allTasks.push(...tasksResponse.data);
-      }
-      setTasks(allTasks);
+      const tasksResponse = await tasksAPI.getAll({ limit: 500 });
+      setTasks(tasksResponse.data);
     } catch (error) {
       const axiosError = error as { code?: string; message?: string };
-      // Suppress timeout errors - they're expected during slow network
+      if (axiosError.code !== 'ECONNABORTED' && axiosError.code !== 'ERR_BAD_RESPONSE') {
+        console.error('Failed to fetch tasks:', axiosError.message || error);
+      }
+    }
+  };
+
+  const fetchProjects = async () => {
+    try {
+      const [projectsResponse] = await Promise.all([
+        projectsAPI.getAll({ limit: 500 }),
+      ]);
+      setProjects(projectsResponse.data);
+      await fetchTasks();
+    } catch (error) {
+      const axiosError = error as { code?: string; message?: string };
       if (axiosError.code !== 'ECONNABORTED' && axiosError.code !== 'ERR_BAD_RESPONSE') {
         console.error('Failed to fetch projects:', axiosError.message || error);
       }
