@@ -13,6 +13,13 @@ from app.services.orchestration.validation.workspace_checks import SOURCE_EXTENS
 
 
 TEST_ROOTS = {"test", "tests", "spec", "specs"}
+EXPECTED_TEST_REASON_EXPLICIT_CODE_TEST_INTENT = "explicit_code_test_intent"
+EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT = "existing_project_tests_present"
+EXPECTED_TEST_REASON_MIXED_TASK_CODE_COMPONENT = "mixed_task_code_component"
+EXPECTED_TEST_REASON_UNKNOWN_CONSERVATIVE = "unknown_conservative"
+EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT = (
+    "artifact_only_no_code_test_intent"
+)
 PLACEHOLDER_RE = re.compile(
     r"\b(?:pass|todo|fixme|stub|placeholder|notimplemented|notimplementederror)\b|"
     r"\bnot[-_\s]*implemented\b",
@@ -42,6 +49,7 @@ class TaskBootstrapContract:
     python_import_targets: list[str] = field(default_factory=list)
     forbidden_python_src_imports: list[str] = field(default_factory=list)
     missing_python_package_markers: list[str] = field(default_factory=list)
+    expected_test_reason: str | None = None
     minimum_implementation_evidence: bool = False
     minimum_artifact_evidence: bool = False
 
@@ -60,6 +68,7 @@ class TaskBootstrapContract:
             "python_import_targets": list(self.python_import_targets),
             "forbidden_python_src_imports": list(self.forbidden_python_src_imports),
             "missing_python_package_markers": list(self.missing_python_package_markers),
+            "expected_test_reason": self.expected_test_reason,
             "minimum_implementation_evidence": self.minimum_implementation_evidence,
             "minimum_artifact_evidence": self.minimum_artifact_evidence,
         }
@@ -246,6 +255,61 @@ def _verification_commands(plan: list[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(commands))
 
 
+def _has_explicit_code_test_intent(task_prompt: str) -> bool:
+    prompt_lower = str(task_prompt or "").lower()
+    positive_test_intent_text = re.sub(
+        r"\b(?:do not|don't|without)\s+"
+        r"(?:create|write|add|implement|include|use|update|provide)\b"
+        r"[^.;\n]*(?:tests?|pytest|unit\s+tests?|test\s+files?)",
+        " ",
+        prompt_lower,
+    )
+    explicit_patterns = [
+        r"\b(?:with|include|add|write|create|update|provide)\s+"
+        r"(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
+        r"\bwith\b[^.;\n]{0,80}\btests?\b",
+        r"\band\s+(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
+        r"\b[a-z_][a-z0-9_-]*\s+tests?\b",
+        r"\b(?:pytest|unit\s+tests?|test\s+files?|test\s+coverage)\b",
+        r"\btests?\s+(?:for|that|cover|exercise|import)\b",
+    ]
+    return any(
+        re.search(pattern, positive_test_intent_text) for pattern in explicit_patterns
+    )
+
+
+def _expected_test_reason(
+    *,
+    bootstrap_task_type: BootstrapTaskType,
+    task_prompt: str,
+    all_paths: set[str],
+    existing_files: set[str],
+    source_candidates: list[str],
+) -> str | None:
+    if any(_is_test_path(path) for path in existing_files):
+        return EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT
+
+    has_explicit_test_intent = _has_explicit_code_test_intent(task_prompt)
+    if has_explicit_test_intent and bootstrap_task_type in {
+        BootstrapTaskType.SOURCE_CODE,
+        BootstrapTaskType.MIXED,
+    }:
+        return EXPECTED_TEST_REASON_EXPLICIT_CODE_TEST_INTENT
+
+    if bootstrap_task_type == BootstrapTaskType.MIXED and source_candidates:
+        return EXPECTED_TEST_REASON_MIXED_TASK_CODE_COMPONENT
+
+    if bootstrap_task_type == BootstrapTaskType.UNKNOWN and (
+        has_explicit_test_intent or any(_is_source_path(path) for path in all_paths)
+    ):
+        return EXPECTED_TEST_REASON_UNKNOWN_CONSERVATIVE
+
+    if bootstrap_task_type == BootstrapTaskType.ARTIFACT_ONLY:
+        return EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT
+
+    return None
+
+
 def _minimum_artifact_evidence(plan: list[dict[str, Any]]) -> bool:
     for step in plan:
         for operation in step.get("ops") or []:
@@ -366,9 +430,10 @@ def build_task1_bootstrap_contract(
     materialized = _materialized_file_targets(plan)
     declared = _declared_expected_files(plan)
     all_paths = materialized | declared
-    known_paths = all_paths | {
+    normalized_existing_files = {
         _normalize_path(path) for path in existing_files or set()
     }
+    known_paths = all_paths | normalized_existing_files
     bootstrap_task_type, classification_evidence = _classify_bootstrap_task_type(
         task_prompt=task_prompt,
         all_paths=all_paths,
@@ -390,6 +455,13 @@ def build_task1_bootstrap_contract(
     required_source_files = sorted(set(source_candidates) | set(package_markers))
     required_test_files = sorted(set(test_candidates))
     required_artifacts = sorted(set(required_source_files) | set(required_test_files))
+    expected_test_reason = _expected_test_reason(
+        bootstrap_task_type=bootstrap_task_type,
+        task_prompt=task_prompt,
+        all_paths=all_paths,
+        existing_files=normalized_existing_files,
+        source_candidates=source_candidates,
+    )
     if bootstrap_task_type == BootstrapTaskType.ARTIFACT_ONLY:
         required_source_files = []
         required_test_files = []
@@ -410,6 +482,7 @@ def build_task1_bootstrap_contract(
         python_import_targets=import_targets,
         forbidden_python_src_imports=forbidden_src_imports,
         missing_python_package_markers=missing_package_markers,
+        expected_test_reason=expected_test_reason,
         minimum_implementation_evidence=_minimum_implementation_evidence(plan),
         minimum_artifact_evidence=_minimum_artifact_evidence(plan),
     )
@@ -441,8 +514,12 @@ def validate_task1_bootstrap_contract(
         violations.append("Task 1 bootstrap must declare or materialize source files")
         codes.append("task1_bootstrap_missing_expected_source_files")
 
-    prompt_lower = str(task_prompt or "").lower()
-    if "test" in prompt_lower and not contract.expected_test_files:
+    if (
+        contract.expected_test_reason
+        and contract.expected_test_reason
+        != EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT
+        and not contract.expected_test_files
+    ):
         violations.append(
             "Task 1 bootstrap prompt asks for tests but no test files are declared or materialized"
         )

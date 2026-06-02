@@ -216,7 +216,7 @@ def test_bootstrap_contract_passing_verdict_has_passed_true(tmp_path):
 
 def test_rejection_diagnostic_emitted_with_correct_fields(tmp_path):
     """repair_candidate_rejected_by_bootstrap_contract event must contain
-    event, bootstrap_task_type, and failed_requirements."""
+    event, bootstrap_task_type, failed_requirements, and expected_test_reason."""
     ctx = _make_ctx(plan=_plan_without_verification(), project_dir=tmp_path)
     retry_state = _make_retry_state()
     bootstrap_verdict = _bootstrap_failing_verdict(tmp_path)
@@ -249,6 +249,7 @@ def test_rejection_diagnostic_emitted_with_correct_fields(tmp_path):
     event = rejection_events[0]
     assert "bootstrap_task_type" in event
     assert "failed_requirements" in event
+    assert "expected_test_reason" in event
     assert isinstance(event["failed_requirements"], list)
 
 

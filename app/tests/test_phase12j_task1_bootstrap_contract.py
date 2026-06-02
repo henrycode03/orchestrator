@@ -122,6 +122,132 @@ def test_task1_bootstrap_rejects_requested_tests_without_test_files(tmp_path):
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
     assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
+    assert contract["expected_test_reason"] == "explicit_code_test_intent"
+
+
+def test_task1_artifact_checklist_test_lifecycle_word_does_not_require_test_files(
+    tmp_path,
+):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "CHECKLIST.md",
+                        "content": (
+                            "# Release Checklist\n\n"
+                            "- Build the artifact.\n"
+                            "- Test the release candidate manually.\n"
+                            "- Deploy after approval.\n"
+                        ),
+                    }
+                ],
+                expected_files=["CHECKLIST.md"],
+                verification=(
+                    'python -c "from pathlib import Path; '
+                    "text=Path('CHECKLIST.md').read_text(); "
+                    "assert 'Deploy after approval' in text\""
+                ),
+            )
+        ],
+        output_text="[]",
+        task_prompt=(
+            "Create an operational checklist artifact covering build, test, "
+            "deploy, and rollback as checklist items. Do not create source code."
+        ),
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert verdict.accepted
+    assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
+    assert contract["expected_test_reason"] == "artifact_only_no_code_test_intent"
+    assert (
+        "task1_bootstrap_missing_expected_test_files" not in contract["violation_codes"]
+    )
+
+
+def test_task1_existing_project_tests_keep_test_requirement(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_app.py").write_text("def test_existing():\n    assert True\n")
+
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "src/app.py",
+                        "content": "def answer():\n    return 42\n",
+                    }
+                ],
+                expected_files=["src/app.py"],
+                verification="python -m pytest -q",
+            )
+        ],
+        output_text="[]",
+        task_prompt="Extend the existing app implementation",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert not verdict.accepted
+    assert contract["expected_test_reason"] == "existing_project_tests_present"
+    assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
+
+
+def test_task1_unknown_type_with_explicit_tests_remains_conservative(tmp_path):
+    verdict = validate_task1_bootstrap_contract(
+        plan=[
+            _step(
+                commands=["python -c \"print('inspect')\""],
+                verification="python -m pytest -q",
+            )
+        ],
+        task_prompt="Create the first project slice with tests",
+    )
+
+    contract = verdict.to_dict()
+    assert not verdict.passed
+    assert contract["bootstrap_task_type"] == "UNKNOWN"
+    assert contract["expected_test_reason"] == "unknown_conservative"
+    assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
+
+
+def test_task1_mixed_code_component_requires_test_diagnostic(tmp_path):
+    verdict = validate_task1_bootstrap_contract(
+        plan=[
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "src/app.py",
+                        "content": "def answer():\n    return 42\n",
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "README.md",
+                        "content": "# App\n\nUsage documentation for the app.\n",
+                    },
+                ],
+                expected_files=["src/app.py", "README.md"],
+                verification="python -m pytest -q",
+            )
+        ],
+        task_prompt="Create a mixed project with a small Python utility and docs",
+    )
+
+    contract = verdict.to_dict()
+    assert not verdict.passed
+    assert contract["bootstrap_task_type"] == "MIXED"
+    assert contract["expected_test_reason"] == "mixed_task_code_component"
+    assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
 
 
 def test_task1_repair_source_preservation_is_not_enough_when_tests_disappear(tmp_path):
