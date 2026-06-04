@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from .ollama_adapter import create_runtime as create_ollama_runtime
+from .openai_chat_adapter import create_runtime as create_openai_chat_runtime
 from .openai_adapter import create_runtime as create_openai_runtime
 from .openclaw_adapter import create_runtime as create_openclaw_runtime
 from .remote_openclaw_adapter import create_runtime as create_remote_openclaw_runtime
@@ -15,6 +16,7 @@ _RUNTIME_FACTORIES: dict[str, RuntimeFactory] = {
     "local_openclaw": create_openclaw_runtime,
     "remote_openclaw_gateway": create_remote_openclaw_runtime,
     "openai_responses_api": create_openai_runtime,
+    "openai_chat_completions": create_openai_chat_runtime,
     "direct_ollama": create_ollama_runtime,
 }
 
@@ -27,6 +29,7 @@ def get_runtime_factory(backend_name: str) -> Optional[RuntimeFactory]:
 
 __all__ = [
     "create_ollama_runtime",
+    "create_openai_chat_runtime",
     "create_openai_runtime",
     "create_openclaw_runtime",
     "create_remote_openclaw_runtime",

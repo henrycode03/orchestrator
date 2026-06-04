@@ -10,6 +10,9 @@ from app.services.agents.agent_runtime import (
 )
 from app.services.agents.providers import get_runtime_factory
 from app.services.agents.providers.openai_adapter import OpenAIResponsesRuntime
+from app.services.agents.providers.openai_chat_adapter import (
+    OpenAIChatCompletionsRuntime,
+)
 from app.services.agents.openclaw_service import (
     OpenClawSessionError,
     OpenClawSessionService,
@@ -47,6 +50,13 @@ def test_create_agent_runtime_supports_openai_backend(db_session, monkeypatch):
     assert runtime.backend_descriptor.name == "openai_responses_api"
 
 
+def test_create_agent_runtime_supports_openai_chat_backend(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_chat_completions")
+    runtime = create_agent_runtime(db_session, session_id=None)
+    assert isinstance(runtime, OpenAIChatCompletionsRuntime)
+    assert runtime.backend_descriptor.name == "openai_chat_completions"
+
+
 def test_openai_runtime_uses_planner_model_for_planning_role(db_session, monkeypatch):
     monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
     monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_responses_api")
@@ -60,6 +70,23 @@ def test_openai_runtime_uses_planner_model_for_planning_role(db_session, monkeyp
     assert isinstance(runtime, OpenAIResponsesRuntime)
     assert runtime.backend_role == "planning"
     assert runtime.get_backend_metadata()["model_family"] == "gpt-planner"
+
+
+def test_openai_chat_runtime_uses_planner_model_for_planning_role(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "local-planner")
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_MODEL", "default-local")
+
+    runtime = create_agent_runtime(
+        db_session, session_id=None, role=BackendRole.PLANNING
+    )
+
+    assert isinstance(runtime, OpenAIChatCompletionsRuntime)
+    assert runtime.backend_role == "planning"
+    assert runtime.get_backend_metadata()["model_family"] == "local-planner"
 
 
 def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
@@ -215,6 +242,7 @@ def test_provider_registry_exposes_runtime_factory():
     assert get_runtime_factory("local_openclaw") is not None
     assert get_runtime_factory("remote_openclaw_gateway") is not None
     assert get_runtime_factory("openai_responses_api") is not None
+    assert get_runtime_factory("openai_chat_completions") is not None
     assert get_runtime_factory("unknown_backend") is None
 
 
@@ -348,3 +376,48 @@ def test_invoke_runtime_prompt_supports_openai_backend(db_session, monkeypatch):
     assert result["status"] == "completed"
     assert result["response_id"] == "resp_123"
     assert result["backend"] == "openai_responses_api"
+
+
+def test_invoke_runtime_prompt_supports_openai_chat_backend(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(
+        settings, "OPENAI_CHAT_COMPLETIONS_BASE_URL", "http://amd:8001/v1"
+    )
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_API_KEY", "dummy")
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_MODEL", "local")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '[{"step":1,"ops":[]}]'}}]}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            assert url == "http://amd:8001/v1/chat/completions"
+            assert headers["Authorization"] == "Bearer dummy"
+            assert json["model"] == "local"
+            assert json["messages"][0]["role"] == "system"
+            assert json["messages"][1]["role"] == "user"
+            return _FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.agents.providers.openai_chat_adapter.httpx.AsyncClient",
+        _FakeAsyncClient,
+    )
+
+    result = invoke_runtime_prompt(db_session, "Return JSON only")
+
+    assert result["status"] == "completed"
+    assert result["output"] == '[{"step":1,"ops":[]}]'
+    assert result["backend"] == "openai_chat_completions"

@@ -53,6 +53,9 @@ from app.services.orchestration.planning.repair_prompts import (
     compact_invalid_output_excerpt as _compact_invalid_output_excerpt,
     render_repair_knowledge_block as _render_repair_knowledge_block,
 )
+from app.services.orchestration.planning.repair_evidence import (
+    record_pending_planning_repair_triplet,
+)
 from app.services.project.index_service import (
     build_project_index,
     render_project_structure_capsule,
@@ -950,6 +953,37 @@ class PlannerService:
         return dict(operation)
 
     @staticmethod
+    def _extract_top_level_named_file_ops(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+        supported_keys = ("write_file", "append_file", "replace_in_file")
+        operations: List[Dict[str, Any]] = []
+        for op_name in supported_keys:
+            payload = step.get(op_name)
+            if not isinstance(payload, dict):
+                continue
+            if op_name in {"write_file", "append_file"}:
+                normalized = {
+                    "op": op_name,
+                    "path": payload.get("path"),
+                    "content": payload.get("content"),
+                }
+            else:
+                normalized = {
+                    "op": op_name,
+                    "path": payload.get("path"),
+                    "old": payload.get("old"),
+                    "new": payload.get("new"),
+                }
+                for key in (
+                    *REPLACE_IN_FILE_OLD_ALIASES,
+                    *REPLACE_IN_FILE_NEW_ALIASES,
+                ):
+                    if key in payload:
+                        normalized[key] = payload[key]
+            if validate_file_op_shape(normalized):
+                operations.append(normalized)
+        return operations
+
+    @staticmethod
     def _normalize_file_op_key_alias(
         operation: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
@@ -1411,7 +1445,8 @@ class PlannerService:
                         ):
                             step.setdefault("verification", top_level_verification)
                 elif top_level_op := cls._extract_top_level_file_op(raw_step):
-                    raw_ops = [top_level_op]
+                    raw_ops.append(top_level_op)
+                raw_ops.extend(cls._extract_top_level_named_file_ops(raw_step))
                 if top_level_verification := cls._extract_top_level_file_verification(
                     raw_step
                 ):
@@ -3479,6 +3514,27 @@ Return only a JSON array matching this shape. No markdown. No prose.
                     "openclaw_first_output_after_seconds": runtime_diagnostics.get(
                         "first_output_after_seconds"
                     ),
+                },
+            )
+            record_pending_planning_repair_triplet(
+                project_dir=project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                repair_attempt=_repair_attempt_number,
+                previous_plan_text=malformed_output,
+                repair_prompt=repair_prompt,
+                repaired_plan_text=str(result.get("output") or ""),
+                metadata={
+                    "repair_reason": reason[:240],
+                    "repair_backend": result.get("backend"),
+                    "repair_prompt_chars": len(repair_prompt),
+                    "malformed_output_chars": compact_malformed_output_chars,
+                    "repair_output_chars": repair_output_chars,
+                    "normalized_output_chars": len(str(result.get("output") or "")),
+                    "repair_duration_seconds": round(repair_duration_seconds, 3),
+                    "repair_attempts": _repair_attempt_number,
+                    "compact_no_output_retry": _compact_no_output_retry,
+                    **repair_prompt_metadata,
                 },
             )
             result.pop("_planning_lock_diagnostics", None)

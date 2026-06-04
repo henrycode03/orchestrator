@@ -25,6 +25,9 @@ from app.services.orchestration.planning.repair_strategies import (
 from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
+from app.services.orchestration.planning.source_materialization import (
+    plan_source_materialization_paths,
+)
 from app.services.project.source_imports import (
     extract_python_test_contract,
     imported_source_excerpts_from_tests,
@@ -338,6 +341,9 @@ def build_planning_repair_prompt_with_metadata(
         "triple-quoted Python blocks; do not place bare multiline code outside "
         "JSON quotes; output must remain a valid JSON array."
     )
+    materialization_preservation_guidance = (
+        _build_materialization_preservation_guidance(malformed_output)
+    )
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons
     )
@@ -362,6 +368,7 @@ def build_planning_repair_prompt_with_metadata(
         rejection_reasons=rejection_reasons,
     )
     validation_guidance_block = _join_optional_blocks(
+        materialization_preservation_guidance,
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
@@ -1013,6 +1020,31 @@ def _build_grounded_source_edit_repair_guidance(
     )
 
 
+def _build_materialization_preservation_guidance(malformed_output: str) -> str:
+    try:
+        parsed = json.loads(str(malformed_output or ""))
+    except Exception:
+        return ""
+
+    paths = sorted(plan_source_materialization_paths(parsed))
+    if not paths:
+        return ""
+
+    rendered_paths = ", ".join(paths[:8])
+    if len(paths) > 8:
+        rendered_paths += ", ..."
+
+    return "\n".join(
+        [
+            "Source materialization preservation contract:",
+            "- If the rejected plan already materializes source or test files, the repaired plan must preserve those materialization obligations.",
+            "- Do not remove write_file, append_file, or replace_in_file operations for implementation or test paths unless you replace them with equivalent operations that create or update the same required files.",
+            "- A repaired plan that removes required source/test materialization is invalid even if the JSON shape is otherwise valid.",
+            f"- Required materialization paths from the rejected plan: {rendered_paths}",
+        ]
+    )
+
+
 def _build_brittle_inline_python_repair_guidance(
     rejection_reasons: Optional[list[str]],
 ) -> str:
@@ -1307,6 +1339,9 @@ def build_compact_planning_repair_prompt(
         "triple-quoted Python blocks; do not place bare multiline code outside "
         "JSON quotes; output must remain a valid JSON array."
     )
+    materialization_preservation_guidance = (
+        _build_materialization_preservation_guidance(malformed_output)
+    )
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons
     )
@@ -1326,6 +1361,7 @@ def build_compact_planning_repair_prompt(
         rejection_reasons
     )
     validation_guidance_block = _join_optional_blocks(
+        materialization_preservation_guidance,
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,

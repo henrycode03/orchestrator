@@ -29,6 +29,9 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
+from app.services.orchestration.planning.repair_evidence import (
+    write_failed_planning_repair_triplet,
+)
 from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
@@ -94,6 +97,12 @@ def arbitrate_planning_repair_candidate(
         arbitration["planning_root_cause"] = root_cause
         arbitration["materialization_regression_paths"] = (
             materialization_regression_paths[:20]
+        )
+        _attach_failed_repair_triplet_evidence(
+            ctx=ctx,
+            arbitration=arbitration,
+            previous_plan=previous_plan,
+            output_text=output_text,
         )
         _emit_planning_repair_arbitration(
             ctx,
@@ -293,6 +302,12 @@ def arbitrate_planning_repair_candidate(
         return {"action": "continue", "planning_result": planning_result}
 
     arbitration["arbitration_action"] = "reject_after_retry"
+    _attach_failed_repair_triplet_evidence(
+        ctx=ctx,
+        arbitration=arbitration,
+        previous_plan=previous_plan,
+        output_text=output_text,
+    )
     _emit_planning_repair_arbitration(
         ctx,
         arbitration=arbitration,
@@ -480,6 +495,12 @@ def _reject_repair_candidate_by_bootstrap_contract(
     # No repair budget for Bootstrap Contract — terminate with specific reason.
     arbitration["arbitration_action"] = "reject_bootstrap_contract_no_budget"
     arbitration["reason"] = "repair_candidate_rejected_by_bootstrap_contract"
+    _attach_failed_repair_triplet_evidence(
+        ctx=ctx,
+        arbitration=arbitration,
+        previous_plan=[],
+        output_text=output_text,
+    )
     try:
         append_orchestration_event(
             project_dir=ctx.orchestration_state.project_dir,
@@ -521,6 +542,34 @@ def _reject_repair_candidate_by_bootstrap_contract(
             "reason": "repair_candidate_rejected_by_bootstrap_contract",
         },
     }
+
+
+def _attach_failed_repair_triplet_evidence(
+    *,
+    ctx: OrchestrationRunContext,
+    arbitration: dict[str, Any],
+    previous_plan: Any,
+    output_text: str,
+) -> None:
+    try:
+        artifact_ref = write_failed_planning_repair_triplet(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            repair_attempt=int(arbitration.get("repair_attempts") or 1),
+            previous_plan=previous_plan,
+            repaired_plan=ctx.orchestration_state.plan,
+            repaired_output_text=output_text,
+            arbitration=arbitration,
+        )
+    except Exception as exc:
+        ctx.logger.warning(
+            "[ORCHESTRATION] Failed to persist planning repair triplet evidence: %s",
+            exc,
+        )
+        return
+    if artifact_ref:
+        arbitration["planning_repair_evidence"] = artifact_ref
 
 
 def _emit_planning_repair_arbitration(

@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     OPENCLAW_CLI_ARGS: str = ""
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_CHAT_COMPLETIONS_BASE_URL: str = ""
+    OPENAI_CHAT_COMPLETIONS_API_KEY: str = ""
+    OPENAI_CHAT_COMPLETIONS_MODEL: str = ""
     MOBILE_GATEWAY_API_KEY: str = ""
     AGENT_BACKEND: str = (
         "local_openclaw"  # BACKEND_COUPLING: default names OpenClaw directly; future backends register here

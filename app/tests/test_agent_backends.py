@@ -39,6 +39,7 @@ def test_supported_backends_contains_registered_future_metadata():
 
     assert "local_openclaw" in names
     assert "openai_responses_api" in names
+    assert "openai_chat_completions" in names
     backend = next(
         descriptor
         for descriptor in descriptors
@@ -51,6 +52,15 @@ def test_supported_backends_contains_registered_future_metadata():
     assert backend.config.tool_call_shape == "responses_tools"
     assert backend.lane_traits.evidence_following == "strong"
     assert backend.health.status in {"ready", "degraded"}
+
+    chat_backend = next(
+        descriptor
+        for descriptor in descriptors
+        if descriptor.name == "openai_chat_completions"
+    )
+    assert chat_backend.implemented is True
+    assert chat_backend.config.prompt_dialect == "openai_chat_completions"
+    assert chat_backend.config.auth_mode == "optional_api_key"
 
 
 def test_resolve_adaptation_profile_prefers_matching_backend_and_model_family():

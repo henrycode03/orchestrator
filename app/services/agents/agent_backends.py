@@ -217,6 +217,40 @@ def _check_openai_backend_health(descriptor: BackendDescriptor) -> BackendHealth
     )
 
 
+def _check_openai_chat_backend_health(descriptor: BackendDescriptor) -> BackendHealth:
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not (
+        settings.OPENAI_CHAT_COMPLETIONS_BASE_URL or settings.OPENAI_BASE_URL
+    ).strip():
+        errors.append(
+            "OPENAI_CHAT_COMPLETIONS_BASE_URL or OPENAI_BASE_URL is required."
+        )
+    if not (
+        settings.OPENAI_CHAT_COMPLETIONS_MODEL
+        or settings.PLANNER_MODEL
+        or settings.AGENT_MODEL
+    ).strip():
+        errors.append(
+            "OPENAI_CHAT_COMPLETIONS_MODEL, PLANNER_MODEL, or AGENT_MODEL is required."
+        )
+    if not (
+        settings.OPENAI_CHAT_COMPLETIONS_API_KEY or settings.OPENAI_API_KEY
+    ).strip():
+        warnings.append(
+            "No OpenAI-compatible chat API key is configured; this is acceptable for local llama.cpp endpoints."
+        )
+
+    return BackendHealth(
+        available=not errors,
+        ready=not errors,
+        status="ready" if not errors else "degraded",
+        errors=errors,
+        warnings=warnings,
+    )
+
+
 def _check_direct_ollama_health(descriptor: BackendDescriptor) -> BackendHealth:
     errors: List[str] = []
     # Config-only check — does not verify Ollama is reachable or model is pulled.
@@ -452,6 +486,49 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             ),
         ),
         health_check=_check_direct_ollama_health,
+    ),
+    "openai_chat_completions": _BackendRegistration(
+        descriptor=_base_descriptor(
+            name="openai_chat_completions",
+            display_name="OpenAI-Compatible Chat Completions",
+            implementation="app.services.agents.providers.openai_chat_adapter.create_runtime",
+            default_model_family="local",
+            implemented=True,
+            capabilities=BackendCapabilities(
+                supports_planning=True,
+                supports_step_execution=False,
+                supports_debug_repair=False,
+                supports_streaming=False,
+                supports_checkpoint_resume=False,
+                supports_tool_execution=False,
+                supports_json_mode=False,
+                mcp_capable=False,
+                max_context_tokens=None,
+                reliability_tier="local",
+                latency_tier="local",
+            ),
+            lane_traits=BackendLaneTraits(
+                structured_output_reliability="variable",
+                repair_convergence="bounded",
+                large_context_stability="bounded",
+                tool_discipline="no_tools",
+                evidence_following="standard",
+                latency_cost_class="local",
+            ),
+            config=BackendConfigMetadata(
+                auth_mode="optional_api_key",
+                transport_mode="local_http",
+                required_env_vars=[],
+                supported_prompt_format="plain_text",
+                prompt_dialect="openai_chat_completions",
+                tool_call_shape="none",
+                streaming_mode="none",
+                adaptation_profiles=["ollama_default"],
+                preferred_retry_strategy="schema_first",
+                context_window_policy="truncate_context",
+            ),
+        ),
+        health_check=_check_openai_chat_backend_health,
     ),
 }
 

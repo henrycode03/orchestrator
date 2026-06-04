@@ -54,6 +54,10 @@ from app.services.orchestration.policy import (
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
     clamp_planning_timeout,
 )
+from app.services.orchestration.planning.repair_evidence import (
+    record_pending_planning_repair_triplet,
+    write_failed_planning_repair_triplet,
+)
 from app.services.agents.openclaw_service import (
     OpenClawSessionError,
     OpenClawSessionService,
@@ -531,6 +535,131 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
     assert "no extra keys except optional `ops`" in prompt
     assert "No markdown. No prose." in prompt
     assert 'Objects like {"steps": [...]} instead of a top-level array' in prompt
+
+
+def test_planning_repair_prompt_preserves_existing_source_materialization(tmp_path):
+    (tmp_path / "src" / "small_cli").mkdir(parents=True)
+    (tmp_path / "src" / "small_cli" / "__init__.py").write_text("")
+    (tmp_path / "src" / "small_cli" / "cli.py").write_text(
+        "def main(argv=None):\n    return 0\n"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_cli.py").write_text(
+        "from small_cli.cli import main\n\n"
+        "def test_main_returns_zero():\n"
+        "    assert main([]) == 0\n"
+    )
+    rejected_plan = [
+        {
+            "step_number": 1,
+            "description": "Update CLI source and tests",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/small_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "tests/test_cli.py",
+                    "content": "from small_cli.cli import main\n",
+                },
+            ],
+            "verification": "python -m pytest",
+            "rollback": None,
+            "expected_files": ["src/small_cli/cli.py", "tests/test_cli.py"],
+        }
+    ]
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a small Python CLI feature and tests.",
+        malformed_output=json.dumps(rejected_plan),
+        project_dir=tmp_path,
+        rejection_reasons=["plan_contains_immediate_repair_issues"],
+    )
+
+    assert "Source materialization preservation contract:" in prompt
+    assert "the repaired plan must preserve those materialization obligations" in prompt
+    assert (
+        "Do not remove write_file, append_file, or replace_in_file operations" in prompt
+    )
+    assert (
+        "A repaired plan that removes required source/test materialization is invalid"
+        in prompt
+    )
+    assert "src/small_cli/cli.py" in prompt
+    assert "tests/test_cli.py" in prompt
+
+
+def test_failed_planning_repair_triplet_evidence_is_redacted(tmp_path):
+    previous_plan = [
+        {
+            "step_number": 1,
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/small_cli/cli.py",
+                    "content": "def main(): return 0",
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 1,
+            "commands": ["python -m pytest"],
+            "ops": [],
+        }
+    ]
+
+    record_pending_planning_repair_triplet(
+        project_dir=tmp_path,
+        session_id=11,
+        task_id=22,
+        repair_attempt=1,
+        previous_plan_text=json.dumps(previous_plan),
+        repair_prompt=(
+            "Repair this plan. OPENAI_API_KEY=sk-testsecret1234567890 "
+            "Authorization: Bearer abc.def"
+        ),
+        repaired_plan_text=json.dumps(repaired_plan),
+        metadata={"api_key": "sk-anothersecret123456"},
+    )
+
+    artifact_ref = write_failed_planning_repair_triplet(
+        project_dir=tmp_path,
+        session_id=11,
+        task_id=22,
+        repair_attempt=1,
+        previous_plan=previous_plan,
+        repaired_plan=repaired_plan,
+        repaired_output_text=json.dumps(repaired_plan),
+        arbitration={
+            "outcome": "regressed",
+            "arbitration_action": "reject_materialization_regression",
+            "regression_labels": ["removed_materialization"],
+        },
+    )
+
+    assert artifact_ref is not None
+    artifact_path = (
+        tmp_path
+        / ".openclaw"
+        / "planning-repair-evidence"
+        / ("session_11_task_22_repair_attempt_1_failed.json")
+    )
+    payload = json.loads(artifact_path.read_text())
+    serialized = json.dumps(payload)
+
+    assert payload["artifact_type"] == "planning_repair_failed_arbitration_triplet"
+    assert payload["previous_plan"][0]["ops"][0]["path"] == "src/small_cli/cli.py"
+    assert payload["repaired_plan"][0]["ops"] == []
+    assert "repair_prompt" in payload
+    assert "sk-testsecret1234567890" not in serialized
+    assert "sk-anothersecret123456" not in serialized
+    assert "abc.def" not in serialized
+    assert "<redacted>" in serialized
 
 
 def test_minimal_and_ultra_minimal_planning_prompts_include_contract_example():
@@ -8769,6 +8898,151 @@ def test_concrete_source_materialization_guard_accepts_normalized_o_alias_write_
         }
     ]
     assert _plan_has_concrete_source_materialization(sanitized, tmp_path)
+
+
+def test_planning_repair_normalizes_top_level_write_file_into_ops(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit source",
+            "commands": [],
+            "verification": None,
+            "rollback": None,
+            "expected_files": ["src/small_cli/cli.py"],
+            "write_file": {
+                "path": "src/small_cli/cli.py",
+                "content": "def main(argv=None):\n    return 0\n",
+            },
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "src/small_cli/cli.py",
+            "content": "def main(argv=None):\n    return 0\n",
+        }
+    ]
+    assert _plan_has_concrete_source_materialization(sanitized, tmp_path)
+
+
+def test_planning_repair_normalizes_top_level_append_and_replace_into_ops():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit files",
+            "commands": [],
+            "verification": None,
+            "rollback": None,
+            "expected_files": ["tests/test_cli.py", "src/small_cli/cli.py"],
+            "append_file": {
+                "path": "tests/test_cli.py",
+                "content": "\ndef test_uppercase():\n    assert True\n",
+            },
+            "replace_in_file": {
+                "path": "src/small_cli/cli.py",
+                "old": "return message",
+                "new": "return message.upper()",
+            },
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {
+            "op": "append_file",
+            "path": "tests/test_cli.py",
+            "content": "\ndef test_uppercase():\n    assert True\n",
+        },
+        {
+            "op": "replace_in_file",
+            "path": "src/small_cli/cli.py",
+            "old": "return message",
+            "new": "return message.upper()",
+        },
+    ]
+
+
+def test_planning_repair_preserves_existing_valid_ops_when_normalizing_top_level_ops():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/existing.py",
+                    "content": "VALUE = 1\n",
+                }
+            ],
+            "write_file": {
+                "path": "src/new_file.py",
+                "content": "VALUE = 2\n",
+            },
+            "verification": None,
+            "rollback": None,
+            "expected_files": ["src/existing.py", "src/new_file.py"],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {"op": "write_file", "path": "src/existing.py", "content": "VALUE = 1\n"},
+        {"op": "write_file", "path": "src/new_file.py", "content": "VALUE = 2\n"},
+    ]
+
+
+def test_planning_repair_unknown_top_level_keys_are_not_converted():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Unknown operation",
+            "commands": [],
+            "verification": None,
+            "rollback": None,
+            "expected_files": [],
+            "copy_file": {
+                "path": "src/small_cli/cli.py",
+                "content": "ignored",
+            },
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert "ops" not in sanitized[0]
+
+
+def test_planning_repair_malformed_top_level_file_ops_are_ignored_safely():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Malformed operation",
+            "commands": [],
+            "verification": None,
+            "rollback": None,
+            "expected_files": ["src/small_cli/cli.py"],
+            "write_file": {
+                "path": "src/small_cli/cli.py",
+            },
+            "append_file": {
+                "content": "missing path",
+            },
+            "replace_in_file": {
+                "path": "src/small_cli/cli.py",
+                "old": "return message",
+            },
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert "ops" not in sanitized[0]
 
 
 def test_concrete_source_materialization_guard_accepts_source_replace_in_file(
