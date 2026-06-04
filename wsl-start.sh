@@ -127,6 +127,11 @@ EXPECTED_OLLAMA_ABSENT="${EXPECTED_OLLAMA_ABSENT:-$(env_file_value EXPECTED_OLLA
 COMPOSE_FILE="docker-compose.windows.yml"
 BACKEND_PORT=8080
 FRONTEND_PORT=3000
+# llama.cpp sampling controls. Environment variables override .env values.
+LLAMA_TEMP="${LLAMA_TEMP:-$(env_file_value LLAMA_TEMP 0.0)}"
+LLAMA_TOP_P="${LLAMA_TOP_P:-$(env_file_value LLAMA_TOP_P 0.85)}"
+LLAMA_REPEAT_PENALTY="${LLAMA_REPEAT_PENALTY:-$(env_file_value LLAMA_REPEAT_PENALTY 1.05)}"
+
 # Resolve Windows host IP from WSL2 default gateway.
 # Falls back to /etc/resolv.conf nameserver (also reliable in WSL2).
 # If both fail, exits early — all Windows-side services depend on this address.
@@ -494,7 +499,7 @@ else
     info "Starting llama-server (model load takes 20-60 seconds)..."
     powershell.exe -Command "
         Start-Process -FilePath '$LLAMA_EXE' \`
-            -ArgumentList '-m \"$MODEL_PATH\" --host 0.0.0.0 --port $LLAMA_PORT -ngl 99 -c $LLAMA_CTX -b $LLAMA_BATCH -ub $LLAMA_UBATCH --threads $LLAMA_THREADS --threads-batch $LLAMA_THREADS_BATCH -ctk q8_0 -ctv q8_0 --flash-attn on --jinja' \`
+            -ArgumentList '-m \"$MODEL_PATH\" --host 0.0.0.0 --port $LLAMA_PORT -ngl 99 -c $LLAMA_CTX -b $LLAMA_BATCH -ub $LLAMA_UBATCH --threads $LLAMA_THREADS --threads-batch $LLAMA_THREADS_BATCH --temp $LLAMA_TEMP --top-p $LLAMA_TOP_P --repeat-penalty $LLAMA_REPEAT_PENALTY -ctk q8_0 -ctv q8_0 --flash-attn on --jinja' \`
             -WindowStyle Normal
     " 2>/dev/null &
 

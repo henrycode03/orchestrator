@@ -492,6 +492,34 @@ Rules:
             active_source_api_contract_block,
             "",
         )
+    if (
+        knowledge_block
+        and structure_capsule
+        and "REPAIR KNOWLEDGE REFERENCES" not in prompt
+    ):
+        compact_structure_capsule = _truncate_repair_structure_capsule(
+            structure_capsule,
+            max_chars=420,
+        )
+        compact_source_api_contract_block = (
+            source_api_contract_minimal_block
+            or source_api_contract_compact_block
+            or active_source_api_contract_block
+        )
+        compact_candidate = _compose_prompt(
+            compact_structure_capsule,
+            "",
+            compact_source_api_contract_block,
+            knowledge_block,
+        )
+        if len(compact_candidate) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            prompt = compact_candidate
+            active_source_context_block = ""
+            active_source_api_contract_block = compact_source_api_contract_block
+            prompt_metadata["source_api_contract_compacted"] = bool(
+                compact_source_api_contract_block
+                and compact_source_api_contract_block != source_api_contract_block
+            )
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
         fallback_source_api_block = (
             source_api_contract_minimal_block
@@ -1188,7 +1216,10 @@ def _build_stale_replace_target_preservation_guidance(
             for operation in step.get("ops") or []:
                 if not isinstance(operation, dict):
                     continue
-                path = str(operation.get("path") or "").strip().lstrip("./")
+                path = _resolve_repair_source_path(
+                    project_dir=project_dir,
+                    path=str(operation.get("path") or "").strip().lstrip("./"),
+                )
                 if path.startswith("src/") and path not in existing_source_paths:
                     existing_source_paths.append(path)
 
@@ -1204,7 +1235,7 @@ def _build_stale_replace_target_preservation_guidance(
 
     def _format_paths(paths: list[str]) -> str:
         return (
-            ", ".join(paths[:6])
+            "\n- " + "\n- ".join(paths[:6])
             if paths
             else "all source files named by tests/source context"
         )
@@ -1220,6 +1251,29 @@ def _build_stale_replace_target_preservation_guidance(
             "- Keep simple scalar verification on final pytest/test steps, for example `python3 -m pytest -q`.",
         ]
     )
+
+
+def _resolve_repair_source_path(*, project_dir: Path, path: str) -> str:
+    candidate = str(path or "").strip().lstrip("./")
+    if not candidate:
+        return ""
+    if candidate.startswith("src/"):
+        return candidate
+    try:
+        root = Path(project_dir).resolve()
+        direct = (root / candidate).resolve()
+        direct.relative_to(root)
+        if direct.is_file():
+            return direct.relative_to(root).as_posix()
+        matches = sorted(root.glob(f"src/**/{Path(candidate).name}"))
+        for match in matches:
+            resolved = match.resolve()
+            resolved.relative_to(root)
+            if resolved.is_file():
+                return resolved.relative_to(root).as_posix()
+    except Exception:
+        return candidate
+    return candidate
 
 
 def _build_existing_test_contract_repair_guidance(
@@ -1521,6 +1575,7 @@ Required repair:
 - do not emit another replace_in_file for the same missing old text or stale target.
 - Use a write_file op for `{target_line}` with the full corrected file content.
 - Preserve existing imports, public functions, and CLI shape from the current file excerpt.
+Stale replace second-pass target preservation:
 - Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while fixing this stale target.
 - Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.
 - Preserve all required source targets named by tests/source context.
