@@ -132,8 +132,6 @@ def _collect_touched_files(
             "files_changed",
             "changed_files",
             "actual_files",
-            "expected_artifacts",
-            "missing_expected_files",
         )
         for key in candidate_keys:
             for path in _as_list(details.get(key)):

@@ -560,7 +560,7 @@ def _normalize_planning_root_cause(value: Any) -> str:
 
 
 def _planning_root_cause_from_issue_key(issue_key: str | None) -> str:
-    if issue_key == "stale_replace_ops_steps":
+    if issue_key in ("stale_replace_ops_steps", "empty_replace_old_text_steps"):
         return "stale_replace"
     if issue_key == "weak_verification_steps":
         return "missing_verification"
@@ -571,7 +571,9 @@ def _planning_root_cause_from_immediate_repair_issues(
     immediate_repair_issues: dict[str, Any] | None,
 ) -> str:
     issues = immediate_repair_issues or {}
-    if issues.get("stale_replace_ops_steps"):
+    if issues.get("stale_replace_ops_steps") or issues.get(
+        "empty_replace_old_text_steps"
+    ):
         return "stale_replace"
     if issues.get("weak_verification_steps"):
         return "missing_verification"
@@ -1381,6 +1383,25 @@ _SECOND_REPAIR_BLOCKING_POLICIES: dict[str, _SecondRepairPolicy] = {
             "the output must remain a valid JSON array"
         ),
     ),
+    "empty_replace_old_text_steps": _SecondRepairPolicy(
+        issue_key="empty_replace_old_text_steps",
+        issue_label="replace_in_file operations with missing old text",
+        retry_reason="post_repair_empty_replace_fallback",
+        event_reason="post_repair_empty_replace_fallback_pass",
+        semantic_violation_code="patch_strategy_fallback_required",
+        cap_attribute="post_repair_stale_replace_second_repair_used",
+        rejection_template=(
+            "empty_replace_old_text_steps: steps {steps} use replace_in_file "
+            "without specifying old text to search for. Exact-text patching "
+            "cannot be applied without an anchor; do not emit another "
+            "replace_in_file for the same target without complete, literal search "
+            "text. Use ops.write_file with complete preserved file content "
+            "grounded in the current file excerpt. write_file.content must be a "
+            "JSON string; escape newline characters as \\n; do not use raw "
+            "triple-quoted Python blocks; do not place bare multiline code outside "
+            "JSON string quotes; the output must remain a valid JSON array"
+        ),
+    ),
     "test_assertion_loss_ops_steps": _SecondRepairPolicy(
         issue_key="test_assertion_loss_ops_steps",
         issue_label="test assertion loss",
@@ -1505,6 +1526,23 @@ def _second_repair_reason_from_policy(
     )
 
 
+# Replace-fallback keys and which co-occurring blocking issues prevent it.
+# stale + empty can trigger patch_strategy_fallback_required even alongside
+# compatible co-issues (weak verification, background process). They are blocked
+# only when incompatible structural issues coexist that require different repair.
+_REPLACE_FALLBACK_KEYS: frozenset[str] = frozenset(
+    {"stale_replace_ops_steps", "empty_replace_old_text_steps"}
+)
+_REPLACE_FALLBACK_INCOMPATIBLE_KEYS: frozenset[str] = frozenset(
+    {
+        "non_runnable_steps",
+        "placeholder_only_steps",
+        "test_assertion_loss_ops_steps",
+        "test_deletion_ops_steps",
+    }
+)
+
+
 def _get_targeted_second_repair_reason(
     *,
     retry_state: _PlanningRetryState,
@@ -1536,6 +1574,24 @@ def _get_targeted_second_repair_reason(
                 policy,
                 (blocking_repair_issues or {}).get(issue_key) or [],
             )
+
+    # Allow replace fallback when co-occurring with compatible issues.
+    # Fires only when no incompatible structural issue is present.
+    replace_keys_present = issue_keys & _REPLACE_FALLBACK_KEYS
+    if replace_keys_present and not (issue_keys & _REPLACE_FALLBACK_INCOMPATIBLE_KEYS):
+        # stale_replace_ops_steps takes priority over empty_replace_old_text_steps
+        # since it has more specific workspace context to include in the prompt.
+        issue_key = (
+            "stale_replace_ops_steps"
+            if "stale_replace_ops_steps" in replace_keys_present
+            else "empty_replace_old_text_steps"
+        )
+        policy = _SECOND_REPAIR_BLOCKING_POLICIES[issue_key]
+        return _second_repair_reason_from_policy(
+            retry_state,
+            policy,
+            (blocking_repair_issues or {}).get(issue_key) or [],
+        )
 
     missing_verification_steps = (
         _post_repair_missing_verification_steps(plan_verdict) if plan_verdict else []

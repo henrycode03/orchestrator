@@ -1211,7 +1211,9 @@ def execute_step_loop(
             status=step_status,
             output=step_output[:1000],
             verification_output=assessment.verification_output,
-            files_changed=step_result.get("files_changed", expected_files),
+            files_changed=step_result.get(
+                "files_changed", expected_files if step_ops else []
+            ),
             error_message=step_result.get("error", ""),
             attempt=current_attempt,
         )

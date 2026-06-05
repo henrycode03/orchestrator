@@ -117,3 +117,145 @@ def test_debug_repair_chat_helper_rejects_unsupported_content_shape_as_empty():
     body = {"choices": [{"message": {"content": {"text": "unsupported"}}}]}
 
     assert OpenClawSessionService._extract_chat_completion_content(body) == ""
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage: plan-specified boundary cases
+# ---------------------------------------------------------------------------
+
+
+def test_top_level_json_array_produces_string_output():
+    """Top-level JSON list is handled without TypeError."""
+    result, _ = _parse_stdout(json.dumps([{"a": 1}, {"b": 2}]))
+
+    assert isinstance(result["output"], str)
+    assert isinstance(result["status"], str)
+
+
+def test_aborted_payload_returns_failed():
+    result, _ = _parse_stdout(
+        json.dumps({"aborted": True, "finalAssistantVisibleText": "partial"})
+    )
+
+    assert result["status"] == "failed"
+
+
+def test_aborted_payload_with_timeout_text_sets_timeout_error():
+    result, _ = _parse_stdout(json.dumps({"aborted": True, "text": "timeout occurred"}))
+
+    assert result["status"] == "failed"
+    assert "timed out" in result["error"].lower()
+
+
+def test_empty_stdout_returns_failed():
+    result, _ = _parse_stdout("")
+
+    assert result["status"] == "failed"
+    assert result["output"] == ""
+
+
+def test_context_window_exceeded_in_stderr_returns_failed():
+    result, _ = _parse_stdout("", stderr="context size has been exceeded")
+
+    assert result["status"] == "failed"
+    assert "context window exceeded" in result["error"].lower()
+
+
+def test_nonzero_returncode_plain_text_returns_failed():
+    result, _ = _parse_stdout("some partial output", returncode=1)
+
+    assert result["status"] == "failed"
+
+
+def test_output_field_always_string_across_all_shapes():
+    """Regression: output must be str regardless of payload shape."""
+    cases = [
+        json.dumps({"finalAssistantVisibleText": "text"}),
+        json.dumps({"payloads": [{"text": "hi"}]}),
+        json.dumps({"unknown": "data"}),
+        "plain text",
+        json.dumps([1, 2, 3]),
+        "{bad json",
+        "",
+    ]
+    for case in cases:
+        result, _ = _parse_stdout(case)
+        assert isinstance(
+            result["output"], str
+        ), f"output must be str for input: {case!r}"
+
+
+def test_debug_repair_responses_nested_content_extracts_text():
+    body = {
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": "nested extracted text"},
+                ]
+            }
+        ]
+    }
+    assert (
+        OpenClawSessionService._extract_responses_output_text(body)
+        == "nested extracted text"
+    )
+
+
+def test_debug_repair_responses_output_text_field_takes_priority():
+    body = {
+        "output_text": "direct field",
+        "output": [{"content": [{"text": "nested"}]}],
+    }
+    assert OpenClawSessionService._extract_responses_output_text(body) == "direct field"
+
+
+def test_debug_repair_responses_empty_output_list_returns_empty():
+    assert OpenClawSessionService._extract_responses_output_text({"output": []}) == ""
+
+
+def test_debug_repair_chat_string_content():
+    body = {"choices": [{"message": {"content": "assistant reply"}}]}
+    assert (
+        OpenClawSessionService._extract_chat_completion_content(body)
+        == "assistant reply"
+    )
+
+
+def test_debug_repair_chat_list_content_concatenates():
+    body = {
+        "choices": [
+            {"message": {"content": [{"text": "part one"}, {"text": " part two"}]}}
+        ]
+    }
+    assert (
+        OpenClawSessionService._extract_chat_completion_content(body)
+        == "part one part two"
+    )
+
+
+def test_debug_repair_chat_list_content_skips_non_string_text():
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {"text": "valid"},
+                        {"text": 42},
+                        {"other": "no text key"},
+                    ]
+                }
+            }
+        ]
+    }
+    assert OpenClawSessionService._extract_chat_completion_content(body) == "valid"
+
+
+def test_debug_repair_chat_empty_choices_returns_empty():
+    assert (
+        OpenClawSessionService._extract_chat_completion_content({"choices": []}) == ""
+    )
+
+
+def test_debug_repair_chat_non_dict_body_returns_empty():
+    assert OpenClawSessionService._extract_chat_completion_content("text") == ""
+    assert OpenClawSessionService._extract_chat_completion_content(None) == ""

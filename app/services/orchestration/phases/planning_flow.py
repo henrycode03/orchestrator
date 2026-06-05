@@ -1288,6 +1288,7 @@ def execute_planning_phase(
                 "placeholder_only_steps",
                 "weak_verification_steps",
                 "stale_replace_ops_steps",
+                "empty_replace_old_text_steps",
                 "test_assertion_loss_ops_steps",
                 "test_deletion_ops_steps",
             )
@@ -1346,6 +1347,12 @@ def execute_planning_phase(
                             ctx.orchestration_state.plan,
                             ctx.orchestration_state.project_dir,
                         )
+                    )
+                if blocking_repair_issues.get("empty_replace_old_text_steps"):
+                    issue_fragments.append(
+                        "replace_in_file without old text in steps "
+                        f"{blocking_repair_issues['empty_replace_old_text_steps'][:5]}; "
+                        "every replace_in_file op must specify literal old text to search for"
                     )
                 if blocking_repair_issues.get("test_assertion_loss_ops_steps"):
                     issue_fragments.append(
@@ -1450,7 +1457,10 @@ def execute_planning_phase(
                     if oscillation_result:
                         return oscillation_result
                     issue_fragments = [second_repair_reason.rejection_text]
-                    if second_repair_reason.issue_key == "stale_replace_ops_steps":
+                    if second_repair_reason.issue_key in (
+                        "stale_replace_ops_steps",
+                        "empty_replace_old_text_steps",
+                    ):
                         issue_fragments.extend(
                             PlannerService.stale_replace_fallback_hints(
                                 ctx.orchestration_state.plan,
@@ -1893,6 +1903,7 @@ def execute_planning_phase(
 
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
+                    blocking_repair_issues=blocking_repair_issues,
                     plan_verdict=plan_verdict,
                     project_dir=ctx.orchestration_state.project_dir,
                 )
@@ -1920,6 +1931,16 @@ def execute_planning_phase(
                         )
                     else:
                         issue_fragments = [second_repair_reason.rejection_text]
+                    if second_repair_reason.issue_key in (
+                        "stale_replace_ops_steps",
+                        "empty_replace_old_text_steps",
+                    ):
+                        issue_fragments = list(issue_fragments) + list(
+                            PlannerService.stale_replace_fallback_hints(
+                                ctx.orchestration_state.plan,
+                                ctx.orchestration_state.project_dir,
+                            )
+                        )
                     contract_diagnostics = _plan_contract_diagnostics(
                         plan_verdict.details
                     )
