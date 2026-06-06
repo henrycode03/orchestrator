@@ -1,5 +1,21 @@
 """Celery task registration for orchestration runtimes."""
 
+# The system /usr/share/zoneinfo/UTC on this host contains America/Toronto data
+# (corrupted tzdata). ZoneInfo('UTC') therefore reports EDT/EST offsets instead
+# of +00:00, causing Celery's countdown→ETA conversion to schedule retries hours
+# late (countdown=15 → ETA 4h in the future). Fix: prepend the Python tzdata
+# package path to ZoneInfo's search path so 'UTC' resolves from the correct file.
+# This must run before any Celery import touches ZoneInfo('UTC').
+import importlib.resources as _ir
+import zoneinfo as _zoneinfo
+
+try:
+    _tzdata_zoneinfo_path = str(_ir.files("tzdata").joinpath("zoneinfo"))
+    _zoneinfo.reset_tzpath([_tzdata_zoneinfo_path] + list(_zoneinfo.TZPATH))
+    _zoneinfo.ZoneInfo.clear_cache()
+except Exception:
+    pass  # tzdata package unavailable; system files used as-is
+
 from celery import Celery
 from .config import settings
 
