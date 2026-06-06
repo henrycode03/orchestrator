@@ -790,6 +790,8 @@ def _score_case(
     session_id: int,
     task_id: int,
     python_executable: str | None = None,
+    session_status: str | None = None,
+    failure_category: str | None = None,
 ) -> dict[str, Any]:
     events_path = _event_path(project_dir, session_id, task_id)
     snapshots_path = _state_snapshot_path(project_dir, session_id, task_id)
@@ -870,6 +872,8 @@ def _score_case(
             "cross_stage_convergence_class": path_observability[
                 "cross_stage_convergence_class"
             ],
+            "session_status": session_status,
+            "session_failure_category": failure_category,
         },
         "path_observability": path_observability,
         "verifier": verifier,
@@ -942,6 +946,18 @@ def main() -> int:
         "--output",
         help="Optional report output path. If omitted, JSON is printed to stdout.",
     )
+    parser.add_argument(
+        "--session-status",
+        dest="session_status",
+        default=None,
+        help="Terminal session status as reported by the API (e.g. paused, completed).",
+    )
+    parser.add_argument(
+        "--failure-category",
+        dest="failure_category",
+        default=None,
+        help="Session failure_category from the API (e.g. backend_timeout).",
+    )
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest)
@@ -958,6 +974,8 @@ def main() -> int:
         session_id=args.session_id,
         task_id=args.task_id,
         python_executable=args.python_executable,
+        session_status=args.session_status,
+        failure_category=args.failure_category,
     )
     if args.output:
         output_path = Path(args.output)

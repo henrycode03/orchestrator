@@ -267,6 +267,7 @@ def _wait_for_scoreable_event_journal(
     session_id: int,
     task_id: int,
     session_status: str,
+    failure_category: str | None = None,
     timeout_seconds: float,
     stable_seconds: float,
     poll_seconds: float,
@@ -276,7 +277,20 @@ def _wait_for_scoreable_event_journal(
     Completed sessions must have a `task_completed` event before scoring. Other
     terminal states may not emit a single canonical task event, so the runner
     waits until the journal stops changing.
+
+    Paused sessions with a recorded failure_category are definitively failed —
+    skip the journal wait and score immediately with what is present.
     """
+    status = str(session_status or "").lower()
+    if status == "paused" and failure_category:
+        path = _event_journal_path(workspace, session_id, task_id)
+        return {
+            "event_journal_path": str(path),
+            "required_terminal_event": None,
+            "observed_terminal_event": None,
+            "stabilized": True,
+            "paused_failure_category": failure_category,
+        }
 
     path = _event_journal_path(workspace, session_id, task_id)
     required_event = _required_terminal_event(session_status)
@@ -337,6 +351,8 @@ def _run_scorer(
     task_id: int,
     python: str,
     output: Path,
+    session_status: str | None = None,
+    failure_category: str | None = None,
 ) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     _make_shared_workspace_path(output.parent)
@@ -358,6 +374,10 @@ def _run_scorer(
         "--output",
         str(output),
     ]
+    if session_status:
+        cmd += ["--session-status", session_status]
+    if failure_category:
+        cmd += ["--failure-category", failure_category]
     completed = subprocess.run(cmd, cwd=repo_root, check=False)
     if completed.returncode not in {0, 1}:
         raise subprocess.CalledProcessError(completed.returncode, cmd)
@@ -389,6 +409,159 @@ def _first_env(names: tuple[str, ...]) -> str | None:
 
 def _env_flag_enabled(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_workspace_root(
+    arg_value: Path | None,
+    base_url: str,
+    token: str | None,
+) -> Path:
+    """Resolve workspace root with four fallbacks.
+
+    Priority: --workspace-root arg → OPENCLAW_WORKSPACE_ROOT → WORKSPACE_ROOT
+    → orchestrator settings API → hard exit.
+    """
+    if arg_value is not None:
+        return arg_value
+    for env_name in ("OPENCLAW_WORKSPACE_ROOT", "WORKSPACE_ROOT", "HOST_WORKSPACE_ROOT"):
+        env_value = os.environ.get(env_name, "").strip()
+        if env_value:
+            return Path(env_value)
+    if token:
+        try:
+            resp = _request_json("GET", base_url, "settings", token)
+            ws_root = str((resp.get("system") or {}).get("workspace_root") or "").strip()
+            if ws_root:
+                return Path(ws_root)
+        except SystemExit:
+            pass
+    raise SystemExit(
+        "error: workspace root not set.\n"
+        "Options:\n"
+        "  1. Pass --workspace-root <path>\n"
+        "  2. Set WORKSPACE_ROOT=<path> in your .env file (or OPENCLAW_WORKSPACE_ROOT)\n"
+        "  3. Configure workspace root in the orchestrator settings page\n"
+        "     (requires --token or ORCHESTRATOR_API_TOKEN to be set)\n"
+        "No sessions were created."
+    )
+
+
+def _preflight_check_api_and_redis(base_url: str) -> None:
+    """Verify the API is reachable and Redis is healthy. Exits on failure."""
+    url = _api_url(base_url, "health")
+    req = request.Request(url, method="GET")
+    try:
+        with request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+            payload: dict[str, Any] = json.loads(raw) if raw.strip() else {}
+    except error.URLError as exc:
+        raise SystemExit(
+            f"preflight_failed: API not reachable at {url}: {exc.reason}\n"
+            "Ensure the orchestrator is running before starting an eval run.\n"
+            "No sessions were created."
+        ) from None
+    redis_check = str((payload.get("checks") or {}).get("redis") or "").lower()
+    if redis_check == "error":
+        redis_detail = str(
+            (payload.get("details") or {}).get("redis_error") or ""
+        )
+        raise SystemExit(
+            "preflight_failed: API reports Redis is unhealthy"
+            + (f": {redis_detail}" if redis_detail else "")
+            + "\nCheck: redis-cli ping\n"
+            "No sessions were created."
+        )
+
+
+def _preflight_check_token(base_url: str, token: str) -> None:
+    """Verify the bearer token is accepted. Exits with remediation on 401."""
+    url = _api_url(base_url, "sessions")
+    headers = {"Authorization": f"Bearer {token}"}
+    req = request.Request(url, headers=headers, method="GET")
+    try:
+        with request.urlopen(req, timeout=10):
+            pass
+    except error.HTTPError as exc:
+        if exc.code == 401:
+            raise SystemExit(
+                "preflight_failed: Bearer token rejected (HTTP 401).\n"
+                "Generate a new token with:\n"
+                "  python scripts/create_access_token.py <email>\n"
+                "or set ORCHESTRATOR_API_TOKEN with a fresh token.\n"
+                "No sessions were created."
+            ) from None
+    except error.URLError:
+        pass  # Network errors are caught by the health check
+
+
+def _preflight_check_workspace_root(workspace_root: Path) -> None:
+    """Verify workspace root exists and is writable. Exits on failure."""
+    try:
+        workspace_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SystemExit(
+            f"preflight_failed: Cannot create workspace root {workspace_root}: {exc}\n"
+            "No sessions were created."
+        ) from None
+    test_file = workspace_root / ".preflight_write_check"
+    try:
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink()
+    except OSError as exc:
+        raise SystemExit(
+            f"preflight_failed: Workspace root {workspace_root} is not writable: {exc}\n"
+            "No sessions were created."
+        ) from None
+
+
+def _preflight_warn_stale_slots() -> None:
+    """Warn if Redis backend slot keys are non-empty."""
+    redis_cli = shutil.which("redis-cli")
+    if not redis_cli:
+        return
+    try:
+        keys_result = subprocess.run(
+            [redis_cli, "keys", "orchestrator:backend_slots:*"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        slot_keys = [k.strip() for k in keys_result.stdout.splitlines() if k.strip()]
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    occupied: list[str] = []
+    for key in slot_keys:
+        try:
+            members_result = subprocess.run(
+                [redis_cli, "smembers", key],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            members = [m.strip() for m in members_result.stdout.splitlines() if m.strip()]
+            if members:
+                occupied.append(f"{key}: {members}")
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    if occupied:
+        print(
+            "WARNING: Redis backend slots are non-empty:\n"
+            + "\n".join(f"  {entry}" for entry in occupied)
+            + "\nIf no sessions are actively running, clear stale slots with:\n"
+            "  redis-cli del orchestrator:backend_slots:local_openclaw\n"
+            "Stale slots silently block execution capacity.",
+            file=sys.stderr,
+        )
+
+
+def _preflight_run(base_url: str, token: str, workspace_root: Path) -> None:
+    """Run all pre-flight checks. Any hard failure exits before creating sessions."""
+    _preflight_check_api_and_redis(base_url)
+    _preflight_check_token(base_url, token)
+    _preflight_check_workspace_root(workspace_root)
+    _preflight_warn_stale_slots()
 
 
 def _run_context_metadata(
@@ -747,7 +920,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workspace-root",
         type=Path,
-        default=Path("/home/eric/projects"),
+        default=None,
+        help=(
+            "Base directory for eval workspaces. If omitted, falls back to "
+            "OPENCLAW_WORKSPACE_ROOT env var, then to the value configured in "
+            "the orchestrator settings page (requires --token)."
+        ),
     )
     parser.add_argument(
         "--reports-dir",
@@ -884,11 +1062,14 @@ def _run_case(
         timeout_seconds=args.timeout_seconds,
         poll_seconds=args.poll_seconds,
     )
+    session_status = str(final_session.get("status") or "")
+    failure_category = str(final_session.get("failure_category") or "").strip() or None
     score_readiness = _wait_for_scoreable_event_journal(
         workspace=workspace,
         session_id=session_id,
         task_id=task_id,
-        session_status=str(final_session.get("status") or ""),
+        session_status=session_status,
+        failure_category=failure_category,
         timeout_seconds=args.event_stabilization_timeout_seconds,
         stable_seconds=args.event_stable_seconds,
         poll_seconds=min(args.poll_seconds, 1.0),
@@ -905,6 +1086,8 @@ def _run_case(
         task_id=task_id,
         python=args.python,
         output=report,
+        session_status=session_status,
+        failure_category=failure_category,
     )
     return {
         "case_id": case_id,
@@ -948,6 +1131,11 @@ def main() -> int:
         raise SystemExit(
             "Missing --token. Pass a normal API bearer token or set ORCHESTRATOR_API_TOKEN."
         )
+
+    args.workspace_root = _resolve_workspace_root(
+        args.workspace_root, args.api_base_url, token
+    )
+    _preflight_run(args.api_base_url, token, args.workspace_root)
 
     run_timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_context = _run_context_metadata(

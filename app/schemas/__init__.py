@@ -257,6 +257,7 @@ class SessionResponse(SessionBase):
     deleted_at: Optional[datetime] = None
     model_lane_label: Optional[str] = None
     model_lane_metadata: Optional[dict[str, Any]] = None
+    failure_category: Optional[str] = None
 
 
 # Log Entry Schemas

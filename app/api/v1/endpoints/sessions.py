@@ -388,10 +388,22 @@ def get_session(
         .all()
     )
 
+    # Derive failure_category from the latest task execution for this session.
+    latest_execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.session_id == session_id)
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    failure_category = (
+        latest_execution.failure_category if latest_execution is not None else None
+    )
+
     # Add metadata
     response = session
     response.log_count = log_count
     response.task_count = len(session_tasks)
+    response.failure_category = failure_category
 
     return response
 
