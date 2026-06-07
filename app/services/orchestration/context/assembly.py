@@ -499,7 +499,7 @@ def assemble_planning_prompt(
     knowledge_block = _render_knowledge_block(knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt
-    return render_adapted_runtime_prompt(
+    result = render_adapted_runtime_prompt(
         ctx.db,
         objective="Generate a machine-runnable JSON execution plan for the requested task.",
         execution_mode="planning",
@@ -515,6 +515,10 @@ def assemble_planning_prompt(
         },
         expected_output="JSON array of orchestration step objects.",
     )
+    from app.services.orchestration.context.provenance import _maybe_emit_provenance
+
+    _maybe_emit_provenance(ctx, workspace_review, knowledge_context, result)
+    return result
 
 
 def _build_project_structure_capsule(project_dir: Path) -> str:

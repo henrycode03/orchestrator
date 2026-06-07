@@ -15,6 +15,7 @@ from app.dependencies import get_current_admin_user, get_db
 from app.models import Project, TaskExecution
 from app.services.build_identity import build_identity_payload
 from app.services.observability.metrics_collector import MetricsCollector
+from app.services.project.state_summary import build_project_state_summary
 from app.services.workspace.system_settings import diagnose_runtime_lane
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,16 @@ def ops_metrics_summary(
         "last_24h": _window(1),
         "last_7d": _window(7),
     }
+
+
+@router.get("/project-state/{project_id}")
+def ops_project_state_summary(
+    project_id: int,
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Read-only ProjectStateSummary: completed tasks, files changed, constraints, next task."""
+    return build_project_state_summary(project_id, db)
 
 
 @router.get("/failure-classes")

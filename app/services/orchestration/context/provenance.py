@@ -15,6 +15,39 @@ from app.services.project.source_imports import python_test_source_context_from_
 _TASK_PREVIEW_CHARS = 200
 
 
+def _maybe_emit_provenance(
+    ctx: Any,
+    workspace_review: Dict[str, Any],
+    knowledge_context: Any,
+    planning_prompt: Optional[str],
+) -> None:
+    """Emit a planning_context_provenance event — silently ignores all errors."""
+    try:
+        from app.services.orchestration.state.persistence import (
+            append_orchestration_event,
+        )
+        from app.services.orchestration.events.event_types import EventType
+
+        state = getattr(ctx, "orchestration_state", None)
+        provenance = collect_planning_context_provenance(
+            task_description=getattr(ctx, "prompt", None),
+            project_context=getattr(state, "project_context", None),
+            project_dir=Path(getattr(state, "project_dir", None) or "."),
+            workspace_review=workspace_review or {},
+            knowledge_context=knowledge_context,
+            planning_prompt=planning_prompt,
+        )
+        append_orchestration_event(
+            project_dir=getattr(state, "project_dir", None),
+            session_id=getattr(ctx, "session_id", None),
+            task_id=getattr(ctx, "task_id", None),
+            event_type=EventType.PLANNING_CONTEXT_PROVENANCE,
+            details=provenance,
+        )
+    except Exception:
+        pass
+
+
 def collect_planning_context_provenance(
     *,
     task_description: Optional[str],
