@@ -15,6 +15,9 @@ from app.services.orchestration.context.assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
 )
+from app.services.orchestration.context.provenance import (
+    collect_planning_context_provenance,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.state.persistence import (
@@ -264,6 +267,25 @@ def execute_planning_phase(
             ),
         },
     )
+
+    try:
+        _provenance = collect_planning_context_provenance(
+            task_description=ctx.prompt,
+            project_context=ctx.orchestration_state.project_context,
+            project_dir=Path(ctx.orchestration_state.project_dir),
+            workspace_review=workspace_review,
+            knowledge_context=planning_knowledge_ctx,
+            planning_prompt=planning_prompt,
+        )
+        append_orchestration_event(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.PLANNING_CONTEXT_PROVENANCE,
+            details=_provenance,
+        )
+    except Exception:
+        pass
 
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
     start_with_minimal_planning_prompt = (

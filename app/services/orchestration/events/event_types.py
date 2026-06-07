@@ -83,6 +83,9 @@ class EventType:
     COMPLETION_EVIDENCE_FAILED = "completion_evidence_failed"
     WORKSPACE_EVIDENCE_COLLECTED = "workspace_evidence_collected"
 
+    # ── Diagnostics ──────────────────────────────────────────────────────────
+    PLANNING_CONTEXT_PROVENANCE = "planning_context_provenance"
+
 
 _ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in EventType.__dict__.items() if not k.startswith("_")
