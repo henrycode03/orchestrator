@@ -939,6 +939,14 @@ def _write_progress_notes(
         logger.info("[PROGRESS] Progress notes written to %s", notes_path)
     except Exception as e:
         logger.warning("[PROGRESS] Failed to write progress notes: %s", e)
+    from app.services.orchestration.working_memory import write_working_memory
+
+    write_working_memory(
+        orchestration_state=orchestration_state,
+        task=task,
+        summary=summary,
+        logger=logger,
+    )
 
 
 def finalize_successful_task(

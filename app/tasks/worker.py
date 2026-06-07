@@ -1703,6 +1703,16 @@ def execute_orchestration_task(
                     logger=logger,
                     task_position=getattr(task, "plan_position", None),
                 )
+            if settings.WORKING_MEMORY_INJECTION_ENABLED:
+                from app.services.orchestration.working_memory import (
+                    inject_working_memory_into_context,
+                )
+
+                inject_working_memory_into_context(
+                    orchestration_state=orchestration_state,
+                    task=task,
+                    logger=logger,
+                )
             with start_langfuse_observation(
                 name="planning-phase",
                 as_type="span",
