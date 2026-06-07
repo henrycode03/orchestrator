@@ -27,6 +27,11 @@ _DESCRIPTION_PREVIEW_CHARS = 300
 _MAX_FILES_PER_TASK = 40
 _PROMOTION_NOTE_CHARS = 300
 
+# Injection renderer limits — conservative defaults to stay inside context budget.
+_PSS_BLOCK_MAX_CHARS = 1800
+_PSS_FILES_MAX = 20
+_PSS_ARTIFACT_EXCERPT_CHARS = 200
+
 
 def _files_for_task(task_id: int, db: DbSession) -> List[str]:
     """Aggregate added + modified filenames from accepted change sets for a task."""
@@ -183,3 +188,103 @@ def build_project_state_summary(project_id: int, db: DbSession) -> Dict[str, Any
         "known_constraints": known_constraints,
         "next_task_recommendation": next_task_recommendation,
     }
+
+
+def render_project_state_summary_block(
+    summary: Dict[str, Any],
+    *,
+    max_chars: int = _PSS_BLOCK_MAX_CHARS,
+) -> str:
+    """Render a ProjectStateSummary dict as a compact planning-prompt block.
+
+    The block is prefixed so the planner can locate it in the context. It is
+    intentionally terse: only completed-task file lists and planning-artifact
+    excerpts are included. Verbose fields (full descriptions, timestamps) are
+    omitted.
+
+    Returns an empty string when the summary has no completed tasks (avoids
+    injecting a useless block for single-task sessions).
+    """
+    completed = summary.get("completed_tasks") or []
+    if not completed:
+        return ""
+
+    lines: List[str] = [
+        "=== PROJECT STATE SUMMARY ===",
+        f"Project: {summary.get('project_name', 'unknown')}",
+        f"Canonical root: {summary.get('canonical_root', 'unknown')}",
+    ]
+
+    lines.append("Completed tasks:")
+    for t in completed:
+        pos = t.get("plan_position")
+        pos_label = f"#{pos}" if pos is not None else "manual"
+        title = t.get("title") or "untitled"
+        files = t.get("files_created_or_modified") or []
+        file_str = ", ".join(files[:_PSS_FILES_MAX]) if files else "no files recorded"
+        lines.append(f"  {pos_label} {title} → {file_str}")
+
+    constraints = summary.get("known_constraints") or {}
+    req = (constraints.get("requirements_excerpt") or "")[:_PSS_ARTIFACT_EXCERPT_CHARS]
+    impl = (constraints.get("implementation_plan_excerpt") or "")[
+        :_PSS_ARTIFACT_EXCERPT_CHARS
+    ]
+    if req:
+        lines.append(f"Requirements: {req.strip()}")
+    if impl:
+        lines.append(f"Implementation plan: {impl.strip()}")
+
+    next_rec = summary.get("next_task_recommendation")
+    if next_rec:
+        npos = next_rec.get("plan_position")
+        npos_label = f"#{npos}" if npos is not None else "next"
+        lines.append(f"Next task ({npos_label}): {next_rec.get('title', 'untitled')}")
+
+    lines.append("=== END PROJECT STATE SUMMARY ===")
+    block = "\n".join(lines)
+    if len(block) > max_chars:
+        block = block[: max_chars - 3] + "..."
+    return block
+
+
+def _inject_project_state_summary_into_context(
+    *,
+    orchestration_state: Any,
+    db: DbSession,
+    project_id: int,
+    logger: Any,
+    task_position: Optional[int] = None,
+) -> None:
+    """Experimental: prepend a ProjectStateSummary block to project_context.
+
+    Only active when PSS_CONTINUATION_INJECTION_ENABLED=True. Guarded by
+    task_position: does not inject for plan_position == 1 because there is
+    no prior completed work to summarise.
+
+    This function does not change any planning schema, validator, or repair
+    logic. It only prepends a diagnostic text block to project_context before
+    the planning prompt is assembled.
+    """
+    if task_position is not None and task_position == 1:
+        return
+    try:
+        summary = build_project_state_summary(project_id, db)
+        if summary.get("error"):
+            logger.debug(
+                "[PSS_INJECT] Skipping: build_project_state_summary returned error=%s",
+                summary.get("error"),
+            )
+            return
+        block = render_project_state_summary_block(summary)
+        if not block:
+            logger.debug("[PSS_INJECT] Skipping: no completed tasks in PSS")
+            return
+        current = orchestration_state.project_context or ""
+        injected = (block + "\n\n" + current)[:8000]
+        orchestration_state.project_context = injected
+        logger.info(
+            "[PSS_INJECT] Injected ProjectStateSummary block (%d chars) into planning context",
+            len(block),
+        )
+    except Exception as exc:
+        logger.warning("[PSS_INJECT] Failed to inject PSS (non-fatal): %s", exc)

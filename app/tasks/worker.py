@@ -1691,6 +1691,18 @@ def execute_orchestration_task(
                 orchestration_state=orchestration_state,
                 logger=logger,
             )
+            if settings.PSS_CONTINUATION_INJECTION_ENABLED and project:
+                from app.services.project.state_summary import (
+                    _inject_project_state_summary_into_context,
+                )
+
+                _inject_project_state_summary_into_context(
+                    orchestration_state=orchestration_state,
+                    db=db,
+                    project_id=project.id,
+                    logger=logger,
+                    task_position=getattr(task, "plan_position", None),
+                )
             with start_langfuse_observation(
                 name="planning-phase",
                 as_type="span",

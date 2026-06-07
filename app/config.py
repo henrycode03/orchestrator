@@ -193,6 +193,9 @@ class Settings(BaseSettings):
     ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
     INLINE_PLANNING: bool = False
     WORKSPACE_REVIEW_POLICY: str = "hold_nontrivial"
+    # Experimental: inject ProjectStateSummary into Task 2+ planning context.
+    # Off by default. Characterization only — no effect on any runtime path when False.
+    PSS_CONTINUATION_INJECTION_ENABLED: bool = False
 
     @field_validator("AGENT_SECONDARY_BACKEND")
     @classmethod
