@@ -499,6 +499,9 @@ def assemble_planning_prompt(
             Path(ctx.orchestration_state.project_dir)
         ),
     )
+    artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
+    if artifact_supplement:
+        raw_prompt = artifact_supplement + "\n\n" + raw_prompt
     python_source_context = python_test_source_context_from_tests(
         Path(ctx.orchestration_state.project_dir)
     )

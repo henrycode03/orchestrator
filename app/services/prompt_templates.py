@@ -117,6 +117,9 @@ class OrchestrationState:
     _task_subfolder_override: Optional[str] = None
     # Optional: Override concrete execution directory (for canonical project runs)
     _project_dir_override: Optional[str] = None
+    # Artifact-driven Continuation: populated by _inject_project_artifacts_into_context
+    # when ARTIFACT_CONTINUATION_ENABLED=True. Injected post-shaping in assemble_planning_prompt.
+    artifact_supplement: Optional[str] = None
 
     # ── Workspace paths ──────────────────────────────────────────────────────
 

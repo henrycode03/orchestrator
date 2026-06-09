@@ -32,6 +32,11 @@ _PSS_BLOCK_MAX_CHARS = 1800
 _PSS_FILES_MAX = 20
 _PSS_ARTIFACT_EXCERPT_CHARS = 200
 
+# Dedicated artifact block budgets (post-shaping injection, Priority 7).
+_ARTIFACT_BLOCK_REQUIREMENTS_CHARS = 300
+_ARTIFACT_BLOCK_IMPL_PLAN_CHARS = 200
+_ARTIFACT_BLOCK_MAX_CHARS = 600
+
 
 def _files_for_task(task_id: int, db: DbSession) -> List[str]:
     """Aggregate added + modified filenames from accepted change sets for a task."""
@@ -194,6 +199,7 @@ def render_project_state_summary_block(
     summary: Dict[str, Any],
     *,
     max_chars: int = _PSS_BLOCK_MAX_CHARS,
+    include_artifacts: bool = True,
 ) -> str:
     """Render a ProjectStateSummary dict as a compact planning-prompt block.
 
@@ -201,6 +207,11 @@ def render_project_state_summary_block(
     intentionally terse: only completed-task file lists and planning-artifact
     excerpts are included. Verbose fields (full descriptions, timestamps) are
     omitted.
+
+    When include_artifacts=False, requirements_excerpt and
+    implementation_plan_excerpt are suppressed. Use this when
+    ARTIFACT_CONTINUATION_ENABLED=True to avoid duplication between the PSS
+    block and the dedicated post-shaping artifact block.
 
     Returns an empty string when the summary has no completed tasks (avoids
     injecting a useless block for single-task sessions).
@@ -224,15 +235,18 @@ def render_project_state_summary_block(
         file_str = ", ".join(files[:_PSS_FILES_MAX]) if files else "no files recorded"
         lines.append(f"  {pos_label} {title} → {file_str}")
 
-    constraints = summary.get("known_constraints") or {}
-    req = (constraints.get("requirements_excerpt") or "")[:_PSS_ARTIFACT_EXCERPT_CHARS]
-    impl = (constraints.get("implementation_plan_excerpt") or "")[
-        :_PSS_ARTIFACT_EXCERPT_CHARS
-    ]
-    if req:
-        lines.append(f"Requirements: {req.strip()}")
-    if impl:
-        lines.append(f"Implementation plan: {impl.strip()}")
+    if include_artifacts:
+        constraints = summary.get("known_constraints") or {}
+        req = (constraints.get("requirements_excerpt") or "")[
+            :_PSS_ARTIFACT_EXCERPT_CHARS
+        ]
+        impl = (constraints.get("implementation_plan_excerpt") or "")[
+            :_PSS_ARTIFACT_EXCERPT_CHARS
+        ]
+        if req:
+            lines.append(f"Requirements: {req.strip()}")
+        if impl:
+            lines.append(f"Implementation plan: {impl.strip()}")
 
     next_rec = summary.get("next_task_recommendation")
     if next_rec:
@@ -254,12 +268,17 @@ def _inject_project_state_summary_into_context(
     project_id: int,
     logger: Any,
     task_position: Optional[int] = None,
+    include_artifacts: bool = True,
 ) -> None:
     """Experimental: prepend a ProjectStateSummary block to project_context.
 
     Only active when PSS_CONTINUATION_INJECTION_ENABLED=True. Guarded by
     task_position: does not inject for plan_position == 1 because there is
     no prior completed work to summarise.
+
+    When include_artifacts=False, artifact excerpts are suppressed from the
+    PSS block. Pass False when ARTIFACT_CONTINUATION_ENABLED=True to avoid
+    duplication with the dedicated post-shaping artifact block.
 
     This function does not change any planning schema, validator, or repair
     logic. It only prepends a diagnostic text block to project_context before
@@ -275,7 +294,9 @@ def _inject_project_state_summary_into_context(
                 summary.get("error"),
             )
             return
-        block = render_project_state_summary_block(summary)
+        block = render_project_state_summary_block(
+            summary, include_artifacts=include_artifacts
+        )
         if not block:
             logger.debug("[PSS_INJECT] Skipping: no completed tasks in PSS")
             return
@@ -288,3 +309,96 @@ def _inject_project_state_summary_into_context(
         )
     except Exception as exc:
         logger.warning("[PSS_INJECT] Failed to inject PSS (non-fatal): %s", exc)
+
+
+def build_project_artifact_block(
+    project_id: int,
+    db: DbSession,
+    *,
+    max_chars: int = _ARTIFACT_BLOCK_MAX_CHARS,
+) -> str:
+    """Build a standalone artifact block for post-shaping injection (Priority 7).
+
+    Returns a formatted block containing requirements_excerpt and/or
+    implementation_plan_excerpt from the latest PlanningSession artifacts.
+    Returns an empty string when no artifact content is available.
+
+    This block is injected downstream of _shape_project_context() via
+    orchestration_state.artifact_supplement, so it does not compete with the
+    PSS task-history block for the 400c base_context budget.
+    """
+    try:
+        latest_ps = (
+            db.query(PlanningSession)
+            .filter(PlanningSession.project_id == project_id)
+            .order_by(PlanningSession.id.desc())
+            .first()
+        )
+        if not latest_ps:
+            return ""
+
+        artifacts = _latest_artifacts(latest_ps.id, db)
+        req = (artifacts.get("requirements") or "")[
+            :_ARTIFACT_BLOCK_REQUIREMENTS_CHARS
+        ].strip()
+        impl = (artifacts.get("implementation_plan") or "")[
+            :_ARTIFACT_BLOCK_IMPL_PLAN_CHARS
+        ].strip()
+
+        if not req and not impl:
+            return ""
+
+        lines: List[str] = [
+            "=== PROJECT ARTIFACTS ===",
+            f"[From planning session #{latest_ps.id}]",
+        ]
+        if req:
+            lines.append(f"Requirements: {req}")
+        if impl:
+            lines.append(f"Implementation plan: {impl}")
+        lines.append("=== END PROJECT ARTIFACTS ===")
+
+        block = "\n".join(lines)
+        if len(block) > max_chars:
+            block = block[: max_chars - 3] + "..."
+        return block
+    except Exception:
+        return ""
+
+
+def _inject_project_artifacts_into_context(
+    *,
+    orchestration_state: Any,
+    db: DbSession,
+    project_id: int,
+    logger: Any,
+    task_position: Optional[int] = None,
+) -> None:
+    """Populate orchestration_state.artifact_supplement for post-shaping injection.
+
+    Only fires for Task 2+ (task_position != 1). The artifact_supplement field
+    is read by assemble_planning_prompt() and prepended to raw_prompt after
+    _shape_project_context() runs — it bypasses the 400c base_context gate.
+
+    Safe to call when no artifacts exist: returns silently. Non-fatal on any
+    exception.
+    """
+    if task_position is not None and task_position == 1:
+        return
+    try:
+        block = build_project_artifact_block(project_id, db)
+        if not block:
+            logger.debug(
+                "[ARTIFACT_INJECT] Skipping: no artifact content for project_id=%d",
+                project_id,
+            )
+            return
+        orchestration_state.artifact_supplement = block
+        logger.info(
+            "[ARTIFACT_INJECT] Injected project artifact block (%d chars) into planning context",
+            len(block),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ARTIFACT_INJECT] Failed to inject artifacts (non-fatal): %s", exc
+        )

@@ -1702,6 +1702,19 @@ def execute_orchestration_task(
                     project_id=project.id,
                     logger=logger,
                     task_position=getattr(task, "plan_position", None),
+                    include_artifacts=not settings.ARTIFACT_CONTINUATION_ENABLED,
+                )
+            if settings.ARTIFACT_CONTINUATION_ENABLED and project:
+                from app.services.project.state_summary import (
+                    _inject_project_artifacts_into_context,
+                )
+
+                _inject_project_artifacts_into_context(
+                    orchestration_state=orchestration_state,
+                    db=db,
+                    project_id=project.id,
+                    logger=logger,
+                    task_position=getattr(task, "plan_position", None),
                 )
             if settings.WORKING_MEMORY_INJECTION_ENABLED:
                 from app.services.orchestration.working_memory import (

@@ -214,6 +214,12 @@ class Settings(BaseSettings):
     # explicit in the description. Off by default. Enablement requires ≥20 live
     # observations, ≥70% success rate, 0 destructive false positives.
     INCREMENTAL_EXECUTION_ENABLED: bool = False
+    # Priority 7: inject requirements_excerpt and implementation_plan_excerpt from
+    # PlanningArtifact into Task 2+ planning prompt via a dedicated post-shaping
+    # block. Off by default. When True, PSS block suppresses artifact lines to
+    # avoid duplication. Requires PSS_CONTINUATION_INJECTION_ENABLED=True for full
+    # task-history + constraint-language coverage.
+    ARTIFACT_CONTINUATION_ENABLED: bool = False
 
     @field_validator("AGENT_SECONDARY_BACKEND")
     @classmethod

@@ -1,7 +1,5 @@
 """Characterize HIGH RISK exception-swallow behavior per the audit.
 
-Reference: docs/roadmap/reports/maintenance/exception-swallow-audit-20260602.md
-
 Each test documents one or more HIGH RISK sites, confirming:
   1. The swallowing handler does not propagate the exception to the caller.
   2. The specific evidence or state affected by the swallowed exception.
