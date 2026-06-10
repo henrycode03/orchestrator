@@ -375,9 +375,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
     # Req 13/operation_choice_contract (profile-gated).
     # Rules 2–4, 11 (UNKNOWN): compressed into one sentence.
     # Rules 1, 5, 6 and Reqs 1–11, 14 (REDUCE/REMOVE): omitted.
-    # JSON example block (848c): removed; compact ~250c example added back after
-    # pilot run 2 regression (2026-06-09): without any example, Qwen generated
-    # nested f-string verification for non-Python files → brittle_commands.
+    # JSON example block (848c): removed. Compact example added back after run 2
+    # regression; revised to py_compile anchor after run 3 (python -c template
+    # bias caused T01 regression and content-assertion drift). v3 (2026-06-09).
     # Arm B static frame target: ~1,392c (vs 4,561c for Arm A).
     TASK_PLANNING_ARM_B = """Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -414,7 +414,8 @@ Do not implement anything.
 5. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
 
 **Example:**
-[{{"step_number":1,"description":"Create file","ops":[{{"op":"write_file","path":"f.txt","content":"x"}}],"commands":[],"verification":"python -c \\"import pathlib; assert pathlib.Path('f.txt').exists()\\"","rollback":null,"expected_files":["f.txt"]}}]
+[{{"step_number":1,"description":"Create Python file","ops":[{{"op":"write_file","path":"f.py","content":"def ok(): return True\\n"}}],"commands":[],"verification":"python3 -m py_compile f.py","rollback":null,"expected_files":["f.py"]}}]
+For non-Python files, verify existence or parseability only. Never assert content values. Never use f-strings or nested quotes in python -c verification.
 
 **Execution Profile Rules:**
 {execution_profile_rules}

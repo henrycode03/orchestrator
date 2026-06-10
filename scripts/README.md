@@ -45,6 +45,10 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `validate_incremental_fresh_process.py` - fresh-process re-run harness confirming the `search()` code-fence fix (8-task Python corpus).
 - `validate_incremental_20task.py` - 20-task controlled validation window for Slice J post A+E fix (Python/HTML/CSS/JSON).
 - `probe_incremental_output.py` - diagnostic probe capturing raw `execute_task` output shapes (no file writes; used for attribution).
+- `validate_repo_memory.py` - validate RepoMemory injection against a live project.
+- `validate_repo_memory_injection.py` - integration check for RepoMemory block assembly and injection gate.
+- `wm_off_runner.py` - WM OFF arm runner for Priority 5 WorkingMemory A/B measurement: creates 3 Python package projects × 6 tasks each, dispatches sequentially, collects debug_repair_attempted and planning repair events per task. Saves raw JSON to `docs/roadmap/reports/maintenance/`.
+- `wm_off_recovery.py` - recovery companion to `wm_off_runner.py`: monitors in-flight tasks from a prior runner session, re-dispatches failed/cancelled Task 1s, and collects full event data for the final report.
 
 Removed obsolete scripts: old `/tmp` log sync/status/cleanup helpers. Current
 startup no longer writes logs to `/tmp`.

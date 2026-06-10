@@ -316,17 +316,18 @@ class TestPromptSizeReduction:
             f"Arm A={len(arm_a)}c, Arm B={len(arm_b)}c"
         )
 
-    def test_arm_b_savings_at_least_1900c(self):
-        """Arm B must save at least 1900c vs Arm A.
+    def test_arm_b_savings_at_least_1800c(self):
+        """Arm B must save at least 1800c vs Arm A.
 
-        Threshold lowered from 2000c after pilot run 2 revision added back a
-        compact ~260c verification example to fix the brittle_commands regression.
+        Threshold lowered from 1900c after v3 revision replaced the compact
+        pathlib.Path example with a py_compile example + prohibition note
+        (~140c net addition to Arm B).
         """
         arm_a = _build_arm_a()
         arm_b = _build_arm_b()
         savings = len(arm_a) - len(arm_b)
-        assert savings >= 1900, (
-            f"Arm B savings {savings}c below 1900c minimum "
+        assert savings >= 1800, (
+            f"Arm B savings {savings}c below 1800c minimum "
             f"(Arm A={len(arm_a)}c, Arm B={len(arm_b)}c)"
         )
 
@@ -458,16 +459,17 @@ class TestFeatureFlagDefaults:
 
 
 # ---------------------------------------------------------------------------
-# Case: Compact example present in Arm B (added after pilot run 2 revision)
+# Case: Compact example present in Arm B (v3 revision — 2026-06-09)
 # ---------------------------------------------------------------------------
 
 
 class TestCompactExampleInArmB:
-    """Verify the compact verification example added to fix the brittle_commands regression.
+    """Verify the v3 compact example added after pilot run 3.
 
-    Pilot run 2 (2026-06-09) showed 75% repair rate for HTML/JSON/CSS tasks because
-    Arm B had no concrete example to anchor safe verification format. The 848c original
-    example was replaced with a ~260c compact example showing write_file + pathlib.Path.
+    Run 3 (2026-06-09) showed the v2 pathlib.Path example anchored Qwen on
+    python -c, causing T01 regression and content-assertion drift. v3 replaces
+    the example verification with python3 -m py_compile and adds a prohibition
+    note to suppress f-string and content-assertion patterns.
     """
 
     def test_compact_example_block_present(self):
@@ -476,14 +478,49 @@ class TestCompactExampleInArmB:
         assert "**Example:**" in result
 
     def test_compact_example_includes_write_file_op(self):
-        """Arm B example must contain a write_file op (teaches file-creation pattern)."""
+        """Arm B v3 example must contain a write_file op."""
         result = _build_arm_b()
         assert '"op":"write_file"' in result
 
-    def test_compact_example_includes_pathlib_verification(self):
-        """Arm B example must show safe pathlib.Path existence check."""
+    def test_compact_example_includes_expected_files(self):
+        """Arm B v3 example must include an expected_files array."""
         result = _build_arm_b()
-        assert "pathlib.Path" in result
+        lines = result.split("\n")
+        example_line = next(
+            (line for line in lines if line.strip().startswith("[{")), None
+        )
+        assert example_line is not None, "No example JSON line found"
+        assert '"expected_files"' in example_line
+
+    def test_compact_example_uses_py_compile(self):
+        """Arm B v3 example verification must use python3 -m py_compile."""
+        result = _build_arm_b()
+        assert "python3 -m py_compile" in result
+
+    def test_compact_example_no_pathlib_path(self):
+        """Arm B v3 must not contain pathlib.Path (removed in v3)."""
+        result = _build_arm_b()
+        assert "pathlib.Path" not in result
+
+    def test_compact_example_no_python_c_in_example_json(self):
+        """Arm B v3 example JSON line must not use python -c as verification."""
+        result = _build_arm_b()
+        lines = result.split("\n")
+        example_line = next(
+            (line for line in lines if line.strip().startswith("[{")), None
+        )
+        assert example_line is not None, "No example JSON line found"
+        assert "python -c" not in example_line
+
+    def test_v3_note_never_assert_content(self):
+        """Arm B v3 note must include 'Never assert content values'."""
+        result = _build_arm_b()
+        assert "Never assert content values" in result
+
+    def test_v3_note_never_fstrings(self):
+        """Arm B v3 note must include 'Never use f-strings'."""
+        result = _build_arm_b()
+        assert "Never use f-strings" in result
 
     def test_compact_example_no_heredoc(self):
         """Arm B example must not use heredoc (<<) syntax."""
@@ -491,7 +528,7 @@ class TestCompactExampleInArmB:
         assert "<<" not in result
 
     def test_compact_example_no_nested_fstring(self):
-        """Arm B example must not use f-string assertions (the brittle pattern)."""
+        """Arm B template must not contain f-string literals."""
         result = _build_arm_b()
         assert "f'" not in result
         assert 'f"' not in result
