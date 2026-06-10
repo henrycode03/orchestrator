@@ -114,7 +114,7 @@ from app.services.observability import (
 logger = logging.getLogger(__name__)
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
-BACKEND_CAPACITY_RETRY_MAX_RETRIES = 5
+BACKEND_CAPACITY_RETRY_MAX_RETRIES = 20
 
 
 def _env_value(name: str) -> Optional[str]:

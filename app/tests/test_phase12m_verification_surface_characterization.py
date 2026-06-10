@@ -6,6 +6,7 @@ from pathlib import Path
 import shlex
 
 from app.services.orchestration.execution.execution_flow import (
+    _inject_project_venv_path,
     execute_verification_command,
 )
 from app.services.orchestration.phases.completion_flow import (
@@ -327,3 +328,118 @@ def test_phase12m_scorer_has_artifact_expectations_beyond_surface_verifier(tmp_p
         VerificationMismatchType.ARTIFACT_EXPECTATION_MISMATCH,
         VerificationMismatchType.SCORER_ONLY_MISMATCH,
     }
+
+
+# ---------------------------------------------------------------------------
+# Venv PATH injection tests (T1 reliability step 2 — pip show env fix)
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_pip(bin_dir: Path, marker: str) -> None:
+    """Write a fake pip shell script that prints marker and exits 0."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    fake_pip = bin_dir / "pip"
+    fake_pip.write_text(
+        f"#!/bin/sh\necho {marker}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_pip.chmod(0o755)
+
+
+def test_inject_project_venv_path_prepends_dot_venv_bin(tmp_path):
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    base_env = {"PATH": "/usr/bin:/bin"}
+
+    result_env = _inject_project_venv_path(tmp_path, base_env)
+
+    assert result_env["PATH"].startswith(str(venv_bin) + ":")
+    assert "/usr/bin:/bin" in result_env["PATH"]
+
+
+def test_inject_project_venv_path_prepends_plain_venv_bin(tmp_path):
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    base_env = {"PATH": "/usr/bin"}
+
+    result_env = _inject_project_venv_path(tmp_path, base_env)
+
+    assert result_env["PATH"].startswith(str(venv_bin) + ":")
+
+
+def test_inject_project_venv_path_no_venv_leaves_env_unchanged(tmp_path):
+    base_env = {"PATH": "/usr/bin:/bin", "FOO": "bar"}
+
+    result_env = _inject_project_venv_path(tmp_path, base_env)
+
+    assert result_env == base_env
+
+
+def test_inject_project_venv_path_dot_venv_takes_priority_over_plain_venv(tmp_path):
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    base_env = {"PATH": "/usr/bin"}
+
+    result_env = _inject_project_venv_path(tmp_path, base_env)
+
+    assert result_env["PATH"].startswith(str(tmp_path / ".venv" / "bin") + ":")
+
+
+def test_inject_project_venv_path_does_not_mutate_input_env(tmp_path):
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    base_env = {"PATH": "/usr/bin"}
+
+    _inject_project_venv_path(tmp_path, base_env)
+
+    assert base_env["PATH"] == "/usr/bin"
+
+
+def test_step_verification_uses_dot_venv_pip_when_venv_exists(tmp_path):
+    _make_fake_pip(tmp_path / ".venv" / "bin", "VENV_PIP_USED")
+
+    result = execute_verification_command(
+        project_dir=tmp_path,
+        command="pip show calclib",
+    )
+
+    assert result["success"] is True
+    assert "VENV_PIP_USED" in result["output"]
+
+
+def test_step_verification_uses_plain_venv_pip_when_only_plain_venv_exists(tmp_path):
+    _make_fake_pip(tmp_path / "venv" / "bin", "PLAIN_VENV_PIP_USED")
+
+    result = execute_verification_command(
+        project_dir=tmp_path,
+        command="pip show pathtools",
+    )
+
+    assert result["success"] is True
+    assert "PLAIN_VENV_PIP_USED" in result["output"]
+
+
+def test_step_verification_without_venv_does_not_use_venv_pip(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    # Place the fake pip outside project_dir — should NOT be picked up
+    _make_fake_pip(tmp_path / ".venv" / "bin", "VENV_PIP_USED")
+
+    result = execute_verification_command(
+        project_dir=project_dir,
+        command="pip show calclib",
+    )
+
+    assert "VENV_PIP_USED" not in result["output"]
+
+
+def test_step_verification_non_pip_command_succeeds_with_venv_present(tmp_path):
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / "hello.txt").write_text("hello-from-venv-project", encoding="utf-8")
+
+    result = execute_verification_command(
+        project_dir=tmp_path,
+        command="cat hello.txt",
+    )
+
+    assert result["success"] is True
+    assert "hello-from-venv-project" in result["output"]

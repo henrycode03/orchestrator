@@ -291,6 +291,20 @@ def stub_expected_files(project_dir: Path, expected_files: List[str]) -> List[st
     return stubs
 
 
+def _inject_project_venv_path(project_dir: Path, env: Dict[str, str]) -> Dict[str, str]:
+    """Prepend .venv/bin (or venv/bin) to PATH when a project virtualenv exists.
+
+    Without this, step verification commands like `pip show <pkg>` resolve to the
+    orchestrator's pip, which cannot see packages installed in the project's venv.
+    """
+    for venv_bin in (project_dir / ".venv" / "bin", project_dir / "venv" / "bin"):
+        if venv_bin.is_dir():
+            env = dict(env)
+            env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+            break
+    return env
+
+
 def execute_verification_command(
     *,
     project_dir: Path,
@@ -336,6 +350,7 @@ def execute_verification_command(
         python_dir = str(Path(sys.executable).parent)
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         env = workspace_python_command_env(project_dir, raw_command, base_env=env)
+        env = _inject_project_venv_path(project_dir, env)
         completed = subprocess.run(
             command_to_run,
             cwd=str(project_dir),
