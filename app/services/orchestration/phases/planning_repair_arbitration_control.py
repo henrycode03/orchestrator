@@ -118,18 +118,13 @@ def arbitrate_planning_repair_candidate(
         root_cause=_repair_root_cause_from_arbitration(arbitration),
         stage="planning_repair_arbitration",
     )
-    # H-6: Attempt weak-verification preservation BEFORE the terminal
-    # materialization-regression abort.  For Task-1 bootstrap plans whose only
-    # original blocking issue was weak verification, the preserved original plan
-    # is a valid recovery even when the degenerate candidate has already dropped
-    # source materialization.  If preservation declines (returns None) we fall
-    # through to the abort below.
-    preserved_weak_verification_plan = (
-        _preserve_regressed_weak_verification_bootstrap_plan(
-            ctx=ctx,
-            previous_plan=previous_plan,
-            arbitration=arbitration,
-        )
+    # Attempt weak-verification preservation before accepting a regressed repair.
+    # Task-1 bootstrap plans use obligation loss as the damage signal. Later
+    # implementation tasks use placeholder-only repaired steps as the signal.
+    preserved_weak_verification_plan = _preserve_regressed_weak_verification_plan(
+        ctx=ctx,
+        previous_plan=previous_plan,
+        arbitration=arbitration,
     )
     if preserved_weak_verification_plan is not None:
         ctx.orchestration_state.plan = preserved_weak_verification_plan
@@ -418,22 +413,34 @@ def arbitrate_planning_repair_candidate(
     }
 
 
-def _preserve_regressed_weak_verification_bootstrap_plan(
+def _preserve_regressed_weak_verification_plan(
     *,
     ctx: OrchestrationRunContext,
     previous_plan: Any,
     arbitration: dict[str, Any],
 ) -> list[dict[str, Any]] | None:
-    if not _is_first_ordered_task(ctx.task) or not isinstance(previous_plan, list):
+    if not isinstance(previous_plan, list):
         return None
     labels = {
         str(label or "").strip() for label in arbitration.get("regression_labels") or []
     }
-    if arbitration.get("outcome") != "regressed" and "test_rewrite" not in labels:
-        return None
-    if not _repair_drops_bootstrap_obligations(
-        previous_plan, ctx.orchestration_state.plan
-    ):
+    bootstrap_regression = (
+        _is_first_ordered_task(ctx.task)
+        and (arbitration.get("outcome") == "regressed" or "test_rewrite" in labels)
+        and _repair_drops_bootstrap_obligations(
+            previous_plan, ctx.orchestration_state.plan
+        )
+    )
+    placeholder_steps = (arbitration.get("immediate_repair_issues") or {}).get(
+        "placeholder_only_steps"
+    ) or []
+    non_bootstrap_placeholder_regression = (
+        not _is_first_ordered_task(ctx.task)
+        and arbitration.get("outcome") == "regressed"
+        and "test_rewrite" in labels
+        and bool(placeholder_steps)
+    )
+    if not bootstrap_regression and not non_bootstrap_placeholder_regression:
         return None
 
     original_issues = PlannerService.find_immediate_repair_step_issues(
@@ -481,7 +488,35 @@ def _preserve_regressed_weak_verification_bootstrap_plan(
         if original_step is None:
             return None
         replacement_found = False
-        for verification in candidate_verifications:
+        matching_candidate = next(
+            (
+                step
+                for step in candidate_steps
+                if step.get("step_number") == weak_step_number
+            ),
+            None,
+        )
+        matching_verification = str(
+            (matching_candidate or {}).get("verification") or ""
+        ).strip()
+        matching_verification_is_grounded = bool(
+            matching_candidate
+            and (
+                matching_candidate.get("expected_files")
+                or matching_candidate.get("ops")
+            )
+        )
+        ordered_verifications = list(
+            dict.fromkeys(
+                (
+                    [matching_verification]
+                    if matching_verification and matching_verification_is_grounded
+                    else []
+                )
+                + candidate_verifications
+            )
+        )
+        for verification in ordered_verifications:
             trial_plan = copy.deepcopy(preserved_plan)
             trial_step = next(
                 (

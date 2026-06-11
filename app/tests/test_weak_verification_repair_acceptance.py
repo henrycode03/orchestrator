@@ -10,6 +10,10 @@ from app.services.orchestration.phases.planning_repair_arbitration_control impor
     arbitrate_planning_repair_candidate,
 )
 from app.services.orchestration.phases.planning_support import _PlanningRetryState
+from app.services.orchestration.planning.planner import PlannerService
+from app.services.orchestration.planning.repair_arbitration import (
+    classify_planning_repair_candidate,
+)
 
 
 def _bootstrap_plan(package: str) -> list[dict]:
@@ -213,12 +217,23 @@ def _collapsed_strtools_repair() -> list[dict]:
     ]
 
 
-def _ctx(*, plan: list[dict], project_dir: Path, package: str) -> SimpleNamespace:
-    prompt = f"Bootstrap the {package} package with a venv and pytest."
+def _ctx(
+    *,
+    plan: list[dict],
+    project_dir: Path,
+    package: str,
+    plan_position: int = 1,
+    prompt: str | None = None,
+) -> SimpleNamespace:
+    prompt = prompt or f"Bootstrap the {package} package with a venv and pytest."
     task = SimpleNamespace(
-        title=f"Bootstrap {package} package",
+        title=(
+            f"Bootstrap {package} package"
+            if plan_position == 1
+            else f"Implement {package} feature"
+        ),
         description=prompt,
-        plan_position=1,
+        plan_position=plan_position,
         status=None,
         error_message=None,
     )
@@ -248,6 +263,73 @@ def _ctx(*, plan: list[dict], project_dir: Path, package: str) -> SimpleNamespac
     )
 
 
+def _pathtools_t2_plan(*, weak_verification: bool = True) -> list[dict]:
+    return [
+        {
+            "step_number": 1,
+            "description": "Implement path filters",
+            "commands": [],
+            "verification": ("python3 -m py_compile pathtools/filters.py"),
+            "rollback": None,
+            "expected_files": ["pathtools/filters.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "pathtools/filters.py",
+                    "content": (
+                        "def filter_by_extension(paths, ext):\n"
+                        "    return [p for p in paths if p.endswith(ext)]\n\n"
+                        "def filter_by_prefix(paths, prefix):\n"
+                        "    return [p for p in paths if p.startswith(prefix)]\n"
+                    ),
+                }
+            ],
+        },
+        {
+            "step_number": 2,
+            "description": "Create filter tests",
+            "commands": [],
+            "verification": (".venv/bin/python3 -m pytest tests/test_filters.py -q"),
+            "rollback": None,
+            "expected_files": ["tests/test_filters.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "tests/test_filters.py",
+                    "content": (
+                        "from pathtools.filters import filter_by_extension\n\n"
+                        "def test_filter_by_extension():\n"
+                        "    assert filter_by_extension(['a.py'], '.py') == ['a.py']\n"
+                    ),
+                }
+            ],
+        },
+        {
+            "step_number": 3,
+            "description": "Verify filters",
+            "commands": [".venv/bin/python3 -m pytest tests/test_filters.py -q"],
+            "verification": (
+                "test -f tests/test_filters.py"
+                if weak_verification
+                else ".venv/bin/python3 -m pytest tests/test_filters.py -q"
+            ),
+            "rollback": None,
+            "expected_files": ["pathtools/filters.py", "tests/test_filters.py"],
+            "ops": [],
+        },
+    ]
+
+
+def _placeholder_pathtools_t2_repair() -> list[dict]:
+    candidate = _pathtools_t2_plan(weak_verification=False)
+    candidate[1]["commands"] = ["touch tests/test_filters.py"]
+    candidate[2]["commands"] = [
+        "touch pathtools/filters.py",
+        "touch tests/test_filters.py",
+    ]
+    return candidate
+
+
 def test_regressed_weak_verification_repair_preserves_complete_bootstrap_plan(
     tmp_path, monkeypatch
 ):
@@ -262,7 +344,6 @@ def test_regressed_weak_verification_repair_preserves_complete_bootstrap_plan(
     retry_state = _PlanningRetryState()
     retry_state.repair_prompt_used = True
     retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
-
     result = arbitrate_planning_repair_candidate(
         ctx=ctx,
         retry_state=retry_state,
@@ -297,7 +378,6 @@ def test_strtools_regression_preserves_venv_install_and_test_obligations(
     retry_state = _PlanningRetryState()
     retry_state.repair_prompt_used = True
     retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
-
     result = arbitrate_planning_repair_candidate(
         ctx=ctx,
         retry_state=retry_state,
@@ -366,6 +446,112 @@ def test_non_weak_repair_acceptance_is_unchanged(tmp_path, monkeypatch):
     retry_state = _PlanningRetryState()
     retry_state.repair_prompt_used = True
     retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
+
+    result = arbitrate_planning_repair_candidate(
+        ctx=ctx,
+        retry_state=retry_state,
+        previous_plan=copy.deepcopy(original),
+        immediate_repair_issues={},
+        planning_phase_event=None,
+        output_text="[]",
+        planning_timeout_seconds=60,
+        prompt_profile=None,
+        repair_planning_output=lambda **kwargs: {"output": "[]"},
+    )
+
+    assert result["action"] == "none"
+    assert ctx.orchestration_state.plan == candidate
+
+
+def test_non_bootstrap_placeholder_repair_preserves_original_implementation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control"
+        ".append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    original = _pathtools_t2_plan()
+    candidate = _placeholder_pathtools_t2_repair()
+    original_issues = {
+        key: value
+        for key, value in PlannerService.find_immediate_repair_step_issues(
+            original,
+            project_dir=tmp_path,
+        ).items()
+        if value
+    }
+    immediate_issues = PlannerService.find_immediate_repair_step_issues(
+        candidate,
+        project_dir=tmp_path,
+    )
+    assert original_issues == {"weak_verification_steps": [3]}
+    assert immediate_issues["placeholder_only_steps"] == [2, 3]
+    ctx = _ctx(
+        plan=candidate,
+        project_dir=tmp_path,
+        package="pathtools",
+        plan_position=2,
+        prompt=(
+            "Create pathtools/filters.py and tests/test_filters.py, then run "
+            ".venv/bin/python3 -m pytest tests/test_filters.py -q."
+        ),
+    )
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
+
+    result = arbitrate_planning_repair_candidate(
+        ctx=ctx,
+        retry_state=retry_state,
+        previous_plan=copy.deepcopy(original),
+        immediate_repair_issues=immediate_issues,
+        planning_phase_event=None,
+        output_text="[]",
+        planning_timeout_seconds=60,
+        prompt_profile=None,
+        repair_planning_output=lambda **kwargs: {"output": "[]"},
+    )
+
+    assert result["action"] == "replace"
+    assert ctx.orchestration_state.plan[:2] == original[:2]
+    assert (
+        ctx.orchestration_state.plan[2]["verification"] == candidate[2]["verification"]
+    )
+    assert ctx.orchestration_state.plan[2]["commands"] == original[2]["commands"]
+
+
+def test_non_bootstrap_real_test_creation_with_test_rewrite_is_accepted(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control"
+        ".append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    original = _pathtools_t2_plan()
+    candidate = _pathtools_t2_plan(weak_verification=False)
+    candidate[1]["ops"][0]["content"] += (
+        "\ndef test_filter_by_prefix():\n"
+        "    from pathtools.filters import filter_by_prefix\n"
+        "    assert filter_by_prefix(['alpha'], 'a') == ['alpha']\n"
+    )
+    ctx = _ctx(
+        plan=candidate,
+        project_dir=tmp_path,
+        package="pathtools",
+        plan_position=2,
+    )
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
+    classification = classify_planning_repair_candidate(
+        previous_plan=original,
+        repaired_plan=candidate,
+        project_dir=tmp_path,
+        immediate_repair_issues={},
+    )
+    assert "test_rewrite" in classification["regression_labels"]
 
     result = arbitrate_planning_repair_candidate(
         ctx=ctx,
