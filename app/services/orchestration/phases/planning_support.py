@@ -24,7 +24,10 @@ from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ReasoningArtifact
-from app.services.orchestration.validation.validator import MAX_PLANNING_COMMAND_CHARS
+from app.services.orchestration.validation.validator import (
+    MAX_PLANNING_COMMAND_CHARS,
+    ValidatorService,
+)
 from app.services.prompt_templates import OrchestrationStatus
 
 MAX_PLANNING_RETRIES = 3
@@ -40,6 +43,18 @@ def _usable_knowledge_context(knowledge_context: Any) -> Any:
         if knowledge_context and knowledge_context.retrieved_items
         else None
     )
+
+
+def _planning_validation_profile(ctx: OrchestrationRunContext) -> str:
+    try:
+        return ValidatorService.infer_validation_profile(
+            ctx.prompt,
+            ctx.execution_profile,
+            title=ctx.task.title if ctx.task else None,
+            description=ctx.task.description if ctx.task else None,
+        )
+    except Exception:
+        return ""
 
 
 def _truncated_multistep_collapse_diagnostics(

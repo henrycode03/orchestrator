@@ -104,6 +104,7 @@ from app.services.orchestration.phases.planning_support import (
     _extract_stale_old_text_from_plan,
     _model_lane_limitation_for_invalid_planning_commands,
     _plan_contract_diagnostics,
+    _planning_validation_profile,
     _planning_root_cause_from_immediate_repair_issues,
     _planning_root_cause_from_issue_key,
     _planning_root_cause_from_plan_verdict,
@@ -308,21 +309,12 @@ def execute_planning_phase(
                 "estimated_prompt_tokens": planning_prompt_tokens,
             },
         )
-        planning_result = PlannerService.retry_with_minimal_prompt(
-            runtime_service=ctx.runtime_service,
-            task_description=ctx.prompt,
-            project_dir=ctx.orchestration_state.project_dir,
-            timeout_seconds=planning_timeout_seconds,
-            logger=ctx.logger,
-            emit_live=ctx.emit_live,
+        planning_result = __retry_with_minimal_prompt(
+            ctx=ctx,
+            planning_timeout_seconds=planning_timeout_seconds,
             reason="dense_planning_context",
             prompt_profile=prompt_profile,
-            workflow_profile=ctx.workflow_profile,
-            workflow_phases=getattr(ctx, "workflow_phases", []),
-            workspace_has_existing_files=getattr(
-                ctx, "workspace_has_existing_files", False
-            ),
-            knowledge_context=_usable_knowledge_context(planning_knowledge_ctx),
+            knowledge_context=planning_knowledge_ctx,
         )
     else:
         planning_result = asyncio.run(
@@ -415,21 +407,12 @@ def execute_planning_phase(
                 "reason": (planning_result.get("error") or initial_output_text)[:240],
             },
         )
-        planning_result = PlannerService.retry_with_minimal_prompt(
-            runtime_service=ctx.runtime_service,
-            task_description=ctx.prompt,
-            project_dir=ctx.orchestration_state.project_dir,
-            timeout_seconds=planning_timeout_seconds,
-            logger=ctx.logger,
-            emit_live=ctx.emit_live,
+        planning_result = __retry_with_minimal_prompt(
+            ctx=ctx,
+            planning_timeout_seconds=planning_timeout_seconds,
             reason=(planning_result.get("error") or initial_output_text),
             prompt_profile=prompt_profile,
-            workflow_profile=ctx.workflow_profile,
-            workflow_phases=getattr(ctx, "workflow_phases", []),
-            workspace_has_existing_files=getattr(
-                ctx, "workspace_has_existing_files", False
-            ),
-            knowledge_context=_usable_knowledge_context(planning_knowledge_ctx),
+            knowledge_context=planning_knowledge_ctx,
         )
         used_minimal_planning_prompt = True
 
@@ -2491,6 +2474,7 @@ def __retry_with_minimal_prompt(
             ctx, "workspace_has_existing_files", False
         ),
         knowledge_context=_usable_knowledge_context(knowledge_context),
+        validation_profile=_planning_validation_profile(ctx),
     )
 
 

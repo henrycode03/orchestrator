@@ -58,6 +58,15 @@ PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {
     "failure_memory",
     "debug_case",
 }
+PLANNING_REPAIR_VERIFICATION_MUTATION_MARKERS = (
+    "verification_mutates_source_assets",
+    "verification_review_plan_mutates_app_source_assets",
+    "verification/review plan mutates app source assets",
+    "verification/review plan creates new app source assets",
+    "verification plan created source assets",
+    "verification_profile_mutated_source_assets",
+    "verification_profile_created_source_assets",
+)
 PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "projectContext",
     "nonProjectContext",
@@ -341,8 +350,15 @@ def build_planning_repair_prompt_with_metadata(
         "triple-quoted Python blocks; do not place bare multiline code outside "
         "JSON quotes; output must remain a valid JSON array."
     )
+    verification_source_mutation_guidance = (
+        _build_verification_source_mutation_repair_guidance(
+            malformed_output, rejection_reasons
+        )
+    )
     materialization_preservation_guidance = (
-        _build_materialization_preservation_guidance(malformed_output)
+        _build_materialization_preservation_guidance(
+            malformed_output, rejection_reasons
+        )
     )
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons
@@ -368,6 +384,7 @@ def build_planning_repair_prompt_with_metadata(
         rejection_reasons=rejection_reasons,
     )
     validation_guidance_block = _join_optional_blocks(
+        verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,
@@ -887,6 +904,13 @@ def _build_specialized_prompt_protected(
         full_block=source_api_contract_block,
         compact_block=source_api_contract_compact_block,
     )
+    verification_source_mutation_guidance = (
+        _build_verification_source_mutation_repair_guidance(
+            malformed_output,
+            rejection_reasons,
+            include_step_excerpts=False,
+        )
+    )
 
     attempts: list[dict[str, Any]] = [
         {
@@ -984,6 +1008,7 @@ def _build_specialized_prompt_protected(
             project_dir=project_dir,
             rejection_reasons=rejection_reasons,
             knowledge_block=_join_optional_blocks(
+                verification_source_mutation_guidance,
                 attempt["knowledge"],
                 attempt["source_api"],
                 attempt["source_context"],
@@ -1077,7 +1102,90 @@ def _build_grounded_source_edit_repair_guidance(
     )
 
 
-def _build_materialization_preservation_guidance(malformed_output: str) -> str:
+def _is_verification_source_mutation_repair_case(
+    rejection_reasons: Optional[list[str]],
+) -> bool:
+    combined = "\n".join(
+        str(reason or "") for reason in (rejection_reasons or [])
+    ).lower()
+    if not combined:
+        return False
+    return any(
+        marker in combined for marker in PLANNING_REPAIR_VERIFICATION_MUTATION_MARKERS
+    )
+
+
+def _verification_mutation_step_excerpts(malformed_output: str) -> list[str]:
+    try:
+        parsed = json.loads(str(malformed_output or ""))
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    excerpts: list[str] = []
+    for step in parsed:
+        if not isinstance(step, dict):
+            continue
+        ops = step.get("ops") or []
+        has_write_op = any(
+            isinstance(op, dict)
+            and str(op.get("op") or "")
+            in ("write_file", "append_file", "replace_in_file")
+            for op in ops
+        )
+        if not has_write_op:
+            continue
+        rendered_step = dict(step)
+        rendered_ops: list[Any] = []
+        for op in ops:
+            if isinstance(op, dict):
+                rendered_op = dict(op)
+                for content_key in ("content", "old", "new"):
+                    content_text = str(rendered_op.get(content_key) or "")
+                    if len(content_text) > 120:
+                        rendered_op[content_key] = content_text[:117] + "..."
+                rendered_ops.append(rendered_op)
+            else:
+                rendered_ops.append(op)
+        rendered_step["ops"] = rendered_ops
+        excerpts.append(json.dumps(rendered_step, ensure_ascii=True))
+        if len(excerpts) >= 4:
+            break
+    return excerpts
+
+
+def _build_verification_source_mutation_repair_guidance(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+    include_step_excerpts: bool = True,
+) -> str:
+    if not _is_verification_source_mutation_repair_case(rejection_reasons):
+        return ""
+    lines = [
+        "Verification-profile repair required:",
+        "- This is a verification-profile task. Remove write_file, append_file, "
+        "and replace_in_file operations that target source files. Replace them "
+        "with read-only inspection commands and test/verification commands.",
+        "- Keep read-only inspection steps and the final project test/verification step.",
+        "- expected_files should be [] for verification steps.",
+    ]
+    if include_step_excerpts:
+        step_excerpts = _verification_mutation_step_excerpts(malformed_output)
+        if step_excerpts:
+            lines.append(
+                "- Rejected plan steps with source-mutating operations "
+                "(remove these operations):"
+            )
+            lines.extend(f"  {excerpt}" for excerpt in step_excerpts)
+    return "\n".join(lines)
+
+
+def _build_materialization_preservation_guidance(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]] = None,
+) -> str:
+    if _is_verification_source_mutation_repair_case(rejection_reasons):
+        return ""
     try:
         parsed = json.loads(str(malformed_output or ""))
     except Exception:
@@ -1102,7 +1210,12 @@ def _build_materialization_preservation_guidance(malformed_output: str) -> str:
     )
 
 
-def _build_compact_materialization_preservation_guidance(malformed_output: str) -> str:
+def _build_compact_materialization_preservation_guidance(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]] = None,
+) -> str:
+    if _is_verification_source_mutation_repair_case(rejection_reasons):
+        return ""
     try:
         parsed = json.loads(str(malformed_output or ""))
     except Exception:
@@ -1446,8 +1559,17 @@ def build_compact_planning_repair_prompt(
         "triple-quoted Python blocks; do not place bare multiline code outside "
         "JSON quotes; output must remain a valid JSON array."
     )
+    verification_source_mutation_guidance = (
+        _build_verification_source_mutation_repair_guidance(
+            malformed_output,
+            rejection_reasons,
+            include_step_excerpts=False,
+        )
+    )
     materialization_preservation_guidance = (
-        _build_compact_materialization_preservation_guidance(malformed_output)
+        _build_compact_materialization_preservation_guidance(
+            malformed_output, rejection_reasons
+        )
     )
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons
@@ -1468,6 +1590,7 @@ def build_compact_planning_repair_prompt(
         rejection_reasons
     )
     validation_guidance_block = _join_optional_blocks(
+        verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,

@@ -128,6 +128,10 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
     "expected_files": []
   }
 ]"""
+VERIFICATION_PROFILE_PLANNING_CONTRACT_LINE = (
+    "Verification-profile task: use read-only inspection and verification "
+    "commands only; do not alter project files."
+)
 
 
 def _render_knowledge_block(knowledge_context: Any) -> str:
@@ -2154,8 +2158,13 @@ class PlannerService:
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
         project_structure_capsule: Optional[str] = None,
+        validation_profile: Optional[str] = None,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
+        if str(validation_profile or "") == "verification":
+            concise_task = (
+                f"{concise_task}\n{VERIFICATION_PROFILE_PLANNING_CONTRACT_LINE}"
+            )
         display_project_dir = render_workspace_path_for_prompt(project_dir)
         workflow_guidance = PlannerService._render_workflow_guidance(
             workflow_profile=workflow_profile,
@@ -2244,8 +2253,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workflow_profile: str = "default",
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
+        validation_profile: Optional[str] = None,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:700]
+        if str(validation_profile or "") == "verification":
+            concise_task = (
+                f"{concise_task}\n{VERIFICATION_PROFILE_PLANNING_CONTRACT_LINE}"
+            )
         display_project_dir = render_workspace_path_for_prompt(project_dir)
         workflow_guidance = PlannerService._render_workflow_guidance(
             workflow_profile=workflow_profile,
@@ -2971,6 +2985,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
+        validation_profile: Optional[str] = None,
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -3011,6 +3026,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             project_structure_capsule=PlannerService._build_project_structure_capsule(
                 project_dir
             ),
+            validation_profile=validation_profile,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -3152,6 +3168,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                         workflow_profile=workflow_profile,
                         workflow_phases=workflow_phases,
                         workspace_has_existing_files=workspace_has_existing_files,
+                        validation_profile=validation_profile,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                     reuse_task_session=False,
