@@ -44,6 +44,9 @@ from app.services.orchestration.diagnostics.public_api_guard import (
     public_api_removal_event_details,
 )
 from app.services.orchestration.execution import ExecutorService
+from app.services.orchestration.execution.path_guard import (
+    detect_advisory_nested_scaffold,
+)
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
@@ -884,6 +887,37 @@ def execute_step_loop(
                         "files_changed": ops_result["files_changed"][:20],
                     },
                 )
+                # Phase 1 advisory: detect new top-level scaffold dirs created by
+                # structured ops. Advisory only — does not block or alter outcomes.
+                for _advisory in detect_advisory_nested_scaffold(
+                    pre_step_checksum, ops_result["files_changed"]
+                ):
+                    logger.warning(
+                        "[PATH_GUARD] Step %s created new top-level directory %r via "
+                        "structured ops that looks like a nested project scaffold: %s "
+                        "(advisory — not blocking)",
+                        step_index + 1,
+                        _advisory.new_top_dir,
+                        ", ".join(_advisory.files_written[:6]),
+                    )
+                    emit_live(
+                        "WARN",
+                        (
+                            f"[PATH_GUARD] Step {step_index + 1} created new top-level "
+                            f"directory {_advisory.new_top_dir!r} via structured ops that "
+                            f"looks like a nested project scaffold: "
+                            f"{', '.join(_advisory.files_written[:6])} "
+                            "(advisory — not blocking)"
+                        ),
+                        metadata={
+                            "phase": "executing",
+                            "step_index": step_index + 1,
+                            "new_top_dir": _advisory.new_top_dir,
+                            "files_written": _advisory.files_written[:20],
+                            "mode": _advisory.mode,
+                            "contract_violation_type": _advisory.contract_violation_type,
+                        },
+                    )
 
         step_started_at = datetime.now(timezone.utc)
         if ops_result.get("success", False):
