@@ -1268,6 +1268,12 @@ def execute_planning_phase(
                 if arbitration_control.get("action") == "replace":
                     ctx.orchestration_state.plan = arbitration_control["plan"]
                     output_text = json.dumps(ctx.orchestration_state.plan)
+                    immediate_repair_issues = (
+                        PlannerService.find_immediate_repair_step_issues(
+                            ctx.orchestration_state.plan,
+                            project_dir=ctx.orchestration_state.project_dir,
+                        )
+                    )
             blocking_issue_keys = (
                 "non_runnable_steps",
                 "background_process_steps",
@@ -1844,6 +1850,8 @@ def execute_planning_phase(
                         ctx, validation_knowledge_ctx, used_in_prompt=True
                     )
                 retry_state.last_repair_reason = "plan_validation_failed"
+                if "verification_mutates_source_assets" in semantic_violation_codes:
+                    retry_state.vma_repair_triggered = True
                 retry_state.task1_bootstrap_rejection_contract = (
                     plan_verdict.details or {}
                 ).get("task1_bootstrap_contract")

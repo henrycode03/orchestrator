@@ -1314,6 +1314,7 @@ class _PlanningRetryState:
         self.post_repair_task1_bootstrap_second_repair_used = False
         self.task1_bootstrap_rejection_contract: dict[str, Any] | None = None
         self.source_materialization_required_after_repair = False
+        self.vma_repair_triggered = False
         self.last_repair_reason = ""
         self.last_multistep_plan_step_count = 0
         self.planning_root_cause = "unknown"

@@ -118,8 +118,41 @@ def arbitrate_planning_repair_candidate(
         root_cause=_repair_root_cause_from_arbitration(arbitration),
         stage="planning_repair_arbitration",
     )
+    # H-6: Attempt weak-verification preservation BEFORE the terminal
+    # materialization-regression abort.  For Task-1 bootstrap plans whose only
+    # original blocking issue was weak verification, the preserved original plan
+    # is a valid recovery even when the degenerate candidate has already dropped
+    # source materialization.  If preservation declines (returns None) we fall
+    # through to the abort below.
+    preserved_weak_verification_plan = (
+        _preserve_regressed_weak_verification_bootstrap_plan(
+            ctx=ctx,
+            previous_plan=previous_plan,
+            arbitration=arbitration,
+        )
+    )
+    if preserved_weak_verification_plan is not None:
+        ctx.orchestration_state.plan = preserved_weak_verification_plan
+        arbitration["reason"] = "regressed_weak_verification_repair_preserved_original"
+        arbitration["arbitration_action"] = (
+            "preserve_original_replace_weak_verification"
+        )
+        _emit_planning_repair_arbitration(
+            ctx,
+            arbitration=arbitration,
+            planning_phase_event=planning_phase_event,
+        )
+        return {
+            "action": "replace",
+            "plan": preserved_weak_verification_plan,
+        }
+
     materialization_regression_paths = _materialization_regression_paths(arbitration)
-    if materialization_regression_paths:
+    # C-1: VMA repairs are expected to remove source-write ops — the repair prompt
+    # explicitly instructs the model to do exactly that.  Triggering the terminal
+    # abort here would punish a correct repair.  Skip for VMA-triggered repairs;
+    # implementation-profile behaviour is unchanged.
+    if materialization_regression_paths and not retry_state.vma_repair_triggered:
         root_cause = _record_planning_root_cause(
             retry_state,
             "missing_source_materialization",
@@ -183,28 +216,6 @@ def arbitrate_planning_repair_candidate(
                 "status": "failed",
                 "reason": "planning_repair_materialization_regression",
             },
-        }
-    preserved_weak_verification_plan = (
-        _preserve_regressed_weak_verification_bootstrap_plan(
-            ctx=ctx,
-            previous_plan=previous_plan,
-            arbitration=arbitration,
-        )
-    )
-    if preserved_weak_verification_plan is not None:
-        ctx.orchestration_state.plan = preserved_weak_verification_plan
-        arbitration["reason"] = "regressed_weak_verification_repair_preserved_original"
-        arbitration["arbitration_action"] = (
-            "preserve_original_replace_weak_verification"
-        )
-        _emit_planning_repair_arbitration(
-            ctx,
-            arbitration=arbitration,
-            planning_phase_event=planning_phase_event,
-        )
-        return {
-            "action": "replace",
-            "plan": preserved_weak_verification_plan,
         }
     if not invalid_python_repair_candidate:
         # Acceptance definition: accepted progress = repair improved the plan
