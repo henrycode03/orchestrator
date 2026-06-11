@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +32,7 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
+from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.repair_evidence import (
     write_failed_planning_repair_triplet,
 )
@@ -181,6 +183,28 @@ def arbitrate_planning_repair_candidate(
                 "status": "failed",
                 "reason": "planning_repair_materialization_regression",
             },
+        }
+    preserved_weak_verification_plan = (
+        _preserve_regressed_weak_verification_bootstrap_plan(
+            ctx=ctx,
+            previous_plan=previous_plan,
+            arbitration=arbitration,
+        )
+    )
+    if preserved_weak_verification_plan is not None:
+        ctx.orchestration_state.plan = preserved_weak_verification_plan
+        arbitration["reason"] = "regressed_weak_verification_repair_preserved_original"
+        arbitration["arbitration_action"] = (
+            "preserve_original_replace_weak_verification"
+        )
+        _emit_planning_repair_arbitration(
+            ctx,
+            arbitration=arbitration,
+            planning_phase_event=planning_phase_event,
+        )
+        return {
+            "action": "replace",
+            "plan": preserved_weak_verification_plan,
         }
     if not invalid_python_repair_candidate:
         # Acceptance definition: accepted progress = repair improved the plan
@@ -381,6 +405,137 @@ def arbitrate_planning_repair_candidate(
             "reason": "planning_validation_failed_after_repair",
         },
     }
+
+
+def _preserve_regressed_weak_verification_bootstrap_plan(
+    *,
+    ctx: OrchestrationRunContext,
+    previous_plan: Any,
+    arbitration: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    if not _is_first_ordered_task(ctx.task) or not isinstance(previous_plan, list):
+        return None
+    labels = {
+        str(label or "").strip() for label in arbitration.get("regression_labels") or []
+    }
+    if arbitration.get("outcome") != "regressed" and "test_rewrite" not in labels:
+        return None
+    if not _repair_drops_bootstrap_obligations(
+        previous_plan, ctx.orchestration_state.plan
+    ):
+        return None
+
+    original_issues = PlannerService.find_immediate_repair_step_issues(
+        previous_plan,
+        project_dir=ctx.orchestration_state.project_dir,
+    )
+    blocking_original_issues = {
+        key: value for key, value in original_issues.items() if value
+    }
+    weak_steps = list(blocking_original_issues.get("weak_verification_steps") or [])
+    if not weak_steps or set(blocking_original_issues) != {"weak_verification_steps"}:
+        return None
+
+    candidate_plan = ctx.orchestration_state.plan
+    if not isinstance(candidate_plan, list):
+        return None
+    candidate_steps = [
+        step
+        for step in candidate_plan
+        if isinstance(step, dict) and str(step.get("verification") or "").strip()
+    ]
+    candidate_steps.sort(
+        key=lambda step: (
+            not bool(step.get("expected_files")),
+            not bool(step.get("ops")),
+        )
+    )
+    candidate_verifications = [
+        str(step.get("verification") or "").strip() for step in candidate_steps
+    ]
+    if not candidate_verifications:
+        return None
+
+    preserved_plan = copy.deepcopy(previous_plan)
+    for weak_step_number in weak_steps:
+        original_step = next(
+            (
+                step
+                for step in preserved_plan
+                if isinstance(step, dict)
+                and step.get("step_number") == weak_step_number
+            ),
+            None,
+        )
+        if original_step is None:
+            return None
+        replacement_found = False
+        for verification in candidate_verifications:
+            trial_plan = copy.deepcopy(preserved_plan)
+            trial_step = next(
+                (
+                    step
+                    for step in trial_plan
+                    if isinstance(step, dict)
+                    and step.get("step_number") == weak_step_number
+                ),
+                None,
+            )
+            if trial_step is None:
+                continue
+            trial_step["verification"] = verification
+            trial_issues = PlannerService.find_immediate_repair_step_issues(
+                trial_plan,
+                project_dir=ctx.orchestration_state.project_dir,
+            )
+            if weak_step_number not in (
+                trial_issues.get("weak_verification_steps") or []
+            ):
+                preserved_plan = trial_plan
+                replacement_found = True
+                break
+        if not replacement_found:
+            return None
+    return preserved_plan
+
+
+def _repair_drops_bootstrap_obligations(
+    previous_plan: Any,
+    candidate_plan: Any,
+) -> bool:
+    if not isinstance(previous_plan, list) or not isinstance(candidate_plan, list):
+        return False
+
+    def _expected_files(plan: list[Any]) -> set[str]:
+        return {
+            str(path).strip()
+            for step in plan
+            if isinstance(step, dict)
+            for path in (step.get("expected_files") or [])
+            if str(path).strip()
+        }
+
+    def _lifecycle_obligations(plan: list[Any]) -> set[str]:
+        commands = "\n".join(
+            str(command or "").lower()
+            for step in plan
+            if isinstance(step, dict)
+            for command in (step.get("commands") or [])
+        )
+        obligations: set[str] = set()
+        if " -m venv " in f" {commands} ":
+            obligations.add("venv")
+        if "pip install" in commands:
+            obligations.add("install")
+        if "pytest" in commands:
+            obligations.add("pytest")
+        return obligations
+
+    return bool(
+        _expected_files(previous_plan) - _expected_files(candidate_plan)
+        or _lifecycle_obligations(previous_plan)
+        - _lifecycle_obligations(candidate_plan)
+    )
 
 
 def _reject_repair_candidate_by_bootstrap_contract(

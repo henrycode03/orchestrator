@@ -1265,6 +1265,9 @@ def execute_planning_phase(
                     continue
                 if arbitration_control.get("action") == "return":
                     return arbitration_control["result"]
+                if arbitration_control.get("action") == "replace":
+                    ctx.orchestration_state.plan = arbitration_control["plan"]
+                    output_text = json.dumps(ctx.orchestration_state.plan)
             blocking_issue_keys = (
                 "non_runnable_steps",
                 "background_process_steps",
