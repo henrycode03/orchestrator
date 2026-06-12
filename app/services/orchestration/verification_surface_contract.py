@@ -11,12 +11,16 @@ classified, and reported rather than hidden.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from app.services.orchestration.execution.python_resolution import (
+    resolve_project_python,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -114,14 +118,17 @@ def _normalize_pythonpath(raw: str) -> list[str]:
     return [p for p in raw.split(os.pathsep) if p]
 
 
-def _step_resolved_command(raw_command: str) -> str:
+def _step_resolved_command(project_dir: Path, raw_command: str) -> str:
     """Replicate the python-rewrite logic from execute_verification_command."""
+    resolved_python = resolve_project_python(project_dir)
     if raw_command in {"python", "python3"}:
-        return subprocess.list2cmdline([sys.executable])
+        return subprocess.list2cmdline([resolved_python])
     if raw_command.startswith("python "):
-        return subprocess.list2cmdline([sys.executable]) + raw_command[len("python") :]
+        return subprocess.list2cmdline([resolved_python]) + raw_command[len("python") :]
     if raw_command.startswith("python3 "):
-        return subprocess.list2cmdline([sys.executable]) + raw_command[len("python3") :]
+        return (
+            subprocess.list2cmdline([resolved_python]) + raw_command[len("python3") :]
+        )
     return raw_command
 
 
@@ -132,7 +139,7 @@ def _step_env(project_dir: Path, raw_command: str) -> dict[str, str]:
     )
 
     base_env = os.environ.copy()
-    python_dir = str(Path(sys.executable).parent)
+    python_dir = str(Path(resolve_project_python(project_dir)).parent)
     base_env["PATH"] = python_dir + os.pathsep + base_env.get("PATH", "")
     env = workspace_python_command_env(project_dir, raw_command, base_env=base_env)
     return env
@@ -162,6 +169,21 @@ def _completion_env(project_dir: Path) -> dict[str, str]:
     return env
 
 
+def _completion_resolved_command(project_dir: Path, raw_command: str) -> str:
+    if not raw_command:
+        return raw_command
+    try:
+        tokens = shlex.split(raw_command, posix=True)
+    except ValueError:
+        return raw_command
+    if not tokens:
+        return raw_command
+    if Path(tokens[0]).name not in {"python", "python3"}:
+        return raw_command
+    tokens[0] = resolve_project_python(project_dir)
+    return shlex.join(tokens)
+
+
 # ---------------------------------------------------------------------------
 # Surface adapters
 # ---------------------------------------------------------------------------
@@ -179,7 +201,7 @@ def build_step_verification_contract(
 ) -> VerificationSurfaceContract:
     """Build a normalized contract for step verification parameters."""
     raw_command = str(command or "").strip()
-    resolved_command = _step_resolved_command(raw_command)
+    resolved_command = _step_resolved_command(project_dir, raw_command)
     env = _step_env(project_dir, raw_command)
     pythonpath = _normalize_pythonpath(env.get("PYTHONPATH", ""))
     return VerificationSurfaceContract(
@@ -211,11 +233,12 @@ def build_completion_verification_contract(
 ) -> VerificationSurfaceContract:
     """Build a normalized contract for completion verification parameters."""
     raw_command = str(command or "").strip()
+    resolved_command = _completion_resolved_command(project_dir, raw_command)
     env = _completion_env(project_dir)
     pythonpath = _normalize_pythonpath(env.get("PYTHONPATH", ""))
     return VerificationSurfaceContract(
         surface=VerificationSurface.COMPLETION_VERIFICATION,
-        command=raw_command,
+        command=resolved_command,
         cwd=str(project_dir.resolve()),
         env={"PYTHONPATH": env.get("PYTHONPATH", "")},
         pythonpath=pythonpath,

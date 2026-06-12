@@ -424,22 +424,17 @@ def _preserve_regressed_weak_verification_plan(
     labels = {
         str(label or "").strip() for label in arbitration.get("regression_labels") or []
     }
-    bootstrap_regression = (
-        _is_first_ordered_task(ctx.task)
-        and (arbitration.get("outcome") == "regressed" or "test_rewrite" in labels)
-        and _repair_drops_bootstrap_obligations(
-            previous_plan, ctx.orchestration_state.plan
-        )
+    bootstrap_regression = _is_first_ordered_task(
+        ctx.task
+    ) and _repair_drops_bootstrap_obligations(
+        previous_plan, ctx.orchestration_state.plan
     )
     placeholder_steps = (arbitration.get("immediate_repair_issues") or {}).get(
         "placeholder_only_steps"
     ) or []
-    non_bootstrap_placeholder_regression = (
-        not _is_first_ordered_task(ctx.task)
-        and arbitration.get("outcome") == "regressed"
-        and "test_rewrite" in labels
-        and bool(placeholder_steps)
-    )
+    non_bootstrap_placeholder_regression = not _is_first_ordered_task(
+        ctx.task
+    ) and bool(placeholder_steps)
     if not bootstrap_regression and not non_bootstrap_placeholder_regression:
         return None
 

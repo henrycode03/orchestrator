@@ -551,7 +551,8 @@ def test_non_bootstrap_real_test_creation_with_test_rewrite_is_accepted(
         project_dir=tmp_path,
         immediate_repair_issues={},
     )
-    assert "test_rewrite" in classification["regression_labels"]
+    assert "test_rewrite" not in classification["regression_labels"]
+    assert classification["outcome"] == "improved_or_preserved"
 
     result = arbitrate_planning_repair_candidate(
         ctx=ctx,

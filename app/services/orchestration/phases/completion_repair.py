@@ -7,12 +7,14 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
+)
+from app.services.orchestration.execution.python_resolution import (
+    resolve_project_python,
 )
 from app.services.orchestration.policy import COMPLETION_VERIFICATION_TIMEOUT_SECONDS
 from app.services.orchestration.types import FailureEnvelope, ValidationVerdict
@@ -231,44 +233,9 @@ def _detect_completion_verification_command(
 
 
 def _completion_verification_python(project_dir: Path) -> str:
-    """Prefer the nearest project/repo virtualenv for Python verification."""
+    """Use the shared project-first interpreter policy."""
 
-    candidates = [
-        project_dir / "venv" / "bin" / "python",
-        project_dir / ".venv" / "bin" / "python",
-    ]
-    for parent in [project_dir, *project_dir.parents]:
-        candidates.extend(
-            [
-                parent / "venv" / "bin" / "python",
-                parent / ".venv" / "bin" / "python",
-            ]
-        )
-
-    # Also search from the process working directory. This covers the case
-    # where the project lives outside the orchestrator tree (e.g. tmp_path in
-    # tests, or a workspace directory mounted separately in Docker) but the
-    # orchestrator itself has a local venv adjacent to its working directory.
-    process_cwd = Path.cwd()
-    project_ancestors = {project_dir, *project_dir.parents}
-    if process_cwd not in project_ancestors:
-        candidates.extend(
-            [
-                process_cwd / "venv" / "bin" / "python",
-                process_cwd / ".venv" / "bin" / "python",
-            ]
-        )
-
-    seen: set[Path] = set()
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return str(candidate)
-
-    return sys.executable or "python3"
+    return resolve_project_python(project_dir)
 
 
 def _augment_completion_verification_command(command: str, test_script: str) -> str:
@@ -315,6 +282,9 @@ def _execute_completion_verification(
                 "returncode": None,
                 "output": "Completion verification command was empty after parsing",
             }
+        executable_name = Path(argv[0]).name
+        if executable_name in {"python", "python3"}:
+            argv[0] = _completion_verification_python(project_dir)
         env = dict(os.environ)
         raw_pythonpath = env.get("PYTHONPATH", "")
         if raw_pythonpath:

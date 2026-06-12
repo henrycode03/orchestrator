@@ -72,7 +72,13 @@ def classify_planning_repair_candidate(
         source_api_capsule=source_api_capsule,
         details=details,
     )
-    risk_status = _risk_status(repaired_plan, issues=issues, details=details)
+    risk_status = _risk_status(
+        previous_plan,
+        repaired_plan,
+        project_dir=project_dir,
+        issues=issues,
+        details=details,
+    )
 
     if materialization_status in {"removed", "moved"}:
         labels.append("removed_materialization")
@@ -247,8 +253,10 @@ def _source_api_status(
 
 
 def _risk_status(
+    previous_plan: Any,
     plan: Any,
     *,
+    project_dir: Path,
     issues: dict[str, list[int]],
     details: dict[str, Any],
 ) -> dict[str, Any]:
@@ -266,10 +274,14 @@ def _risk_status(
     ]
     return {
         "test_write_risk": bool(
-            test_paths
-            or issues.get("test_assertion_loss_ops_steps")
+            issues.get("test_assertion_loss_ops_steps")
             or issues.get("test_deletion_ops_steps")
             or details.get("undefined_python_test_name_materializations")
+            or _test_rewrite_regression(
+                previous_plan=previous_plan,
+                repaired_plan=plan,
+                project_dir=project_dir,
+            )
         ),
         "test_write_paths": test_paths[:20],
         "workspace_write_risk": bool(
@@ -341,6 +353,77 @@ def _write_paths(plan: Any) -> list[str]:
             if path:
                 paths.append(path)
     return list(dict.fromkeys(paths))
+
+
+def _test_rewrite_regression(
+    *,
+    previous_plan: Any,
+    repaired_plan: Any,
+    project_dir: Path,
+) -> bool:
+    previous_tests = _planned_test_writes(previous_plan)
+    repaired_tests = _planned_test_writes(repaired_plan)
+
+    for path in previous_tests:
+        if path not in repaired_tests and not (project_dir / path).exists():
+            return True
+
+    for path, repaired_content in repaired_tests.items():
+        baseline_content = _test_baseline_content(
+            path=path,
+            project_dir=project_dir,
+            previous_tests=previous_tests,
+        )
+        if baseline_content is None:
+            continue
+        if _python_assertion_count(repaired_content) < _python_assertion_count(
+            baseline_content
+        ):
+            return True
+
+    return False
+
+
+def _planned_test_writes(plan: Any) -> dict[str, str]:
+    writes: dict[str, str] = {}
+    if not isinstance(plan, list):
+        return writes
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "") != "write_file":
+                continue
+            path = str(operation.get("path") or "").strip().lstrip("./")
+            content = operation.get("content")
+            if path and _is_test_path(path) and isinstance(content, str):
+                writes[path] = content
+    return writes
+
+
+def _test_baseline_content(
+    *,
+    path: str,
+    project_dir: Path,
+    previous_tests: dict[str, str],
+) -> str | None:
+    on_disk = project_dir / path
+    if on_disk.exists():
+        try:
+            return on_disk.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return previous_tests.get(path)
+
+
+def _python_assertion_count(content: str) -> int:
+    try:
+        tree = ast.parse(content or "")
+    except SyntaxError:
+        return 0
+    return sum(isinstance(node, ast.Assert) for node in ast.walk(tree))
 
 
 def _invalid_python_write_paths(plan: Any) -> list[str]:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from .python_resolution import resolve_project_python
 from .executor import ExecutorService
 from .runtime import build_workspace_discovery_step
 from ..types import ValidationVerdict
@@ -370,21 +371,22 @@ def execute_verification_command(
     if portable_result is not None:
         return portable_result
 
+    resolved_python = resolve_project_python(project_dir)
     command_to_run = raw_command
     if raw_command in {"python", "python3"}:
-        command_to_run = subprocess.list2cmdline([sys.executable])
+        command_to_run = subprocess.list2cmdline([resolved_python])
     elif raw_command.startswith("python "):
         command_to_run = (
-            subprocess.list2cmdline([sys.executable]) + raw_command[len("python") :]
+            subprocess.list2cmdline([resolved_python]) + raw_command[len("python") :]
         )
     elif raw_command.startswith("python3 "):
         command_to_run = (
-            subprocess.list2cmdline([sys.executable]) + raw_command[len("python3") :]
+            subprocess.list2cmdline([resolved_python]) + raw_command[len("python3") :]
         )
 
     try:
         env = os.environ.copy()
-        python_dir = str(Path(sys.executable).parent)
+        python_dir = str(Path(resolved_python).parent)
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         env = workspace_python_command_env(project_dir, raw_command, base_env=env)
         env = _inject_project_venv_path(project_dir, env)

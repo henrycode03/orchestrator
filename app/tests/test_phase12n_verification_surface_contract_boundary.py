@@ -184,10 +184,9 @@ def test_command_mismatch_detected_between_step_and_scorer(tmp_path, monkeypatch
         project_dir=tmp_path, command=command, source="scorer_verification"
     )
 
-    # Step rewrites leading "python" to sys.executable; scorer receives the
-    # original command as-is (its resolver is applied at run-time, not here).
-    # The contract records what each surface *would* use.
-    assert step.command != command  # rewritten to sys.executable
+    # Step resolves leading "python" to the concrete interpreter it will run,
+    # while scorer keeps the original command and resolves at run-time.
+    assert step.command != command
     assert scorer.command == command  # not rewritten by the adapter
 
     mismatches = compare_verification_surface_contracts([step, scorer])

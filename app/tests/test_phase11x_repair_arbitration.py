@@ -201,6 +201,58 @@ def test_arbitration_labels_stale_replace_and_test_rewrite(tmp_path: Path):
     assert result["write_risk"]["test_write_risk"] is True
 
 
+def test_arbitration_does_not_flag_brand_new_test_creation_as_test_rewrite(
+    tmp_path: Path,
+):
+    previous_plan = [
+        {
+            "step_number": 1,
+            "description": "Implement calculator",
+            "commands": [],
+            "verification": "python -m pytest tests/test_ops.py -q",
+            "expected_files": ["src/math_tools/operations.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/math_tools/operations.py",
+                    "content": "def add(a, b):\n    return a + b\n",
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        previous_plan[0],
+        {
+            "step_number": 2,
+            "description": "Add regression tests",
+            "commands": [],
+            "verification": "python -m pytest tests/test_ops.py -q",
+            "expected_files": ["src/math_tools/operations.py", "tests/test_ops.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "tests/test_ops.py",
+                    "content": (
+                        "from math_tools.operations import add\n\n"
+                        "def test_add():\n"
+                        "    assert add(1, 2) == 3\n"
+                    ),
+                }
+            ],
+        },
+    ]
+
+    result = classify_planning_repair_candidate(
+        previous_plan=previous_plan,
+        repaired_plan=repaired_plan,
+        project_dir=tmp_path,
+    )
+
+    assert result["outcome"] == "improved_or_preserved"
+    assert "test_rewrite" not in result["regression_labels"]
+    assert result["write_risk"]["test_write_risk"] is False
+
+
 def test_arbitration_labels_missing_verification_without_full_validator(
     tmp_path: Path,
 ):

@@ -345,6 +345,47 @@ def test_python_completion_verification_prefers_project_venv(tmp_path):
     assert source == "python test suite detected"
 
 
+def test_python_completion_verification_uses_system_python_without_project_venv(
+    tmp_path, monkeypatch
+):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    system_bin = tmp_path / "sysbin"
+    system_bin.mkdir()
+    python_bin = system_bin / "python3"
+    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(system_bin))
+
+    command, source = _detect_completion_verification_command(project_dir)
+
+    assert command == f"{shlex.quote(str(python_bin))} -m pytest"
+    assert source == "python test suite detected"
+
+
+def test_completion_verification_does_not_adopt_orchestrator_cwd_venv(
+    tmp_path, monkeypatch
+):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    system_bin = tmp_path / "sysbin"
+    system_bin.mkdir()
+    python_bin = system_bin / "python3"
+    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_bin.chmod(0o755)
+    orchestrator_like_venv = tmp_path / "cwd" / ".venv" / "bin"
+    orchestrator_like_venv.mkdir(parents=True)
+    adopted_python = orchestrator_like_venv / "python"
+    adopted_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    adopted_python.chmod(0o755)
+    monkeypatch.setenv("PATH", str(system_bin))
+    monkeypatch.chdir(tmp_path / "cwd")
+
+    command, _ = _detect_completion_verification_command(project_dir)
+
+    assert command == f"{shlex.quote(str(python_bin))} -m pytest"
+
+
 def test_python_module_pytest_completion_verification_imports_workspace_root(
     tmp_path,
 ):

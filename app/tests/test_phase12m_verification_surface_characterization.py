@@ -12,6 +12,9 @@ from app.services.orchestration.execution.execution_flow import (
     _strip_orchestrator_pip_shadow,
     execute_verification_command,
 )
+from app.services.orchestration.execution.python_resolution import (
+    resolve_project_python,
+)
 from app.services.orchestration.phases.completion_flow import (
     _execute_completion_verification,
 )
@@ -183,7 +186,9 @@ def test_phase12m_leading_python_command_resolution_differs_across_surfaces(
     completion = _execute_completion_verification(project_dir=tmp_path, command=command)
     score = _run_scorer_verifier(tmp_path, command)
 
-    assert step["success"] is True
+    assert step["success"] is False
+    assert step["returncode"] == 42
+    assert step["output"] == "fake-python-from-path"
     assert completion["success"] is False
     assert completion["returncode"] == 42
     assert completion["output"] == "fake-python-from-path"
@@ -593,3 +598,42 @@ def test_step_verification_venv_pip_still_wins_over_system_pip(tmp_path, monkeyp
 
     assert result["success"] is True
     assert "VENV_PIP_USED" in result["output"]
+
+
+def test_resolve_project_python_prefers_project_dot_venv(tmp_path, monkeypatch):
+    python_bin = tmp_path / ".venv" / "bin" / "python"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", "")
+
+    assert resolve_project_python(tmp_path) == str(python_bin)
+
+
+def test_step_verification_python_module_pip_show_uses_system_python_without_venv(
+    tmp_path, monkeypatch
+):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    system_bin.mkdir()
+    python_bin = system_bin / "python3"
+    python_bin.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "show" ]; then\n'
+        "  echo SYSTEM_PYTHON_PIP_USED\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 11\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(system_bin))
+
+    result = execute_verification_command(
+        project_dir=project_dir,
+        command="python3 -m pip show pathtools",
+    )
+
+    assert result["success"] is True
+    assert "SYSTEM_PYTHON_PIP_USED" in result["output"]
