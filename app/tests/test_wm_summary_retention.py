@@ -219,7 +219,9 @@ class TestRenderLimit:
         long = "B" * 1200
         wm = self._wm_with_summaries(long, long)
         rendered = _render_content(wm)
-        assert len(rendered) <= 2 * _SUMMARY_RENDER_LIMIT + 200  # 200 for headings/titles
+        assert (
+            len(rendered) <= 2 * _SUMMARY_RENDER_LIMIT + 200
+        )  # 200 for headings/titles
 
     def test_render_empty_when_no_data(self):
         wm = {
@@ -240,23 +242,34 @@ class TestRenderLimit:
 
 class TestOtherFieldsUnchanged:
     def test_files_by_task_populated(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True)
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
         state = _make_state(str(tmp_path))
         state.changed_files = ["src/foo.py", "tests/test_foo.py"]
         write_working_memory(
-            orchestration_state=state, task=_make_task(7),
-            summary="some summary", logger=MagicMock(),
+            orchestration_state=state,
+            task=_make_task(7),
+            summary="some summary",
+            logger=MagicMock(),
         )
         data = json.loads((tmp_path / ".agent" / "working_memory.json").read_text())
-        assert data["files_by_task"]["7"]["added"] == ["src/foo.py", "tests/test_foo.py"]
+        assert data["files_by_task"]["7"]["added"] == [
+            "src/foo.py",
+            "tests/test_foo.py",
+        ]
 
     def test_active_constraints_unaffected(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True)
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
         state = _make_state(str(tmp_path))
         state.validation_history = []
         write_working_memory(
-            orchestration_state=state, task=_make_task(),
-            summary="s", logger=MagicMock(),
+            orchestration_state=state,
+            task=_make_task(),
+            summary="s",
+            logger=MagicMock(),
         )
         data = json.loads((tmp_path / ".agent" / "working_memory.json").read_text())
         assert data["active_constraints"] == []
@@ -273,20 +286,28 @@ class TestOtherFieldsUnchanged:
 
 class TestFlagOff:
     def test_no_wm_file_when_persistence_off(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False)
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False
+        )
         state = _make_state(str(tmp_path))
         write_working_memory(
-            orchestration_state=state, task=_make_task(),
-            summary=_LONG_LLM, logger=MagicMock(),
+            orchestration_state=state,
+            task=_make_task(),
+            summary=_LONG_LLM,
+            logger=MagicMock(),
         )
         assert not (tmp_path / ".agent" / "working_memory.json").exists()
 
     def test_flag_off_no_side_effects(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False)
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False
+        )
         state = _make_state(str(tmp_path))
         write_working_memory(
-            orchestration_state=state, task=_make_task(),
-            summary="x" * 2000, logger=MagicMock(),
+            orchestration_state=state,
+            task=_make_task(),
+            summary="x" * 2000,
+            logger=MagicMock(),
         )
         assert not (tmp_path / ".agent").exists()
 

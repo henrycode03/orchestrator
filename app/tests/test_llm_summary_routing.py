@@ -76,7 +76,11 @@ def _patch_planning_lane(output: str):
 class TestFlagOff:
     def test_pn_summary_equals_output_when_flag_off(self):
         ctx = _make_ctx()
-        env = {k: v for k, v in os.environ.items() if k != "ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY"}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY"
+        }
         with patch.dict("os.environ", env, clear=True):
             result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
         assert result["fallback"] is True
@@ -85,7 +89,11 @@ class TestFlagOff:
 
     def test_source_is_deterministic_when_flag_off(self):
         ctx = _make_ctx()
-        env = {k: v for k, v in os.environ.items() if k != "ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY"}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY"
+        }
         with patch.dict("os.environ", env, clear=True):
             result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
         assert result.get("source") == "deterministic"
@@ -100,29 +108,44 @@ class TestFlagOnLLMSuccess:
     def test_output_is_llm_text(self):
         ctx = _make_ctx()
         with patch.dict("os.environ", {"ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY": "1"}):
-            with _patch_planning_lane("Detailed LLM: parse_number() -> dict {ok, value, error}"):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
-        assert result["output"] == "Detailed LLM: parse_number() -> dict {ok, value, error}"
+            with _patch_planning_lane(
+                "Detailed LLM: parse_number() -> dict {ok, value, error}"
+            ):
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
+        assert (
+            result["output"]
+            == "Detailed LLM: parse_number() -> dict {ok, value, error}"
+        )
 
     def test_pn_summary_is_deterministic(self):
         ctx = _make_ctx()
         with patch.dict("os.environ", {"ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY": "1"}):
-            with _patch_planning_lane("Detailed LLM: parse_number() -> dict {ok, value, error}"):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
+            with _patch_planning_lane(
+                "Detailed LLM: parse_number() -> dict {ok, value, error}"
+            ):
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
         assert "Task completed with verified execution evidence" in result["pn_summary"]
 
     def test_pn_summary_differs_from_output(self):
         ctx = _make_ctx()
         with patch.dict("os.environ", {"ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY": "1"}):
             with _patch_planning_lane("Rich LLM narrative"):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
         assert result["pn_summary"] != result["output"]
 
     def test_no_fallback_flag(self):
         ctx = _make_ctx()
         with patch.dict("os.environ", {"ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY": "1"}):
             with _patch_planning_lane("LLM content"):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
         assert not result.get("fallback")
 
 
@@ -150,7 +173,9 @@ class TestFlagOnPersistenceOff:
         ctx = _make_ctx()
         with patch.dict("os.environ", {"ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY": "1"}):
             with _patch_planning_lane("LLM content"):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
         assert "Task completed with verified execution evidence" in result["pn_summary"]
         assert result["pn_summary"] != result["output"]
 
@@ -181,7 +206,9 @@ class TestFlagOnPersistenceOn:
             "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
         )
         state = _make_state(str(tmp_path))
-        llm_text = "parse_number(text: str) -> dict: ok/value/error; INVALID_NUMBER sentinel"
+        llm_text = (
+            "parse_number(text: str) -> dict: ok/value/error; INVALID_NUMBER sentinel"
+        )
         write_working_memory(
             orchestration_state=state,
             task=_make_task(),
@@ -199,7 +226,9 @@ class TestFlagOnPersistenceOn:
         """_write_progress_notes writes whatever summary arg it receives.
         Caller (finalize_successful_task) passes pn_summary (deterministic)."""
         state = _make_state(str(tmp_path))
-        deterministic = "Task completed with verified execution evidence. Completed steps: 0/0."
+        deterministic = (
+            "Task completed with verified execution evidence. Completed steps: 0/0."
+        )
         _write_progress_notes(
             orchestration_state=state,
             task=_make_task(),
@@ -214,7 +243,9 @@ class TestFlagOnPersistenceOn:
     def test_progress_notes_does_not_receive_llm_content(self, tmp_path):
         """If caller passes deterministic to _write_progress_notes, LLM content won't appear."""
         state = _make_state(str(tmp_path))
-        pn_text = "Task completed with verified execution evidence. Completed steps: 3/3."
+        pn_text = (
+            "Task completed with verified execution evidence. Completed steps: 3/3."
+        )
         _write_progress_notes(
             orchestration_state=state,
             task=_make_task(),
@@ -245,7 +276,9 @@ class TestFallbackCase:
                 "app.services.orchestration.phases.completion_summary._call_planning_lane",
                 new=_fail,
             ):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
         assert result["fallback"] is True
         assert result.get("pn_summary") == result["output"]
         assert "Task completed with verified execution evidence" in result["output"]
@@ -254,7 +287,9 @@ class TestFallbackCase:
         ctx = _make_ctx()
         with patch.dict("os.environ", {"ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY": "1"}):
             with _patch_planning_lane(""):
-                result = _generate_task_summary_with_fallback(ctx=ctx, summary_prompt="p")
+                result = _generate_task_summary_with_fallback(
+                    ctx=ctx, summary_prompt="p"
+                )
         assert result["fallback"] is True
         assert result.get("pn_summary") == result["output"]
         assert "Task completed with verified execution evidence" in result["output"]
@@ -265,7 +300,9 @@ class TestFallbackCase:
             "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
         )
         state = _make_state(str(tmp_path))
-        fallback_text = "Task completed with verified execution evidence. Completed steps: 2/3."
+        fallback_text = (
+            "Task completed with verified execution evidence. Completed steps: 2/3."
+        )
         write_working_memory(
             orchestration_state=state,
             task=_make_task(),
@@ -299,9 +336,7 @@ class TestRenderInjectionUnchanged:
         monkeypatch.setattr(
             "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False
         )
-        monkeypatch.setattr(
-            "app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True
-        )
+        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
         state = _make_state(str(tmp_path))
         write_working_memory(
             orchestration_state=state,

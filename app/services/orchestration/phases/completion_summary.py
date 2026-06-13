@@ -141,5 +141,7 @@ def _generate_task_summary_with_fallback(
         summary_result.setdefault("status", "completed")
     else:
         # LLM produced content: WM gets LLM output; progress_notes gets deterministic.
-        summary_result["pn_summary"] = _deterministic_task_summary(ctx.orchestration_state)
+        summary_result["pn_summary"] = _deterministic_task_summary(
+            ctx.orchestration_state
+        )
     return summary_result
