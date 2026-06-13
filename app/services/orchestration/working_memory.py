@@ -79,43 +79,14 @@ def _extract_active_constraints(orchestration_state: Any) -> List[str]:
 
 
 def _render_content(wm: Dict[str, Any]) -> str:
-    """Build the === WORKING MEMORY === block from a loaded schema dict."""
+    """Build the === WORKING MEMORY === block from a loaded schema dict.
+
+    Section order: Implementation Strategy first (survives planning context trim),
+    Constraints second. Known Good Commands and Recent Files are stored in
+    working_memory.json but omitted from render — they are redundant with
+    workspace truth and progress_notes already injected into the planning prompt.
+    """
     lines: List[str] = ["=== WORKING MEMORY ===", ""]
-
-    known_cmds: List[Dict] = wm.get("known_good_commands") or []
-    if known_cmds:
-        lines.append("Known Good Commands")
-        for entry in known_cmds[-3:]:
-            task_title = entry.get("task_title", "")
-            if task_title:
-                lines.append(f"  Task: {task_title}")
-            for step_entry in entry.get("steps") or []:
-                for cmd in step_entry.get("commands") or []:
-                    lines.append(f"  $ {cmd}")
-        lines.append("")
-
-    files_by_task: Dict = wm.get("files_by_task") or {}
-    if files_by_task:
-        lines.append("Recent Files")
-        for key in sorted(files_by_task.keys())[-3:]:
-            entry = files_by_task[key]
-            title = entry.get("task_title", key)
-            all_files = (entry.get("added") or []) + (entry.get("modified") or [])
-            if all_files:
-                lines.append(f"  Task: {title}")
-                for f in all_files[:10]:
-                    lines.append(f"  - {f}")
-        lines.append("")
-
-    constraints: List = wm.get("active_constraints") or []
-    if constraints:
-        lines.append("Constraints")
-        for c in constraints[-5:]:
-            if isinstance(c, dict):
-                lines.append(f"  - {c.get('constraint', '')[:100]}")
-            elif isinstance(c, str):
-                lines.append(f"  - {c[:100]}")
-        lines.append("")
 
     strategies: List = wm.get("implementation_strategy") or []
     if strategies:
@@ -128,6 +99,16 @@ def _render_content(wm: Dict[str, Any]) -> str:
                     lines.append(f"  Task: {title}")
                 if summary:
                     lines.append(f"  {summary[:_SUMMARY_RENDER_LIMIT]}")
+        lines.append("")
+
+    constraints: List = wm.get("active_constraints") or []
+    if constraints:
+        lines.append("Constraints")
+        for c in constraints[-5:]:
+            if isinstance(c, dict):
+                lines.append(f"  - {c.get('constraint', '')[:100]}")
+            elif isinstance(c, str):
+                lines.append(f"  - {c[:100]}")
         lines.append("")
 
     lines.append("=== END WORKING MEMORY ===")
@@ -236,7 +217,7 @@ def _render_working_memory_content(project_dir: Any, logger: Any) -> str:
     try:
         openclaw_dir = Path(str(project_dir)) / ".agent"
         wm = _load(openclaw_dir, str(project_dir))
-        if not wm.get("known_good_commands") and not wm.get("files_by_task"):
+        if not wm.get("implementation_strategy") and not wm.get("active_constraints"):
             return ""
         return _render_content(wm)
     except Exception as exc:

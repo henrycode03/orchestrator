@@ -321,8 +321,9 @@ def test_render_produces_block_when_flag_on(tmp_path, monkeypatch):
     result = render_working_memory(tmp_path, _make_logger())
     assert "=== WORKING MEMORY ===" in result
     assert "=== END WORKING MEMORY ===" in result
-    assert "npm install" in result
-    assert "package.json" in result
+    # Implementation Strategy is rendered; commands/files are omitted (redundant with workspace truth)
+    assert "Implementation Strategy" in result
+    assert "Installed" in result
 
 
 def test_render_includes_constraints(tmp_path, monkeypatch):
@@ -383,14 +384,21 @@ def test_render_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
             }
         ],
         "active_constraints": [],
-        "implementation_strategy": [],
+        "implementation_strategy": [
+            {
+                "task_id": 1,
+                "task_title": "Fixture task",
+                "summary": "Fixture bootstrap complete. Created fixture.py with helpers.",
+            }
+        ],
         "unresolved_failures": [],
     }
     (openclaw_dir / _FILENAME).write_text(json.dumps(fixture))
     result = render_working_memory(tmp_path, _make_logger())
     assert "=== WORKING MEMORY ===" in result
-    assert "npm ci" in result
-    assert "fixture.py" in result
+    # Implementation Strategy is rendered first; commands/files omitted from render
+    assert "Implementation Strategy" in result
+    assert "Fixture bootstrap complete." in result
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +451,7 @@ def test_inject_prepends_block_for_task_2_plus(tmp_path, monkeypatch):
     write_working_memory(
         orchestration_state=state1,
         task=_make_task(task_id=1, title="Task one"),
-        summary="Created app.js",
+        summary="Created app.js using module pattern",
         logger=_make_logger(),
     )
     # Inject for task 2
@@ -455,8 +463,8 @@ def test_inject_prepends_block_for_task_2_plus(tmp_path, monkeypatch):
     )
     ctx = state2.project_context
     assert "=== WORKING MEMORY ===" in ctx
-    assert "node -e" in ctx
-    assert "app.js" in ctx
+    # Implementation Strategy (summary) is rendered; commands/files omitted from render
+    assert "Created app.js using module pattern" in ctx
     assert "existing context" in ctx
 
 
@@ -529,7 +537,13 @@ def test_inject_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
             }
         ],
         "active_constraints": [],
-        "implementation_strategy": [],
+        "implementation_strategy": [
+            {
+                "task_id": 1,
+                "task_title": "Prior task",
+                "summary": "Bootstrap complete. Created index.js with module exports.",
+            }
+        ],
         "unresolved_failures": [],
     }
     (openclaw_dir / _FILENAME).write_text(json.dumps(fixture))
@@ -541,6 +555,191 @@ def test_inject_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
     )
     ctx = state.project_context
     assert "=== WORKING MEMORY ===" in ctx
-    assert "node -e" in ctx
-    assert "index.js" in ctx
+    # Implementation Strategy (summary) is rendered; commands/files omitted from render
+    assert "Bootstrap complete." in ctx
     assert "existing context" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Stage 6: Visibility tests — render order and planning context trim survival
+# ---------------------------------------------------------------------------
+
+
+class TestStage6Visibility:
+    """Stage 6: verify Implementation Strategy is first in render and survives the
+    400-char planning context trim applied by assemble_planning_prompt."""
+
+    def _wm_with_strategy_and_commands(
+        self,
+        strategy_summary: str,
+        constraint: str = "",
+    ) -> dict:
+        wm: dict = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap task",
+                    "summary": strategy_summary,
+                }
+            ],
+            "known_good_commands": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap task",
+                    "steps": [
+                        {
+                            "step": "Run tests",
+                            "commands": [
+                                "PYTHONPATH=src python3 -m pytest tests/ -v",
+                                "python3 -m pytest tests/test_parser.py -v",
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "files_by_task": {
+                "1": {
+                    "task_id": 1,
+                    "task_title": "Bootstrap task",
+                    "added": [
+                        "src/calclib/__init__.py",
+                        "src/calclib/parser.py",
+                        "tests/test_parser.py",
+                        "pytest.ini",
+                    ],
+                    "modified": [],
+                    "deleted": [],
+                }
+            },
+            "active_constraints": [],
+            "unresolved_failures": [],
+        }
+        if constraint:
+            wm["active_constraints"] = [
+                {
+                    "task_id": 1,
+                    "constraint": constraint,
+                    "source": "validation_rejection",
+                }
+            ]
+        return wm
+
+    def _trim_text(self, text: str, max_chars: int) -> str:
+        """Replicate assembly._trim_text to simulate planning context trim."""
+        value = " ".join(str(text or "").split())
+        if len(value) <= max_chars:
+            return value
+        return value[: max_chars - 3].rstrip() + "..."
+
+    def test_render_block_starts_with_implementation_strategy(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = self._wm_with_strategy_and_commands("parse_number returns a dict.")
+        rendered = _render_content(wm)
+        # Find section header positions
+        impl_pos = rendered.find("Implementation Strategy")
+        end_pos = rendered.find("=== END WORKING MEMORY ===")
+        assert impl_pos != -1, "Implementation Strategy section missing"
+        assert impl_pos < end_pos
+        # Implementation Strategy must come before Constraints (if any)
+        constraints_pos = rendered.find("Constraints")
+        if constraints_pos != -1:
+            assert impl_pos < constraints_pos
+
+    def test_constraints_render_after_implementation_strategy(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = self._wm_with_strategy_and_commands(
+            "Impl strategy text.", constraint="do not use heredoc syntax"
+        )
+        rendered = _render_content(wm)
+        impl_pos = rendered.find("Implementation Strategy")
+        constraints_pos = rendered.find("Constraints")
+        assert impl_pos != -1
+        assert constraints_pos != -1
+        assert (
+            impl_pos < constraints_pos
+        ), "Implementation Strategy must appear before Constraints in rendered block"
+
+    def test_known_good_commands_stored_but_not_rendered(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
+        state = _make_orchestration_state(
+            str(tmp_path),
+            plan=[{"description": "Run tests", "commands": ["pytest tests/ -v"]}],
+            changed_files=["src/parser.py"],
+        )
+        write_working_memory(
+            orchestration_state=state,
+            task=_make_task(task_id=1, title="Bootstrap"),
+            summary="Implemented parser.",
+            logger=_make_logger(),
+        )
+        # Stored in JSON
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        assert len(data["known_good_commands"]) == 1
+        assert (
+            "pytest tests/ -v" in data["known_good_commands"][0]["steps"][0]["commands"]
+        )
+        # Not in rendered block
+        rendered = render_working_memory(tmp_path, _make_logger())
+        assert "pytest tests/ -v" not in rendered
+        assert "Known Good Commands" not in rendered
+
+    def test_recent_files_stored_but_not_rendered(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
+        state = _make_orchestration_state(
+            str(tmp_path),
+            changed_files=["src/calclib/parser.py", "tests/test_parser.py"],
+        )
+        write_working_memory(
+            orchestration_state=state,
+            task=_make_task(task_id=1, title="Bootstrap"),
+            summary="Implemented parser module.",
+            logger=_make_logger(),
+        )
+        # Stored in JSON
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        assert "src/calclib/parser.py" in data["files_by_task"]["1"]["added"]
+        # Not in rendered block
+        rendered = render_working_memory(tmp_path, _make_logger())
+        assert "src/calclib/parser.py" not in rendered
+        assert "Recent Files" not in rendered
+
+    def test_implementation_strategy_survives_400_char_trim(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        # Use 400 A's as strategy text to fill the render budget
+        strategy_text = "A" * 400
+        wm = self._wm_with_strategy_and_commands(strategy_text)
+        rendered = _render_content(wm)
+        trimmed = self._trim_text(rendered, 400)
+        surviving_a_count = trimmed.count("A")
+        assert surviving_a_count >= 300, (
+            f"Only {surviving_a_count} chars of implementation_strategy survived "
+            "the 400-char planning context trim (need >= 300)"
+        )
+
+    def test_implementation_strategy_visible_in_trimmed_block(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        strategy_text = (
+            "parse_number(text: str) -> dict returns ok/value/error fields. "
+            "For valid integers ok=True and value holds the int. "
+            "For invalid input ok=False and error='INVALID_NUMBER'. "
+            "Never raises an exception. Import from src/calclib/parser.py."
+        )
+        wm = self._wm_with_strategy_and_commands(strategy_text)
+        rendered = _render_content(wm)
+        trimmed = self._trim_text(rendered, 400)
+        assert "Implementation Strategy" in trimmed
+        assert "parse_number" in trimmed
+        # Known Good Commands and Recent Files must not appear in trimmed block
+        assert "Known Good Commands" not in trimmed
+        assert "Recent Files" not in trimmed
