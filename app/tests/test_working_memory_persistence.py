@@ -19,10 +19,14 @@ import pytest
 from app.services.orchestration.working_memory import (
     SCHEMA_VERSION,
     _FILENAME,
+    _HUMAN_GUIDANCE_LIMIT,
     _INJECTION_BUDGET,
+    _empty_schema,
     _extract_active_constraints,
     _extract_api_contract,
     _extract_known_good_commands,
+    _extract_operator_guidance,
+    _render_content,
     _render_working_memory_content,
     inject_working_memory_into_context,
     render_working_memory,
@@ -1014,3 +1018,291 @@ class TestApiContractRenderFirst:
         assert (
             code_idx != -1 and code_idx < 250
         ), f'"code" key at char {code_idx} in trimmed block — must be < 250'
+
+
+# ---------------------------------------------------------------------------
+# human_guidance: persistence, deduplication, bounding, render order
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_log_entry(message: str, task_id: int = 1, created_at: Any = None) -> Any:
+    entry = MagicMock()
+    entry.message = message
+    entry.task_id = task_id
+    entry.created_at = created_at
+    return entry
+
+
+def _make_mock_db(entries: list) -> Any:
+    """Return a mock db whose query chain returns `entries`."""
+    mock_query = MagicMock()
+    mock_query.filter.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.all.return_value = entries
+    mock_db = MagicMock()
+    mock_db.query.return_value = mock_query
+    return mock_db
+
+
+class TestHumanGuidance:
+    # 1. Empty schema includes human_guidance: []
+    def test_empty_schema_includes_human_guidance(self):
+        schema = _empty_schema("/tmp/proj")
+        assert "human_guidance" in schema
+        assert schema["human_guidance"] == []
+
+    # 2. When no operator guidance exists (db=None), WM writes with empty field
+    def test_no_guidance_when_db_is_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        state = _make_orchestration_state(str(tmp_path))
+        state.session_id = 42
+        task = _make_task(task_id=1)
+        write_working_memory(
+            orchestration_state=state,
+            task=task,
+            summary="done",
+            logger=_make_logger(),
+            db=None,
+        )
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        assert "human_guidance" in data
+        assert data["human_guidance"] == []
+
+    # 3. One [OPERATOR_GUIDANCE] message is persisted to human_guidance
+    def test_one_guidance_message_persisted(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        entry = _make_mock_log_entry(
+            "[OPERATOR_GUIDANCE] Never use mutable default arguments", task_id=1
+        )
+        mock_db = _make_mock_db([entry])
+        state = _make_orchestration_state(str(tmp_path))
+        state.session_id = 7
+        task = _make_task(task_id=1)
+        write_working_memory(
+            orchestration_state=state,
+            task=task,
+            summary="done",
+            logger=_make_logger(),
+            db=mock_db,
+        )
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        assert len(data["human_guidance"]) == 1
+        assert (
+            data["human_guidance"][0]["message"]
+            == "Never use mutable default arguments"
+        )
+        assert data["human_guidance"][0]["source"] == "operator_guidance"
+
+    # 4. Duplicate messages are deduplicated
+    def test_duplicate_guidance_messages_deduplicated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        msg = "[OPERATOR_GUIDANCE] Never use mutable default arguments"
+        entries = [
+            _make_mock_log_entry(msg, task_id=1),
+            _make_mock_log_entry(msg, task_id=1),
+        ]
+        mock_db = _make_mock_db(entries)
+        state = _make_orchestration_state(str(tmp_path))
+        state.session_id = 7
+        task = _make_task(task_id=1)
+        write_working_memory(
+            orchestration_state=state,
+            task=task,
+            summary="done",
+            logger=_make_logger(),
+            db=mock_db,
+        )
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        messages = [g["message"] for g in data["human_guidance"]]
+        assert messages.count("Never use mutable default arguments") == 1
+
+    # 5. More than 10 messages are bounded to latest 10
+    def test_guidance_bounded_to_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        entries = [
+            _make_mock_log_entry(f"[OPERATOR_GUIDANCE] Rule {i}", task_id=1)
+            for i in range(15)
+        ]
+        mock_db = _make_mock_db(entries)
+        state = _make_orchestration_state(str(tmp_path))
+        state.session_id = 7
+        task = _make_task(task_id=1)
+        write_working_memory(
+            orchestration_state=state,
+            task=task,
+            summary="done",
+            logger=_make_logger(),
+            db=mock_db,
+        )
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        assert len(data["human_guidance"]) == _HUMAN_GUIDANCE_LIMIT
+
+    # 6. human_guidance renders before active_constraints (after Implementation Strategy)
+    def test_human_guidance_renders_before_constraints(self):
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {"task_id": 1, "task_title": "T1", "summary": "Used factory pattern."}
+            ],
+            "human_guidance": [
+                {
+                    "task_id": 1,
+                    "message": "Never use mutable defaults",
+                    "created_at": "",
+                    "source": "operator_guidance",
+                }
+            ],
+            "active_constraints": [
+                {
+                    "task_id": 1,
+                    "constraint": "no heredoc syntax",
+                    "source": "validation_rejection",
+                }
+            ],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        guidance_pos = rendered.find("Never use mutable defaults")
+        constraint_pos = rendered.find("no heredoc syntax")
+        impl_pos = rendered.find("Implementation Strategy")
+        assert guidance_pos != -1, "human_guidance message missing from render"
+        assert constraint_pos != -1, "constraint missing from render"
+        assert impl_pos < guidance_pos < constraint_pos, (
+            f"Expected order: Implementation Strategy ({impl_pos}) < "
+            f"human_guidance ({guidance_pos}) < constraints ({constraint_pos})"
+        )
+
+    # 7. human_guidance is not rendered when render flag is off
+    def test_human_guidance_not_rendered_when_flag_off(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", False)
+        openclaw_dir = tmp_path / ".agent"
+        openclaw_dir.mkdir()
+        wm_data = {
+            "schema_version": SCHEMA_VERSION,
+            "project_dir": str(tmp_path),
+            "last_updated": "",
+            "files_by_task": {},
+            "known_good_commands": [],
+            "active_constraints": [],
+            "human_guidance": [
+                {
+                    "task_id": 1,
+                    "message": "Never use mutable defaults",
+                    "created_at": "",
+                    "source": "operator_guidance",
+                }
+            ],
+            "implementation_strategy": [],
+            "unresolved_failures": [],
+        }
+        (openclaw_dir / _FILENAME).write_text(json.dumps(wm_data))
+        result = render_working_memory(tmp_path, _make_logger())
+        assert result == ""
+
+    # 8. human_guidance is not written to progress_notes
+    def test_human_guidance_not_in_progress_notes(self, tmp_path, monkeypatch):
+        from app.services.orchestration.phases.completion_flow import (
+            _write_progress_notes,
+        )
+
+        state = _make_orchestration_state(str(tmp_path))
+        state.execution_results = []
+        task = _make_task()
+        _write_progress_notes(
+            orchestration_state=state,
+            task=task,
+            prompt="Create a package",
+            summary="Used factory pattern",
+            logger=_make_logger(),
+        )
+        notes_path = tmp_path / ".agent" / "progress_notes.md"
+        if notes_path.exists():
+            content = notes_path.read_text()
+            assert "human_guidance" not in content
+            assert "OPERATOR_GUIDANCE" not in content
+            assert "Operator Guidance" not in content
+
+    # 9. _extract_operator_guidance returns empty list when db is None
+    def test_extract_operator_guidance_no_db(self):
+        result = _extract_operator_guidance(None, session_id=1, task_id=1)
+        assert result == []
+
+    # 10. _extract_operator_guidance strips the [OPERATOR_GUIDANCE] prefix
+    def test_extract_operator_guidance_strips_prefix(self):
+        entry = _make_mock_log_entry(
+            "[OPERATOR_GUIDANCE] Use None for defaults", task_id=1
+        )
+        entry.created_at = None
+        mock_db = _make_mock_db([entry])
+        result = _extract_operator_guidance(mock_db, session_id=5, task_id=1)
+        assert len(result) == 1
+        assert result[0]["message"] == "Use None for defaults"
+        assert result[0]["source"] == "operator_guidance"
+
+    # 11. human_guidance renders with Operator Guidance header
+    def test_human_guidance_renders_with_header(self):
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [],
+            "human_guidance": [
+                {
+                    "task_id": 1,
+                    "message": "Always use type hints",
+                    "created_at": "",
+                    "source": "operator_guidance",
+                }
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        assert "Operator Guidance" in rendered
+        assert "Always use type hints" in rendered
+        assert "=== WORKING MEMORY ===" in rendered
+
+    # 12. Existing tests still pass — write then render includes all existing fields
+    def test_existing_persistence_unaffected_by_human_guidance(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
+        state = _make_orchestration_state(
+            str(tmp_path),
+            plan=[{"description": "Step 1", "commands": ["pytest"]}],
+            changed_files=["app.py"],
+            validation_history=[{"reasons": ["use PYTHONPATH=src"]}],
+        )
+        state.session_id = 99
+        task = _make_task(task_id=3, title="Test task")
+        write_working_memory(
+            orchestration_state=state,
+            task=task,
+            summary="Done with pytest",
+            logger=_make_logger(),
+            db=None,
+        )
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        assert "3" in data["files_by_task"]
+        assert len(data["known_good_commands"]) == 1
+        assert len(data["implementation_strategy"]) == 1
+        assert len(data["active_constraints"]) == 1
+        assert data["human_guidance"] == []
+        rendered = render_working_memory(tmp_path, _make_logger())
+        assert "Implementation Strategy" in rendered
+        assert "Constraints" in rendered
+        assert "Done with pytest" in rendered
+        assert "use PYTHONPATH=src" in rendered

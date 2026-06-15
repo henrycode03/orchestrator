@@ -35,6 +35,7 @@ def _empty_schema(project_dir: str) -> Dict[str, Any]:
         "files_by_task": {},
         "known_good_commands": [],
         "active_constraints": [],
+        "human_guidance": [],
         "implementation_strategy": [],
         "unresolved_failures": [],
     }
@@ -80,6 +81,57 @@ def _extract_active_constraints(orchestration_state: Any) -> List[str]:
                 seen.add(reason)
                 out.append(reason)
     return out[:20]
+
+
+_HUMAN_GUIDANCE_LIMIT = 10  # max entries stored/rendered
+
+
+def _extract_operator_guidance(
+    db: Any,
+    session_id: Any,
+    task_id: Any,
+) -> List[Dict[str, Any]]:
+    """Return [OPERATOR_GUIDANCE] log entries for this session as structured dicts."""
+    if db is None:
+        return []
+    try:
+        from app.models import LogEntry
+
+        try:
+            numeric_session_id = int(session_id)
+        except (TypeError, ValueError):
+            return []
+        entries = (
+            db.query(LogEntry)
+            .filter(LogEntry.session_id == numeric_session_id)
+            .filter(LogEntry.message.like("[OPERATOR_GUIDANCE]%"))
+            .order_by(LogEntry.id.asc())
+            .all()
+        )
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        text = str(entry.message or "").replace("[OPERATOR_GUIDANCE]", "", 1).strip()
+        if not text:
+            continue
+        created_at = ""
+        try:
+            ts = getattr(entry, "created_at", None)
+            if ts is not None:
+                created_at = ts.isoformat()
+        except Exception:
+            pass
+        out.append(
+            {
+                "task_id": int(entry.task_id) if entry.task_id is not None else task_id,
+                "message": text,
+                "created_at": created_at,
+                "source": "operator_guidance",
+            }
+        )
+    return out
 
 
 def _extract_api_contract(summary: str) -> tuple:
@@ -153,6 +205,18 @@ def _render_content(wm: Dict[str, Any]) -> str:
                         lines.append(f"  {summary[:_SUMMARY_RENDER_LIMIT]}")
         lines.append("")
 
+    guidance: List = wm.get("human_guidance") or []
+    if guidance:
+        lines.append("Operator Guidance")
+        for g in guidance[-_HUMAN_GUIDANCE_LIMIT:]:
+            if isinstance(g, dict):
+                msg = g.get("message", "")[:200]
+                if msg:
+                    lines.append(f"  - {msg}")
+            elif isinstance(g, str):
+                lines.append(f"  - {g[:200]}")
+        lines.append("")
+
     constraints: List = wm.get("active_constraints") or []
     if constraints:
         lines.append("Constraints")
@@ -178,6 +242,7 @@ def write_working_memory(
     task: Any,
     summary: str,
     logger: Any,
+    db: Any = None,
 ) -> None:
     """Persist WorkingMemory to .agent/working_memory.json after task success.
 
@@ -234,6 +299,27 @@ def write_working_memory(
                     }
                 )
 
+        # human_guidance — collect [OPERATOR_GUIDANCE] log entries, deduplicate, cap at 10
+        if db is not None:
+            session_id = getattr(orchestration_state, "session_id", None)
+            existing_guidance: List[Dict[str, Any]] = wm.get("human_guidance") or []
+            seen_messages = {
+                g.get("message", "") if isinstance(g, dict) else str(g)
+                for g in existing_guidance
+            }
+            new_entries = _extract_operator_guidance(db, session_id, task_id)
+            to_add: List[Dict[str, Any]] = []
+            for g in new_entries:
+                msg = g.get("message", "")
+                if msg and msg not in seen_messages:
+                    seen_messages.add(msg)
+                    to_add.append(g)
+            if to_add:
+                all_guidance = existing_guidance + to_add
+                wm["human_guidance"] = all_guidance[-_HUMAN_GUIDANCE_LIMIT:]
+        elif "human_guidance" not in wm:
+            wm["human_guidance"] = []
+
         # implementation_strategy
         if summary:
             wm["implementation_strategy"].append(
@@ -269,7 +355,11 @@ def _render_working_memory_content(project_dir: Any, logger: Any) -> str:
     try:
         openclaw_dir = Path(str(project_dir)) / ".agent"
         wm = _load(openclaw_dir, str(project_dir))
-        if not wm.get("implementation_strategy") and not wm.get("active_constraints"):
+        if (
+            not wm.get("implementation_strategy")
+            and not wm.get("active_constraints")
+            and not wm.get("human_guidance")
+        ):
             return ""
         return _render_content(wm)
     except Exception as exc:

@@ -1942,6 +1942,7 @@ def finalize_successful_task(
         task=task,
         summary=wm_summary,
         logger=logger,
+        db=db,
     )
     promoted_workspace_archive_result = finalization.get(
         "promoted_workspace_archive_result"
