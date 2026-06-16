@@ -741,6 +741,26 @@ class HumanGuidanceConflict(Base):
     source = Column(String(50), nullable=False, default="heuristic")
 
 
+class HumanGuidanceActivation(Base):
+    __tablename__ = "human_guidance_activations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)
+    session_id = Column(Integer, nullable=True, index=True)
+    scope = Column(String(20), nullable=False, index=True)  # "project" | "session"
+    table_enabled = Column(Boolean, nullable=False, default=False)
+    persistence_enabled = Column(Boolean, nullable=False, default=False)
+    render_enabled = Column(Boolean, nullable=False, default=False)
+    injection_enabled = Column(Boolean, nullable=False, default=False)
+    conflict_detection_enabled = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    enabled_by = Column(String(255), nullable=True)
+    disabled_at = Column(DateTime(timezone=True), nullable=True)
+    disabled_by = Column(String(255), nullable=True)
+    status = Column(String(20), nullable=False, default="disabled", index=True)
+
+
 class KnowledgeUsageLog(Base):
     __tablename__ = "knowledge_usage_logs"
 

@@ -1,4 +1,4 @@
-"""Human Guidance API — HG-P1a/P1c/P1d endpoints."""
+"""Human Guidance API — HG-P1a/P1c/P1d/P1e endpoints."""
 
 from __future__ import annotations
 
@@ -152,6 +152,14 @@ def list_project_guidance(
 class PatchConflictRequest(BaseModel):
     status: str
     resolution_note: Optional[str] = None
+
+
+class ActivationPatchRequest(BaseModel):
+    table_enabled: bool = False
+    persistence_enabled: bool = False
+    render_enabled: bool = False
+    injection_enabled: bool = False
+    conflict_detection_enabled: bool = False
 
 
 def _serialize_conflict_row(row: object) -> dict:
@@ -435,3 +443,132 @@ def archive_guidance_entry(
         ),
         "message": "Archived. Guidance will no longer affect planning.",
     }
+
+
+# ── HG-P1e: activation controls ───────────────────────────────────────────────
+
+
+def _serialize_activation_row(row: object) -> dict:
+    created = getattr(row, "created_at", None)
+    updated = getattr(row, "updated_at", None)
+    disabled = getattr(row, "disabled_at", None)
+    return {
+        "id": getattr(row, "id", None),
+        "scope": getattr(row, "scope", None),
+        "project_id": getattr(row, "project_id", None),
+        "session_id": getattr(row, "session_id", None),
+        "table_enabled": getattr(row, "table_enabled", False),
+        "persistence_enabled": getattr(row, "persistence_enabled", False),
+        "render_enabled": getattr(row, "render_enabled", False),
+        "injection_enabled": getattr(row, "injection_enabled", False),
+        "conflict_detection_enabled": getattr(row, "conflict_detection_enabled", False),
+        "status": getattr(row, "status", "disabled"),
+        "enabled_by": getattr(row, "enabled_by", None),
+        "disabled_at": disabled.isoformat() if disabled else None,
+        "disabled_by": getattr(row, "disabled_by", None),
+        "created_at": created.isoformat() if created else None,
+        "updated_at": updated.isoformat() if updated else None,
+    }
+
+
+@router.get("/projects/{project_id}/guidance/readiness")
+def get_project_guidance_readiness(
+    project_id: int,
+    session_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Return Human Guidance readiness status for a project (optionally session-scoped)."""
+    from app.services.human_guidance_activation_service import readiness_status
+
+    get_project_for_user(db, project_id, current_user)
+    return readiness_status(db, project_id=project_id, session_id=session_id)
+
+
+@router.patch("/projects/{project_id}/guidance/activation")
+def patch_project_activation(
+    project_id: int,
+    body: ActivationPatchRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Set project-level Human Guidance activation flags."""
+    from app.services.human_guidance_activation_service import set_project_activation
+
+    get_project_for_user(db, project_id, current_user)
+    row = set_project_activation(
+        db,
+        project_id,
+        body.model_dump(),
+        enabled_by=getattr(current_user, "email", None),
+    )
+    return _serialize_activation_row(row)
+
+
+@router.post("/projects/{project_id}/guidance/activation/disable")
+def disable_project_activation(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Disable project-level Human Guidance activation."""
+    from app.services.human_guidance_activation_service import disable_activation
+
+    get_project_for_user(db, project_id, current_user)
+    row = disable_activation(
+        db, "project", project_id, disabled_by=getattr(current_user, "email", None)
+    )
+    return _serialize_activation_row(row)
+
+
+@router.get("/sessions/{session_id}/guidance/readiness")
+def get_session_guidance_readiness(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Return Human Guidance readiness status for a session."""
+    from app.services.authz import get_session_for_user
+    from app.services.human_guidance_activation_service import readiness_status
+
+    session = get_session_for_user(db, session_id, current_user)
+    return readiness_status(db, project_id=session.project_id, session_id=session_id)
+
+
+@router.patch("/sessions/{session_id}/guidance/activation")
+def patch_session_activation(
+    session_id: int,
+    body: ActivationPatchRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Set session-level Human Guidance activation flags (overrides project)."""
+    from app.services.authz import get_session_for_user
+    from app.services.human_guidance_activation_service import set_session_activation
+
+    session = get_session_for_user(db, session_id, current_user)
+    row = set_session_activation(
+        db,
+        session_id,
+        session.project_id,
+        body.model_dump(),
+        enabled_by=getattr(current_user, "email", None),
+    )
+    return _serialize_activation_row(row)
+
+
+@router.post("/sessions/{session_id}/guidance/activation/disable")
+def disable_session_activation(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Disable session-level Human Guidance activation."""
+    from app.services.authz import get_session_for_user
+    from app.services.human_guidance_activation_service import disable_activation
+
+    session = get_session_for_user(db, session_id, current_user)
+    row = disable_activation(
+        db, "session", session_id, disabled_by=getattr(current_user, "email", None)
+    )
+    return _serialize_activation_row(row)

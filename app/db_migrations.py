@@ -778,6 +778,57 @@ def _migration_017_human_guidance_conflicts(engine: Engine) -> None:
                 connection.execute(text(ddl))
 
 
+def _migration_018_human_guidance_activations(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    if "human_guidance_activations" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE human_guidance_activations (
+                        id INTEGER PRIMARY KEY,
+                        project_id INTEGER,
+                        session_id INTEGER,
+                        scope VARCHAR(20) NOT NULL,
+                        table_enabled BOOLEAN NOT NULL DEFAULT 0,
+                        persistence_enabled BOOLEAN NOT NULL DEFAULT 0,
+                        render_enabled BOOLEAN NOT NULL DEFAULT 0,
+                        injection_enabled BOOLEAN NOT NULL DEFAULT 0,
+                        conflict_detection_enabled BOOLEAN NOT NULL DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME,
+                        enabled_by VARCHAR(255),
+                        disabled_at DATETIME,
+                        disabled_by VARCHAR(255),
+                        status VARCHAR(20) NOT NULL DEFAULT 'disabled'
+                    )
+                    """
+                )
+            )
+
+    with engine.begin() as connection:
+        for index_name, ddl in [
+            (
+                "ix_hga_project_id",
+                "CREATE INDEX ix_hga_project_id ON human_guidance_activations (project_id)",
+            ),
+            (
+                "ix_hga_session_id",
+                "CREATE INDEX ix_hga_session_id ON human_guidance_activations (session_id)",
+            ),
+            (
+                "ix_hga_scope",
+                "CREATE INDEX ix_hga_scope ON human_guidance_activations (scope)",
+            ),
+            (
+                "ix_hga_status",
+                "CREATE INDEX ix_hga_status ON human_guidance_activations (status)",
+            ),
+        ]:
+            if not _has_index(engine, "human_guidance_activations", index_name):
+                connection.execute(text(ddl))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -863,6 +914,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="017_human_guidance_conflicts",
         description="Create human_guidance_conflicts table for queryable conflict persistence",
         upgrade=_migration_017_human_guidance_conflicts,
+    ),
+    Migration(
+        version="018_human_guidance_activations",
+        description="Create human_guidance_activations table for per-project/session activation controls",
+        upgrade=_migration_018_human_guidance_activations,
     ),
 )
 
