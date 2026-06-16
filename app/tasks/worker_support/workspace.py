@@ -28,6 +28,7 @@ def _restore_workspace_snapshot_if_needed(
     task_service: Any,
     emit_live: Any,
     force_restore: bool = False,
+    lock_already_held: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not project:
         return None
@@ -76,6 +77,7 @@ def _restore_workspace_snapshot_if_needed(
         orchestration_state.project_dir,
         task_execution_id=task_execution_id,
         preserve_project_root_rules=runs_in_canonical_baseline,
+        lock_already_held=lock_already_held,
     )
     if restore_result and restore_result.get("restored"):
         logger.warning(

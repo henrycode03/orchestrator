@@ -367,7 +367,15 @@ class TaskService:
         *,
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
+        skip_lock: bool = False,
     ) -> dict:
+        if skip_lock:
+            return self.snapshots.restore_workspace_snapshot_unlocked(
+                project,
+                target_dir,
+                snapshot_key=snapshot_key,
+                preserve_project_root_rules=preserve_project_root_rules,
+            )
         return self.snapshots.restore_workspace_snapshot(
             project,
             target_dir,

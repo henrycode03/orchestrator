@@ -888,6 +888,7 @@ def execute_orchestration_task(
                 task_service=task_service,
                 emit_live=emit_live,
                 force_restore=force_restore,
+                lock_already_held=runs_in_canonical_baseline,
             )
         )
 

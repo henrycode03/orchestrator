@@ -160,6 +160,7 @@ def restore_workspace_after_abort(
     *,
     task_execution_id: Optional[int] = None,
     preserve_project_root_rules: bool,
+    lock_already_held: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not project:
         return None
@@ -168,6 +169,7 @@ def restore_workspace_after_abort(
         target_dir,
         snapshot_key=workspace_snapshot_key(task_id, task_execution_id),
         preserve_project_root_rules=preserve_project_root_rules,
+        skip_lock=lock_already_held,
     )
 
 

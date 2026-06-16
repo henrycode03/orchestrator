@@ -83,6 +83,9 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
 )
 
 
+from app.services.human_guidance_plan_validator import (
+    check_plan_guidance_violations_if_enabled as _check_plan_guidance_violations,
+)
 from app.services.orchestration.phases.planning_support import (
     BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS,
     MAX_PLANNING_RETRIES,
@@ -1584,6 +1587,70 @@ def execute_planning_phase(
                     "status": "failed",
                     "reason": "planning_invalid_commands_after_repair",
                 }
+            # HG-P2b: guidance-aware plan validation (deterministic, pre-execution).
+            if not retry_state.repair_prompt_used:
+                _guidance_violations = _check_plan_guidance_violations(
+                    ctx.db,
+                    project_id=getattr(ctx.project, "id", None),
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    user_id=getattr(ctx.project, "user_id", None),
+                    plan_steps=ctx.orchestration_state.plan or [],
+                )
+                if _guidance_violations:
+                    ctx.logger.warning(
+                        "[GUIDANCE_PLAN_VALIDATION] Plan violates active guidance (%d rule(s)); triggering repair: %s",
+                        len(_guidance_violations),
+                        "; ".join(_guidance_violations[:2]),
+                    )
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="WARN",
+                        phase="planning",
+                        message="[ORCHESTRATION] Plan violates active Operator Guidance; triggering repair",
+                        details={
+                            "reason": "guidance_violation",
+                            "violations": _guidance_violations[:4],
+                        },
+                    )
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason="guidance_violation",
+                        contract_violations=_guidance_violations,
+                        output_text=output_text,
+                        strategy_info="guidance_violation",
+                    )
+                    retry_state.last_repair_reason = "guidance_violation"
+                    planning_result = __repair_planning_output(
+                        ctx=ctx,
+                        retry_state=retry_state,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        malformed_output=output_text,
+                        reason="guidance_violation: "
+                        + "; ".join(_guidance_violations[:2]),
+                        rejection_reasons=_guidance_violations,
+                        prompt_profile=prompt_profile,
+                    )
+                    retry_state.repair_prompt_used = True
+                    retry_state.consecutive_failures += 1
+                    continue
+            else:
+                _guidance_violations = _check_plan_guidance_violations(
+                    ctx.db,
+                    project_id=getattr(ctx.project, "id", None),
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    user_id=getattr(ctx.project, "user_id", None),
+                    plan_steps=ctx.orchestration_state.plan or [],
+                )
+                if _guidance_violations:
+                    ctx.logger.warning(
+                        "[GUIDANCE_PLAN_VALIDATION] Plan still violates guidance after repair (%d rule(s)); proceeding: %s",
+                        len(_guidance_violations),
+                        "; ".join(_guidance_violations[:2]),
+                    )
+
             plan_verdict = ValidatorService.validate_plan(
                 ctx.orchestration_state.plan,
                 output_text=output_text,
