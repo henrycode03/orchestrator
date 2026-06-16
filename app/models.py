@@ -717,6 +717,30 @@ class HumanGuidanceUsage(Base):
     message_hash = Column(String(64), nullable=True)
 
 
+class HumanGuidanceConflict(Base):
+    __tablename__ = "human_guidance_conflicts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    guidance_id = Column(
+        Integer, ForeignKey("human_guidance.id"), nullable=True, index=True
+    )
+    project_id = Column(Integer, nullable=True, index=True)
+    session_id = Column(Integer, nullable=True, index=True)
+    task_id = Column(Integer, nullable=True, index=True)
+    task_title = Column(String(512), nullable=True)
+    guidance_scope = Column(String(50), nullable=True)
+    guidance_message = Column(Text, nullable=False)
+    conflict_excerpt = Column(Text, nullable=False, default="")
+    conflict_patterns = Column(Text, nullable=True)  # JSON text: ["pattern_name"]
+    severity = Column(String(20), nullable=False, default="warning")
+    status = Column(String(20), nullable=False, default="open", index=True)
+    detected_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by = Column(String(255), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    source = Column(String(50), nullable=False, default="heuristic")
+
+
 class KnowledgeUsageLog(Base):
     __tablename__ = "knowledge_usage_logs"
 

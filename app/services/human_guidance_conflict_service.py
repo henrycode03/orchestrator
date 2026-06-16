@@ -1,7 +1,10 @@
-"""Human Guidance conflict detection — HG-P1c-2.
+"""Human Guidance conflict detection — HG-P1c-2 / HG-P1d.
 
 Heuristic pattern matching between active guidance messages and task descriptions.
 Warning-only: no task rejection, no planner mutation, no WM mutation.
+
+HG-P1d: conflicts are persisted to human_guidance_conflicts table.
+LogEntry warning events are still written for backward compat/audit.
 """
 
 from __future__ import annotations
@@ -89,6 +92,55 @@ def _dedup_exists(db: DBSession, session_id: int, dedup_message: str) -> bool:
     )
 
 
+def _get_open_conflict_row(
+    db: DBSession,
+    guidance_id: Optional[int],
+    task_id: Optional[int],
+    pattern_name: str,
+    project_id: int,
+) -> Optional[Any]:
+    """Return an existing open conflict row for dedup, or None."""
+    try:
+        from app.models import HumanGuidanceConflict
+
+        return (
+            db.query(HumanGuidanceConflict)
+            .filter(
+                HumanGuidanceConflict.project_id == project_id,
+                HumanGuidanceConflict.guidance_id == guidance_id,
+                HumanGuidanceConflict.task_id == task_id,
+                HumanGuidanceConflict.status == "open",
+                HumanGuidanceConflict.conflict_patterns.like(f'%"{pattern_name}"%'),
+            )
+            .first()
+        )
+    except Exception:
+        return None
+
+
+def _normalize_conflict_row(row: Any) -> Dict[str, Any]:
+    """Serialize a HumanGuidanceConflict row to a warning dict."""
+    try:
+        patterns = json.loads(row.conflict_patterns or "[]")
+    except Exception:
+        patterns = []
+    return {
+        "event_type": "guidance_conflict_warning",
+        "severity": row.severity,
+        "guidance_id": row.guidance_id,
+        "guidance_scope": row.guidance_scope,
+        "guidance_message": row.guidance_message,
+        "task_id": row.task_id,
+        "task_title": row.task_title or "",
+        "conflict_excerpt": row.conflict_excerpt or "",
+        "conflict_patterns": patterns,
+        "detected_at": row.detected_at.isoformat() if row.detected_at else None,
+        "action": (
+            "none — planner receives both; guidance takes precedence per policy"
+        ),
+    }
+
+
 def detect_guidance_task_conflicts(
     db: DBSession,
     *,
@@ -101,9 +153,9 @@ def detect_guidance_task_conflicts(
 ) -> List[Dict[str, Any]]:
     """Scan active guidance vs task text for heuristic conflicts.
 
-    Writes a LogEntry warning for each new detected conflict (deduped by
-    guidance_id + task_id + pattern within the same session).
-    Never raises. Returns list of warning dicts for the current call.
+    HG-P1d: persists each new conflict to human_guidance_conflicts (deduped by
+    guidance_id + task_id + pattern_name + status=open). Still writes a LogEntry
+    warning for backward compat/audit. Never raises.
     """
     try:
         from app.services.human_guidance_service import collect_active_guidance
@@ -150,10 +202,21 @@ def detect_guidance_task_conflicts(
             )
 
             try:
-                if _dedup_exists(db, session_id, dedup_msg):
-                    continue
+                if project_id is not None:
+                    # Primary dedup: conflict table
+                    existing_row = _get_open_conflict_row(
+                        db, guidance_id, task_id, pattern_name, project_id
+                    )
+                    if existing_row is not None:
+                        warnings.append(_normalize_conflict_row(existing_row))
+                        continue
+                else:
+                    # Fallback dedup via LogEntry for project-less calls
+                    if _dedup_exists(db, session_id, dedup_msg):
+                        continue
 
                 excerpt = _extract_excerpt(task_text, matched_task_kw)
+                patterns_json = json.dumps([pattern_name])
                 payload: Dict[str, Any] = {
                     "event_type": "guidance_conflict_warning",
                     "severity": "warning",
@@ -163,13 +226,34 @@ def detect_guidance_task_conflicts(
                     "task_id": task_id,
                     "task_title": task_title,
                     "conflict_excerpt": excerpt,
-                    "conflict_patterns": [matched_guidance_kw, matched_task_kw],
+                    "conflict_patterns": [pattern_name],
                     "detected_at": now,
                     "action": (
                         "none — planner receives both; "
                         "guidance takes precedence per policy"
                     ),
                 }
+
+                if project_id is not None:
+                    from app.models import HumanGuidanceConflict
+
+                    db.add(
+                        HumanGuidanceConflict(
+                            guidance_id=guidance_id,
+                            project_id=project_id,
+                            session_id=session_id,
+                            task_id=task_id,
+                            task_title=task_title,
+                            guidance_scope=guidance_scope,
+                            guidance_message=guidance_message,
+                            conflict_excerpt=excerpt,
+                            conflict_patterns=patterns_json,
+                            severity="warning",
+                            status="open",
+                            source="heuristic",
+                        )
+                    )
+
                 db.add(
                     LogEntry(
                         session_id=session_id,

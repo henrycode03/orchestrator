@@ -1,10 +1,13 @@
-"""Human Guidance API — HG-P1a/P1c endpoints."""
+"""Human Guidance API — HG-P1a/P1c/P1d endpoints."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -146,49 +149,123 @@ def list_project_guidance(
     }
 
 
+class PatchConflictRequest(BaseModel):
+    status: str
+    resolution_note: Optional[str] = None
+
+
+def _serialize_conflict_row(row: object) -> dict:
+    try:
+        patterns = json.loads(getattr(row, "conflict_patterns", None) or "[]")
+    except Exception:
+        patterns = []
+    detected = getattr(row, "detected_at", None)
+    resolved = getattr(row, "resolved_at", None)
+    row_status = getattr(row, "status", "open")
+    return {
+        "id": getattr(row, "id", None),
+        "guidance_id": getattr(row, "guidance_id", None),
+        "guidance_message": getattr(row, "guidance_message", ""),
+        "task_id": getattr(row, "task_id", None),
+        "task_title": getattr(row, "task_title", "") or "",
+        "conflict_excerpt": getattr(row, "conflict_excerpt", "") or "",
+        "conflict_patterns": patterns,
+        "severity": getattr(row, "severity", "warning"),
+        "status": row_status,
+        "detected_at": detected.isoformat() if detected else None,
+        "resolved": row_status in ("resolved", "ignored"),
+    }
+
+
 @router.get("/projects/{project_id}/guidance/conflicts")
 def list_guidance_conflicts(
     project_id: int,
+    status: str = "open",
+    limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Return unresolved guidance conflict warnings for a project, read from LogEntry events."""
-    from app.models import LogEntry
-    from app.models import Session as SessionModel
+    """Return guidance conflict records for a project, read from HumanGuidanceConflict table."""
+    from app.models import HumanGuidanceConflict
 
     get_project_for_user(db, project_id, current_user)
 
-    rows = (
-        db.query(LogEntry)
-        .join(SessionModel, LogEntry.session_id == SessionModel.id)
+    valid_statuses = {"open", "resolved", "ignored", "all"}
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="invalid_status")
+
+    try:
+        query = db.query(HumanGuidanceConflict).filter(
+            HumanGuidanceConflict.project_id == project_id
+        )
+        if status != "all":
+            query = query.filter(HumanGuidanceConflict.status == status)
+
+        total = query.count()
+        rows = (
+            query.order_by(HumanGuidanceConflict.detected_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return {
+            "project_id": project_id,
+            "total": total,
+            "items": [_serialize_conflict_row(r) for r in rows],
+        }
+    except Exception as exc:
+        logger.warning("[GUIDANCE_CONFLICTS] Failed to read conflict table: %s", exc)
+        return {"project_id": project_id, "total": 0, "items": []}
+
+
+@router.patch("/projects/{project_id}/guidance/conflicts/{conflict_id}")
+def patch_guidance_conflict(
+    project_id: int,
+    conflict_id: int,
+    body: PatchConflictRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Resolve, ignore, or reopen a guidance conflict."""
+    from app.models import HumanGuidanceConflict
+
+    get_project_for_user(db, project_id, current_user)
+
+    valid_statuses = {"open", "resolved", "ignored"}
+    if body.status not in valid_statuses:
+        raise HTTPException(status_code=422, detail="invalid_status")
+
+    row = (
+        db.query(HumanGuidanceConflict)
         .filter(
-            SessionModel.project_id == project_id,
-            LogEntry.message.like("[GUIDANCE_CONFLICT_WARNING]%"),
+            HumanGuidanceConflict.id == conflict_id,
+            HumanGuidanceConflict.project_id == project_id,
         )
-        .order_by(LogEntry.created_at.desc())
-        .all()
+        .first()
     )
+    if row is None:
+        raise HTTPException(status_code=404, detail="conflict_not_found")
 
-    items = []
-    for row in rows:
-        try:
-            meta = json.loads(row.log_metadata or "{}")
-        except Exception:
-            meta = {}
-        items.append(
-            {
-                "guidance_id": meta.get("guidance_id"),
-                "guidance_message": meta.get("guidance_message", ""),
-                "task_id": meta.get("task_id"),
-                "task_title": meta.get("task_title", ""),
-                "conflict_excerpt": meta.get("conflict_excerpt", ""),
-                "severity": meta.get("severity", "warning"),
-                "detected_at": meta.get("detected_at"),
-                "resolved": False,
-            }
-        )
+    row.status = body.status
+    if body.resolution_note is not None:
+        row.resolution_note = body.resolution_note
 
-    return {"project_id": project_id, "total": len(items), "items": items}
+    if body.status in ("resolved", "ignored"):
+        row.resolved_at = datetime.now(timezone.utc)
+        row.resolved_by = getattr(current_user, "email", None)
+    elif body.status == "open":
+        row.resolved_at = None
+        row.resolved_by = None
+
+    db.commit()
+    db.refresh(row)
+
+    out = _serialize_conflict_row(row)
+    out["resolved_at"] = row.resolved_at.isoformat() if row.resolved_at else None
+    out["resolved_by"] = row.resolved_by
+    out["resolution_note"] = row.resolution_note
+    return out
 
 
 @router.get("/guidance/global")

@@ -717,6 +717,67 @@ def _migration_016_session_repair_churn(engine: Engine) -> None:
                 connection.execute(text(statement))
 
 
+def _migration_017_human_guidance_conflicts(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    if "human_guidance_conflicts" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE human_guidance_conflicts (
+                        id INTEGER PRIMARY KEY,
+                        guidance_id INTEGER REFERENCES human_guidance(id),
+                        project_id INTEGER,
+                        session_id INTEGER,
+                        task_id INTEGER,
+                        task_title VARCHAR(512),
+                        guidance_scope VARCHAR(50),
+                        guidance_message TEXT NOT NULL,
+                        conflict_excerpt TEXT NOT NULL DEFAULT '',
+                        conflict_patterns TEXT,
+                        severity VARCHAR(20) NOT NULL DEFAULT 'warning',
+                        status VARCHAR(20) NOT NULL DEFAULT 'open',
+                        detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        resolved_at DATETIME,
+                        resolved_by VARCHAR(255),
+                        resolution_note TEXT,
+                        source VARCHAR(50) NOT NULL DEFAULT 'heuristic'
+                    )
+                    """
+                )
+            )
+
+    with engine.begin() as connection:
+        for index_name, ddl in [
+            (
+                "ix_hgc_guidance_id",
+                "CREATE INDEX ix_hgc_guidance_id ON human_guidance_conflicts (guidance_id)",
+            ),
+            (
+                "ix_hgc_project_id",
+                "CREATE INDEX ix_hgc_project_id ON human_guidance_conflicts (project_id)",
+            ),
+            (
+                "ix_hgc_session_id",
+                "CREATE INDEX ix_hgc_session_id ON human_guidance_conflicts (session_id)",
+            ),
+            (
+                "ix_hgc_task_id",
+                "CREATE INDEX ix_hgc_task_id ON human_guidance_conflicts (task_id)",
+            ),
+            (
+                "ix_hgc_status",
+                "CREATE INDEX ix_hgc_status ON human_guidance_conflicts (status)",
+            ),
+            (
+                "ix_hgc_detected_at",
+                "CREATE INDEX ix_hgc_detected_at ON human_guidance_conflicts (detected_at)",
+            ),
+        ]:
+            if not _has_index(engine, "human_guidance_conflicts", index_name):
+                connection.execute(text(ddl))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -797,6 +858,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="016_session_repair_churn",
         description="Add repair churn stop flag and trigger to sessions",
         upgrade=_migration_016_session_repair_churn,
+    ),
+    Migration(
+        version="017_human_guidance_conflicts",
+        description="Create human_guidance_conflicts table for queryable conflict persistence",
+        upgrade=_migration_017_human_guidance_conflicts,
     ),
 )
 
