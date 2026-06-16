@@ -295,6 +295,49 @@ def collect_active_guidance(
     return out
 
 
+def list_global_guidance(
+    db: DBSession,
+    *,
+    user_id: int,
+    status: str = "active",
+    limit: int = 50,
+    offset: int = 0,
+) -> Tuple[List[HumanGuidance], int]:
+    """List global-scope guidance for a user, ordered by priority DESC, created_at ASC."""
+    query = db.query(HumanGuidance).filter(
+        HumanGuidance.user_id == user_id,
+        HumanGuidance.scope == GuidanceScope.GLOBAL,
+    )
+    if status != "all":
+        query = query.filter(HumanGuidance.status == status)
+    total = query.count()
+    items = (
+        query.order_by(
+            HumanGuidance.priority.desc(),
+            HumanGuidance.created_at.asc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return items, total
+
+
+def get_guidance_history(
+    db: DBSession,
+    guidance_id: int,
+) -> Tuple[HumanGuidance, List["HumanGuidanceRevision"]]:
+    """Return (guidance_entry, revisions) ordered by revision ASC. 404 on miss."""
+    entry = _get_or_404(db, guidance_id)
+    revisions = (
+        db.query(HumanGuidanceRevision)
+        .filter(HumanGuidanceRevision.guidance_id == guidance_id)
+        .order_by(HumanGuidanceRevision.revision.asc())
+        .all()
+    )
+    return entry, revisions
+
+
 def record_guidance_usage(
     db: DBSession,
     *,

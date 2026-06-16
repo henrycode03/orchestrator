@@ -14,12 +14,15 @@ from app.dependencies import get_current_active_user
 from app.models import GuidanceStatus, HumanGuidance
 from app.services.authz import get_project_for_user
 from app.services.human_guidance_service import (
+    _UNSET,
     archive_guidance,
+    collect_active_guidance,
     create_guidance,
     get_guidance,
+    get_guidance_history,
+    list_global_guidance,
     list_guidance,
     update_guidance,
-    _UNSET,
 )
 
 router = APIRouter()
@@ -139,6 +142,99 @@ def list_project_guidance(
         "project_id": project_id,
         "total": total,
         "items": [_serialize(g) for g in items],
+    }
+
+
+@router.get("/guidance/global")
+def list_global_guidance_endpoint(
+    status: str = "active",
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """List global-scope guidance for the authenticated user."""
+    valid_statuses = {"active", "disabled", "archived", "expired", "all"}
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="invalid_status")
+
+    items, total = list_global_guidance(
+        db,
+        user_id=current_user.id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return {"total": total, "items": [_serialize(g) for g in items]}
+
+
+@router.get("/guidance/{guidance_id}/history")
+def get_guidance_history_endpoint(
+    guidance_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Return revision history for a guidance entry in ascending revision order."""
+    entry, revisions = get_guidance_history(db, guidance_id)
+    if entry.project_id:
+        get_project_for_user(db, entry.project_id, current_user)
+    return {
+        "id": entry.id,
+        "revisions": [
+            {
+                "revision": r.revision,
+                "message": r.message,
+                "changed_by": r.changed_by,
+                "changed_at": r.changed_at.isoformat() if r.changed_at else None,
+                "change_reason": r.change_reason,
+            }
+            for r in revisions
+        ],
+    }
+
+
+@router.get("/projects/{project_id}/guidance/rendered")
+def get_rendered_guidance(
+    project_id: int,
+    session_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Preview the Operator Guidance block without writing WM or recording telemetry."""
+    from app.services.orchestration.working_memory import (
+        _INJECTION_BUDGET,
+        render_guidance_block,
+    )
+
+    get_project_for_user(db, project_id, current_user)
+
+    entries = collect_active_guidance(
+        db,
+        user_id=current_user.id,
+        project_id=project_id,
+        session_id=session_id,
+        task_id=task_id,
+    )
+
+    body_lines = render_guidance_block(entries)
+    if body_lines:
+        block = "Operator Guidance\n" + "\n".join(body_lines)
+    else:
+        block = ""
+
+    rendered_chars = len(block)
+    max_chars = _INJECTION_BUDGET
+    trimmed = rendered_chars > max_chars
+    if trimmed:
+        block = block[:max_chars]
+
+    return {
+        "project_id": project_id,
+        "rendered_chars": len(block),
+        "max_chars": max_chars,
+        "trimmed": trimmed,
+        "block": block,
     }
 
 

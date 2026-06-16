@@ -165,6 +165,24 @@ def _extract_api_contract(summary: str) -> tuple:
     return api_block, prose
 
 
+def render_guidance_block(entries: List) -> List[str]:
+    """Return rendered body lines for the Operator Guidance section.
+
+    Shared by _render_content and the rendered-preview API endpoint so the
+    two never drift. Applies the same per-entry 200-char truncation and
+    _HUMAN_GUIDANCE_LIMIT cap used by the full WM render.
+    """
+    out: List[str] = []
+    for g in entries[-_HUMAN_GUIDANCE_LIMIT:]:
+        if isinstance(g, dict):
+            msg = g.get("message", "")[:200]
+            if msg:
+                out.append(f"  - {msg}")
+        elif isinstance(g, str):
+            out.append(f"  - {g[:200]}")
+    return out
+
+
 def _render_content(wm: Dict[str, Any]) -> str:
     """Build the === WORKING MEMORY === block from a loaded schema dict.
 
@@ -184,13 +202,7 @@ def _render_content(wm: Dict[str, Any]) -> str:
     guidance: List = wm.get("human_guidance") or []
     if guidance:
         lines.append("Operator Guidance")
-        for g in guidance[-_HUMAN_GUIDANCE_LIMIT:]:
-            if isinstance(g, dict):
-                msg = g.get("message", "")[:200]
-                if msg:
-                    lines.append(f"  - {msg}")
-            elif isinstance(g, str):
-                lines.append(f"  - {g[:200]}")
+        lines.extend(render_guidance_block(guidance))
         lines.append("")
 
     strategies: List = wm.get("implementation_strategy") or []
