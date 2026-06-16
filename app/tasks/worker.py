@@ -1735,6 +1735,21 @@ def execute_orchestration_task(
                     orchestration_state=orchestration_state,
                     logger=logger,
                 )
+            # HG-P1c-2: guidance conflict detection (warning-only, non-blocking).
+            if project and task:
+                from app.services.human_guidance_conflict_service import (
+                    run_conflict_detection_if_enabled,
+                )
+
+                run_conflict_detection_if_enabled(
+                    db=db,
+                    project_id=project.id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    user_id=getattr(project, "user_id", None),
+                    task_title=getattr(task, "title", "") or "",
+                    task_description=getattr(task, "description", "") or "",
+                )
             # Slice J: incremental execution path (creation-only prototype, flag-gated).
             # Runs after context injection; before execute_planning_phase.
             # Falls back to full planning on any failure.

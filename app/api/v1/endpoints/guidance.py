@@ -1,7 +1,8 @@
-"""Human Guidance API — HG-P1a endpoints."""
+"""Human Guidance API — HG-P1a/P1c endpoints."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import List, Optional
 
@@ -143,6 +144,51 @@ def list_project_guidance(
         "total": total,
         "items": [_serialize(g) for g in items],
     }
+
+
+@router.get("/projects/{project_id}/guidance/conflicts")
+def list_guidance_conflicts(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Return unresolved guidance conflict warnings for a project, read from LogEntry events."""
+    from app.models import LogEntry
+    from app.models import Session as SessionModel
+
+    get_project_for_user(db, project_id, current_user)
+
+    rows = (
+        db.query(LogEntry)
+        .join(SessionModel, LogEntry.session_id == SessionModel.id)
+        .filter(
+            SessionModel.project_id == project_id,
+            LogEntry.message.like("[GUIDANCE_CONFLICT_WARNING]%"),
+        )
+        .order_by(LogEntry.created_at.desc())
+        .all()
+    )
+
+    items = []
+    for row in rows:
+        try:
+            meta = json.loads(row.log_metadata or "{}")
+        except Exception:
+            meta = {}
+        items.append(
+            {
+                "guidance_id": meta.get("guidance_id"),
+                "guidance_message": meta.get("guidance_message", ""),
+                "task_id": meta.get("task_id"),
+                "task_title": meta.get("task_title", ""),
+                "conflict_excerpt": meta.get("conflict_excerpt", ""),
+                "severity": meta.get("severity", "warning"),
+                "detected_at": meta.get("detected_at"),
+                "resolved": False,
+            }
+        )
+
+    return {"project_id": project_id, "total": len(items), "items": items}
 
 
 @router.get("/guidance/global")
