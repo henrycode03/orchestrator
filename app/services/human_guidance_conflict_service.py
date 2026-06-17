@@ -150,6 +150,8 @@ def detect_guidance_task_conflicts(
     user_id: Optional[int],
     task_title: str,
     task_description: str,
+    backend: str = "all",
+    model_family: str = "all",
 ) -> List[Dict[str, Any]]:
     """Scan active guidance vs task text for heuristic conflicts.
 
@@ -166,6 +168,8 @@ def detect_guidance_task_conflicts(
             project_id=project_id,
             session_id=session_id,
             task_id=task_id,
+            backend=backend,
+            model_family=model_family,
         )
     except Exception as exc:
         logger.warning("[GUIDANCE_CONFLICT] collect_active_guidance failed: %s", exc)
@@ -293,6 +297,8 @@ def run_conflict_detection_if_enabled(
     user_id: Optional[int],
     task_title: str,
     task_description: str,
+    backend: str = "all",
+    model_family: str = "all",
 ) -> List[Dict[str, Any]]:
     """Flag-gated wrapper. Returns [] without touching DB if either flag is off."""
     from app.config import settings
@@ -326,4 +332,6 @@ def run_conflict_detection_if_enabled(
         user_id=user_id,
         task_title=task_title,
         task_description=task_description,
+        backend=backend,
+        model_family=model_family,
     )

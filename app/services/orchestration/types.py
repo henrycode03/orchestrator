@@ -235,6 +235,11 @@ class OrchestrationRunContext:
     workflow_stage: Optional[str] = None
     task_execution_id: Optional[int] = None
     restore_workspace_snapshot_if_needed: Optional[Callable[..., Any]] = None
+    planning_backend: str = "all"
+    execution_backend: str = "all"
+    guidance_backend: str = "all"
+    guidance_model_name: str = "unknown"
+    guidance_model_family: str = "all"
 
     @property
     def policy_profile(self) -> PolicyProfile:

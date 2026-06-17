@@ -1943,6 +1943,8 @@ def finalize_successful_task(
         summary=wm_summary,
         logger=logger,
         db=db,
+        guidance_backend=ctx.guidance_backend,
+        guidance_model_family=ctx.guidance_model_family,
     )
     promoted_workspace_archive_result = finalization.get(
         "promoted_workspace_archive_result"

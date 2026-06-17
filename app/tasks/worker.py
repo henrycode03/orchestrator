@@ -83,6 +83,7 @@ from app.services.session.session_runtime_service import (
 from app.services.task_execution_service import (
     create_task_execution,
 )
+from app.services.human_guidance_service import resolve_guidance_runtime_target
 from app.services.orchestration.policy import get_policy_profile
 from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
@@ -1149,6 +1150,31 @@ def execute_orchestration_task(
                         "planning_runtime": planning_runtime_metadata,
                     },
                 )
+        effective_guidance_planning_backend = (
+            planning_backend_override or resolved_planning_backend
+        )
+        guidance_runtime_metadata = (
+            planning_runtime_metadata
+            if planning_runtime_metadata is not None
+            else runtime_metadata
+        )
+        guidance_target = resolve_guidance_runtime_target(
+            backend=effective_guidance_planning_backend,
+            runtime_metadata=guidance_runtime_metadata,
+            planning_backend=effective_guidance_planning_backend,
+            execution_backend=_resolved_execution_backend,
+        )
+        guidance_backend = guidance_target["backend"]
+        guidance_model_name = guidance_target["model_name"]
+        guidance_model_family = guidance_target["model_family"]
+        logger.info(
+            "[HG_BACKEND] planning_backend=%s execution_backend=%s guidance_backend=%s model_name=%s model_family=%s",
+            effective_guidance_planning_backend,
+            _resolved_execution_backend,
+            guidance_backend,
+            guidance_model_name,
+            guidance_model_family,
+        )
         trace_context_manager = start_langfuse_observation(
             name="orchestrator-task-run",
             as_type="agent",
@@ -1564,6 +1590,11 @@ def execute_orchestration_task(
             workflow_stage=getattr(task, "workflow_stage", None),
             task_execution_id=task_execution_id,
             restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
+            planning_backend=effective_guidance_planning_backend,
+            execution_backend=_resolved_execution_backend,
+            guidance_backend=guidance_backend,
+            guidance_model_name=guidance_model_name,
+            guidance_model_family=guidance_model_family,
         )
 
         gate_error = _run_virtual_merge_gate(
@@ -1775,6 +1806,8 @@ def execute_orchestration_task(
                     user_id=getattr(project, "user_id", None),
                     task_title=getattr(task, "title", "") or "",
                     task_description=getattr(task, "description", "") or "",
+                    backend=run_ctx.guidance_backend,
+                    model_family=run_ctx.guidance_model_family,
                 )
             # Slice J: incremental execution path (creation-only prototype, flag-gated).
             # Runs after context injection; before execute_planning_phase.

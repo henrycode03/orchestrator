@@ -298,6 +298,8 @@ def _wm_write_table_guidance(
     session_id: Any,
     task_id: Any,
     logger: Any,
+    backend: str = "all",
+    model_family: str = "all",
 ) -> None:
     """HG-P1b: populate wm['human_guidance'] from HumanGuidance table and record usage."""
     try:
@@ -329,6 +331,14 @@ def _wm_write_table_guidance(
             project_id=project_id,
             session_id=numeric_session_id,
             task_id=numeric_task_id,
+            backend=backend,
+            model_family=model_family,
+        )
+        logger.info(
+            "[HG_BACKEND] write_working_memory guidance_backend=%s guidance_model_family=%s selected_candidates=%d",
+            backend,
+            model_family,
+            len(table_entries),
         )
 
         selection = select_guidance_for_injection(table_entries, _INJECTION_BUDGET)
@@ -369,6 +379,8 @@ def write_working_memory(
     summary: str,
     logger: Any,
     db: Any = None,
+    guidance_backend: str = "all",
+    guidance_model_family: str = "all",
 ) -> None:
     """Persist WorkingMemory to .agent/working_memory.json after task success.
 
@@ -477,6 +489,8 @@ def write_working_memory(
                     session_id=session_id,
                     task_id=task_id,
                     logger=logger,
+                    backend=guidance_backend,
+                    model_family=guidance_model_family,
                 )
             else:
                 _wm_write_legacy_guidance(db, wm, session_id, task_id)

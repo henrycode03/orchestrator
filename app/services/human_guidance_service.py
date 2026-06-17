@@ -24,28 +24,149 @@ logger = logging.getLogger(__name__)
 
 _UNSET = object()
 
+# Metadata examples for API/docs consumers. These are not validation allowlists.
 VALID_BACKENDS: frozenset[str] = frozenset(
-    {"all", "qwen", "local_openclaw", "claude", "gemini"}
+    {
+        "all",
+        "direct_ollama",
+        "llama_cpp",
+        "local_openclaw",
+        "openai_api",
+        "azure_openai",
+        "anthropic_api",
+        "claude_code",
+        "gemini_api",
+        "openrouter",
+    }
+)
+VALID_MODELS: frozenset[str] = frozenset(
+    {
+        "all",
+        "qwen",
+        "llama",
+        "deepseek",
+        "mistral",
+        "gpt",
+        "claude",
+        "gemini",
+        "codex",
+        "unknown",
+    }
 )
 
 
-def _parse_backend_targets(raw: Any) -> list[str]:
-    """Return backend_targets list from a DB column value. Defaults to ["all"]."""
+def _parse_targets(raw: Any) -> list[str]:
+    """Return a target list from a DB/API value. Defaults to ["all"]."""
     if not raw:
         return ["all"]
     if isinstance(raw, list):
-        return raw
+        targets = [str(item).strip().lower() for item in raw if str(item).strip()]
+        return targets or ["all"]
     try:
         parsed = json.loads(raw)
-        return parsed if isinstance(parsed, list) else ["all"]
+        if not isinstance(parsed, list):
+            return ["all"]
+        targets = [str(item).strip().lower() for item in parsed if str(item).strip()]
+        return targets or ["all"]
     except Exception:
         return ["all"]
 
 
+def _parse_backend_targets(raw: Any) -> list[str]:
+    """Return backend_targets list from a DB column value. Defaults to ["all"]."""
+    return _parse_targets(raw)
+
+
+def _parse_model_targets(raw: Any) -> list[str]:
+    """Return model_targets list from a DB column value. Defaults to ["all"]."""
+    return _parse_targets(raw)
+
+
+def _model_family_from_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    for family in (
+        "qwen",
+        "llama",
+        "deepseek",
+        "mistral",
+        "claude",
+        "gemini",
+        "codex",
+        "gpt",
+    ):
+        if family in text:
+            return family
+    return text if text in VALID_MODELS else "unknown"
+
+
+def resolve_guidance_runtime_target(
+    *,
+    backend: Any = None,
+    model_name: Any = None,
+    model_family: Any = None,
+    runtime_metadata: Optional[Dict[str, Any]] = None,
+    planning_backend: Any = None,
+    execution_backend: Any = None,
+) -> Dict[str, str]:
+    """Resolve runtime metadata used by Human Guidance target filters.
+
+    This is metadata-only: it does not verify that a backend is installed or a
+    model exists.
+    """
+    metadata = runtime_metadata or {}
+    resolved_backend = (
+        str(
+            backend
+            or metadata.get("backend")
+            or planning_backend
+            or execution_backend
+            or "all"
+        )
+        .strip()
+        .lower()
+        or "all"
+    )
+    resolved_model_name = (
+        str(
+            model_name
+            or metadata.get("model")
+            or metadata.get("model_name")
+            or metadata.get("model_family")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    resolved_model_family = str(model_family or "").strip().lower()
+    if not resolved_model_family:
+        resolved_model_family = _model_family_from_name(resolved_model_name)
+    if not resolved_model_name:
+        resolved_model_name = resolved_model_family
+    return {
+        "backend": resolved_backend,
+        "model_name": resolved_model_name or "unknown",
+        "model_family": resolved_model_family or "unknown",
+    }
+
+
 def _backend_matches(row: Any, backend: str) -> bool:
     """Return True if a HumanGuidance row targets the given backend."""
+    backend = str(backend or "all").strip().lower()
+    if backend == "all":
+        return True
     targets = _parse_backend_targets(getattr(row, "backend_targets", None))
     return "all" in targets or backend in targets
+
+
+def _model_matches(row: Any, model_family: str) -> bool:
+    """Return True if a HumanGuidance row targets the given model family."""
+    model_family = str(model_family or "all").strip().lower()
+    if model_family == "all":
+        return True
+    targets = _parse_model_targets(getattr(row, "model_targets", None))
+    return "all" in targets or model_family in targets
 
 
 def _get_or_404(db: DBSession, guidance_id: int) -> HumanGuidance:
@@ -68,6 +189,7 @@ def create_guidance(
     expires_at: Optional[datetime] = None,
     created_by: Optional[str] = None,
     backend_targets: Optional[List[str]] = None,
+    model_targets: Optional[List[str]] = None,
 ) -> Tuple[HumanGuidance, bool]:
     """Create a guidance entry. Returns (entry, created); created=False on dedup."""
     message = (message or "").strip()
@@ -78,11 +200,8 @@ def create_guidance(
     if priority < 0 or priority > 100:
         raise HTTPException(status_code=400, detail="invalid_priority")
 
-    if backend_targets is None:
-        backend_targets = ["all"]
-    invalid = [b for b in backend_targets if b not in VALID_BACKENDS]
-    if invalid:
-        raise HTTPException(status_code=400, detail="invalid_backend_target")
+    backend_targets = _parse_targets(backend_targets)
+    model_targets = _parse_targets(model_targets)
 
     existing = (
         db.query(HumanGuidance)
@@ -113,6 +232,7 @@ def create_guidance(
         created_by=created_by,
         revision=1,
         backend_targets=backend_targets,
+        model_targets=model_targets,
     )
     db.add(entry)
     db.commit()
@@ -241,14 +361,16 @@ def collect_active_guidance(
     task_id: Optional[int],
     now: Optional[datetime] = None,
     backend: str = "all",
+    model_family: str = "all",
 ) -> List[Dict[str, Any]]:
     """Return active guidance applicable to this execution context in merge order.
 
     Scope order (narrowest first): task > session > project > global.
     Within scope: priority DESC, created_at ASC.
     Excludes disabled, archived, expired entries.
-    When backend is specified (not "all"), only returns entries whose backend_targets
-    include "all" or the named backend.
+    When backend/model_family are specified (not "all"), only returns entries
+    whose backend_targets include "all" or backend AND whose model_targets
+    include "all" or model_family.
     Returns normalized dicts compatible with working_memory.json human_guidance entries.
     """
     if db is None:
@@ -302,8 +424,11 @@ def collect_active_guidance(
         logger.warning("collect_active_guidance query failed: %s", exc)
         return []
 
-    if backend != "all":
-        rows = [r for r in rows if _backend_matches(r, backend)]
+    rows = [
+        r
+        for r in rows
+        if _backend_matches(r, backend) and _model_matches(r, model_family)
+    ]
 
     out: List[Dict[str, Any]] = []
     for row in rows:
@@ -342,6 +467,9 @@ def collect_active_guidance(
                 "usage_count": int(usage_count),
                 "backend_targets": _parse_backend_targets(
                     getattr(row, "backend_targets", None)
+                ),
+                "model_targets": _parse_model_targets(
+                    getattr(row, "model_targets", None)
                 ),
             }
         )

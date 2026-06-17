@@ -315,6 +315,7 @@ def readiness_status(
     project_id: int,
     session_id: Optional[int] = None,
     backend: str = "all",
+    model_family: str = "all",
 ) -> Dict[str, Any]:
     """Compute Human Guidance readiness for a project (optionally session-scoped).
 
@@ -405,6 +406,7 @@ def readiness_status(
 
     backend_statistics: Dict[str, Any] = {
         "backend": backend,
+        "model_family": model_family,
         "matching_guidance": 0,
         "filtered_guidance": 0,
     }
@@ -424,8 +426,9 @@ def readiness_status(
             session_id=session_id,
             task_id=None,
             backend="all",
+            model_family="all",
         )
-        if backend == "all":
+        if backend == "all" and model_family == "all":
             entries = all_entries
             backend_statistics["matching_guidance"] = len(all_entries)
             backend_statistics["filtered_guidance"] = 0
@@ -437,6 +440,7 @@ def readiness_status(
                 session_id=session_id,
                 task_id=None,
                 backend=backend,
+                model_family=model_family,
             )
             backend_statistics["matching_guidance"] = len(entries)
             backend_statistics["filtered_guidance"] = len(all_entries) - len(entries)

@@ -387,22 +387,19 @@ class TestCreateGuidanceBackendTargets:
         assert created
         assert _parse_backend_targets(entry.backend_targets) == ["qwen"]
 
-    def test_invalid_backend_target_raises(
+    def test_unknown_backend_target_is_metadata_only(
         self, db_session: Session, user: User, project: Project
     ):
-        from fastapi import HTTPException
-
-        with pytest.raises(HTTPException) as exc:
-            create_guidance(
-                db_session,
-                user_id=user.id,
-                project_id=project.id,
-                scope="project",
-                message="bad backend",
-                backend_targets=["not_a_real_backend"],
-            )
-        assert exc.value.status_code == 400
-        assert "invalid_backend_target" in exc.value.detail
+        entry, created = create_guidance(
+            db_session,
+            user_id=user.id,
+            project_id=project.id,
+            scope="project",
+            message="custom backend metadata",
+            backend_targets=["not_a_real_backend"],
+        )
+        assert created
+        assert _parse_backend_targets(entry.backend_targets) == ["not_a_real_backend"]
 
     def test_all_valid_backends_accepted(
         self, db_session: Session, user: User, project: Project
@@ -568,11 +565,12 @@ class TestRenderedEndpointBackend:
         assert data["backend"] == "qwen"
         assert openclaw_entry.id in data["filtered_backend_ids"]
 
-    def test_rendered_invalid_backend_returns_400(
+    def test_rendered_unknown_backend_is_metadata_filter(
         self, client: TestClient, db_session: Session, user: User, project: Project
     ):
         r = client.get(f"/api/v1/projects/{project.id}/guidance/rendered?backend=bogus")
-        assert r.status_code == 400
+        assert r.status_code == 200
+        assert r.json()["backend"] == "bogus"
 
     def test_backend_targets_in_create_response(
         self, client: TestClient, db_session: Session, user: User, project: Project
@@ -600,7 +598,7 @@ class TestRenderedEndpointBackend:
         data = r.json()
         assert data["backend_targets"] == ["all"]
 
-    def test_invalid_backend_target_in_create_returns_400(
+    def test_unknown_backend_target_in_create_is_allowed(
         self, client: TestClient, db_session: Session, user: User, project: Project
     ):
         r = client.post(
@@ -611,4 +609,5 @@ class TestRenderedEndpointBackend:
                 "backend_targets": ["unknown_backend"],
             },
         )
-        assert r.status_code == 400
+        assert r.status_code == 201
+        assert r.json()["backend_targets"] == ["unknown_backend"]

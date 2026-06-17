@@ -64,6 +64,8 @@ def collect_repair_guidance_block(ctx: Any) -> str:
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         user_id=getattr(ctx.project, "user_id", None),
+        backend=getattr(ctx, "guidance_backend", "all"),
+        model_family=getattr(ctx, "guidance_model_family", "all"),
     )
 
 
@@ -101,6 +103,8 @@ def run_guidance_plan_enforcement(
         task_id=ctx.task_id,
         user_id=getattr(ctx.project, "user_id", None),
         plan_steps=plan_steps,
+        backend=getattr(ctx, "guidance_backend", "all"),
+        model_family=getattr(ctx, "guidance_model_family", "all"),
     )
 
     if not retry_state.repair_prompt_used:

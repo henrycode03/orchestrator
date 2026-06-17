@@ -678,6 +678,9 @@ class HumanGuidance(Base):
     backend_targets = Column(
         JSON, nullable=True
     )  # list[str]; None / missing treated as ["all"]
+    model_targets = Column(
+        JSON, nullable=True
+    )  # list[str]; None / missing treated as ["all"]
 
     revisions = relationship(
         "HumanGuidanceRevision",
