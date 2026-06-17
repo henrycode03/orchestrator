@@ -952,16 +952,21 @@ export interface HumanGuidanceActivation {
 
 export interface HumanGuidanceReadiness {
   project_id: number;
-  active_guidance_count: number;
-  is_ready: boolean;
-  checks: Record<string, boolean | string>;
-  activation: HumanGuidanceActivation | null;
+  session_id: number | null;
+  requested: HumanGuidanceActivation | null;
+  effective: HumanGuidanceActivation | null;
+  runtime_effective: (HumanGuidanceActivation & { mode: string }) | null;
+  global_flags: Record<string, boolean>;
+  guidance_statistics: {
+    active_guidance: number;
+    selected_guidance: number;
+    trimmed_guidance: number;
+  };
   backend_statistics: {
     backend: string;
     model_family: string;
     matching_guidance: number;
     filtered_guidance: number;
-    filtered_ids: number[];
   };
   purpose_statistics: {
     all: number;
@@ -970,7 +975,8 @@ export interface HumanGuidanceReadiness {
     repair: number;
     validation: number;
   };
-  warnings: string[];
+  ready: boolean;
+  blocking_reasons: string[];
 }
 
 export interface HumanGuidanceConflict {

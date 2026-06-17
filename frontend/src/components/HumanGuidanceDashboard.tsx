@@ -693,8 +693,8 @@ export function HumanGuidanceDashboard({ projectId }: HumanGuidanceDashboardProp
     );
   }
 
-  const activation = readiness?.activation ?? DEFAULT_ACTIVATION;
-  const isReady = readiness?.is_ready ?? false;
+  const activation = readiness?.requested ?? DEFAULT_ACTIVATION;
+  const isReady = readiness?.ready ?? false;
   const purposeStats = readiness?.purpose_statistics;
   const openConflicts = conflicts.filter((c) => !c.resolved);
 
@@ -737,7 +737,7 @@ export function HumanGuidanceDashboard({ projectId }: HumanGuidanceDashboardProp
         </h3>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
           {[
-            { label: 'Active entries', value: readiness?.active_guidance_count ?? 0 },
+            { label: 'Active entries', value: readiness?.guidance_statistics?.active_guidance ?? 0 },
             { label: 'Planning', value: purposeStats?.planning ?? 0 },
             { label: 'Execution', value: purposeStats?.execution ?? 0 },
             { label: 'Repair', value: purposeStats?.repair ?? 0 },
@@ -753,12 +753,12 @@ export function HumanGuidanceDashboard({ projectId }: HumanGuidanceDashboardProp
           ))}
         </div>
 
-        {readiness?.warnings && readiness.warnings.length > 0 && (
+        {readiness?.blocking_reasons && readiness.blocking_reasons.length > 0 && (
           <div className="space-y-1">
-            {readiness.warnings.map((w) => (
+            {readiness.blocking_reasons.map((w) => (
               <p key={w} className="flex items-center gap-1.5 text-xs text-amber-300">
                 <AlertTriangle className="h-3 w-3 shrink-0" />
-                {w}
+                {w.replace(/_/g, ' ')}
               </p>
             ))}
           </div>

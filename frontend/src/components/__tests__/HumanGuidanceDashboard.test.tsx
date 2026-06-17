@@ -48,16 +48,17 @@ const activation: HumanGuidanceActivation = {
 
 const readiness: HumanGuidanceReadiness = {
   project_id: 42,
-  active_guidance_count: 3,
-  is_ready: true,
-  checks: { table_enabled: true, injection_enabled: true },
-  activation,
+  session_id: null,
+  requested: activation,
+  effective: activation,
+  runtime_effective: { ...activation, mode: 'activation_controlled' },
+  global_flags: { HUMAN_GUIDANCE_TABLE_ENABLED: true, WORKING_MEMORY_INJECTION_ENABLED: true },
+  guidance_statistics: { active_guidance: 3, selected_guidance: 3, trimmed_guidance: 0 },
   backend_statistics: {
     backend: 'all',
     model_family: 'all',
     matching_guidance: 3,
     filtered_guidance: 0,
-    filtered_ids: [],
   },
   purpose_statistics: {
     all: 1,
@@ -66,7 +67,8 @@ const readiness: HumanGuidanceReadiness = {
     repair: 0,
     validation: 0,
   },
-  warnings: [],
+  ready: true,
+  blocking_reasons: [],
 }
 
 const guidanceEntry: HumanGuidanceEntry = {
@@ -160,7 +162,7 @@ describe('HumanGuidanceDashboard', () => {
 
   it('shows inactive badge when is_ready is false', async () => {
     ;(guidanceAPI.getReadiness as Mock).mockResolvedValue({
-      data: { ...readiness, is_ready: false, activation: { ...activation, status: 'disabled' } },
+      data: { ...readiness, ready: false, requested: { ...activation, status: 'disabled' } },
     })
     ;(guidanceAPI.list as Mock).mockResolvedValue({ data: { project_id: 42, total: 0, items: [] } })
     ;(guidanceAPI.listConflicts as Mock).mockResolvedValue({ data: { project_id: 42, total: 0, items: [] } })
