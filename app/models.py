@@ -681,6 +681,9 @@ class HumanGuidance(Base):
     model_targets = Column(
         JSON, nullable=True
     )  # list[str]; None / missing treated as ["all"]
+    purpose_targets = Column(
+        JSON, nullable=True
+    )  # list[str]; None / missing treated as ["all"]; values: all/planning/execution/repair/validation
 
     revisions = relationship(
         "HumanGuidanceRevision",

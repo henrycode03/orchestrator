@@ -300,6 +300,7 @@ def _wm_write_table_guidance(
     logger: Any,
     backend: str = "all",
     model_family: str = "all",
+    purpose: str = "execution",
 ) -> None:
     """HG-P1b: populate wm['human_guidance'] from HumanGuidance table and record usage."""
     try:
@@ -333,11 +334,13 @@ def _wm_write_table_guidance(
             task_id=numeric_task_id,
             backend=backend,
             model_family=model_family,
+            purpose=purpose,
         )
         logger.info(
-            "[HG_BACKEND] write_working_memory guidance_backend=%s guidance_model_family=%s selected_candidates=%d",
+            "[HG_BACKEND] write_working_memory guidance_backend=%s guidance_model_family=%s purpose=%s selected_candidates=%d",
             backend,
             model_family,
+            purpose,
             len(table_entries),
         )
 
@@ -491,6 +494,7 @@ def write_working_memory(
                     logger=logger,
                     backend=guidance_backend,
                     model_family=guidance_model_family,
+                    purpose="execution",
                 )
             else:
                 _wm_write_legacy_guidance(db, wm, session_id, task_id)

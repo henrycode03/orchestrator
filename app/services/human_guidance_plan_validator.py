@@ -103,6 +103,7 @@ def check_plan_guidance_violations_if_enabled(
     plan_steps: List[Dict],
     backend: str = "all",
     model_family: str = "all",
+    purpose: str = "planning",
 ) -> List[str]:
     """Flag-gated wrapper. Returns [] when flags are off, guidance unavailable, or no violations.
 
@@ -141,6 +142,12 @@ def check_plan_guidance_violations_if_enabled(
             task_id=task_id,
             backend=backend,
             model_family=model_family,
+            purpose=purpose,
+        )
+        logger.debug(
+            "[GUIDANCE_PLAN_VALIDATION] collected purpose=%s candidates=%d",
+            purpose,
+            len(guidance_entries),
         )
         if not guidance_entries:
             return []
@@ -161,6 +168,7 @@ def render_active_guidance_for_repair(
     user_id: Optional[int],
     backend: str = "all",
     model_family: str = "all",
+    purpose: str = "repair",
 ) -> str:
     """Render active guidance as a concise block for inclusion in planning repair prompts.
 
@@ -200,6 +208,12 @@ def render_active_guidance_for_repair(
             task_id=task_id,
             backend=backend,
             model_family=model_family,
+            purpose=purpose,
+        )
+        logger.debug(
+            "[GUIDANCE_REPAIR_RENDER] collected purpose=%s candidates=%d",
+            purpose,
+            len(guidance_entries),
         )
         if not guidance_entries:
             return ""

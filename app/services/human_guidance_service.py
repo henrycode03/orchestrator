@@ -82,6 +82,16 @@ def _parse_model_targets(raw: Any) -> list[str]:
     return _parse_targets(raw)
 
 
+def _parse_purpose_targets(raw: Any) -> list[str]:
+    """Return purpose_targets list from a DB column value. Defaults to ["all"]."""
+    return _parse_targets(raw)
+
+
+VALID_PURPOSES: frozenset[str] = frozenset(
+    {"all", "planning", "execution", "repair", "validation"}
+)
+
+
 def _model_family_from_name(value: Any) -> str:
     text = str(value or "").strip().lower()
     if not text:
@@ -169,6 +179,19 @@ def _model_matches(row: Any, model_family: str) -> bool:
     return "all" in targets or model_family in targets
 
 
+def _purpose_matches(row: Any, purpose: str) -> bool:
+    """Return True if a HumanGuidance row should be included for the given purpose.
+
+    purpose="all" includes every row (no filtering).
+    purpose="planning" includes rows whose purpose_targets contain "all" or "planning".
+    """
+    purpose = str(purpose or "all").strip().lower()
+    if purpose == "all":
+        return True
+    targets = _parse_purpose_targets(getattr(row, "purpose_targets", None))
+    return "all" in targets or purpose in targets
+
+
 def _get_or_404(db: DBSession, guidance_id: int) -> HumanGuidance:
     g = db.query(HumanGuidance).filter(HumanGuidance.id == guidance_id).first()
     if not g:
@@ -190,6 +213,7 @@ def create_guidance(
     created_by: Optional[str] = None,
     backend_targets: Optional[List[str]] = None,
     model_targets: Optional[List[str]] = None,
+    purpose_targets: Optional[List[str]] = None,
 ) -> Tuple[HumanGuidance, bool]:
     """Create a guidance entry. Returns (entry, created); created=False on dedup."""
     message = (message or "").strip()
@@ -202,6 +226,7 @@ def create_guidance(
 
     backend_targets = _parse_targets(backend_targets)
     model_targets = _parse_targets(model_targets)
+    purpose_targets = _parse_targets(purpose_targets)
 
     existing = (
         db.query(HumanGuidance)
@@ -233,6 +258,7 @@ def create_guidance(
         revision=1,
         backend_targets=backend_targets,
         model_targets=model_targets,
+        purpose_targets=purpose_targets,
     )
     db.add(entry)
     db.commit()
@@ -362,6 +388,7 @@ def collect_active_guidance(
     now: Optional[datetime] = None,
     backend: str = "all",
     model_family: str = "all",
+    purpose: str = "all",
 ) -> List[Dict[str, Any]]:
     """Return active guidance applicable to this execution context in merge order.
 
@@ -371,6 +398,8 @@ def collect_active_guidance(
     When backend/model_family are specified (not "all"), only returns entries
     whose backend_targets include "all" or backend AND whose model_targets
     include "all" or model_family.
+    When purpose is specified (not "all"), only returns entries whose
+    purpose_targets include "all" or the given purpose.
     Returns normalized dicts compatible with working_memory.json human_guidance entries.
     """
     if db is None:
@@ -427,7 +456,9 @@ def collect_active_guidance(
     rows = [
         r
         for r in rows
-        if _backend_matches(r, backend) and _model_matches(r, model_family)
+        if _backend_matches(r, backend)
+        and _model_matches(r, model_family)
+        and _purpose_matches(r, purpose)
     ]
 
     out: List[Dict[str, Any]] = []
@@ -470,6 +501,9 @@ def collect_active_guidance(
                 ),
                 "model_targets": _parse_model_targets(
                     getattr(row, "model_targets", None)
+                ),
+                "purpose_targets": _parse_purpose_targets(
+                    getattr(row, "purpose_targets", None)
                 ),
             }
         )

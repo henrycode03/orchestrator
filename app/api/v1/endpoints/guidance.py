@@ -43,6 +43,7 @@ class CreateGuidanceRequest(BaseModel):
     backend_targets: Optional[List[str]] = None
     provider_targets: Optional[List[str]] = None
     model_targets: Optional[List[str]] = None
+    purpose_targets: Optional[List[str]] = None
 
 
 class PatchGuidanceRequest(BaseModel):
@@ -57,6 +58,7 @@ def _serialize(g: HumanGuidance, *, full: bool = False) -> dict:
     from app.services.human_guidance_service import (
         _parse_backend_targets,
         _parse_model_targets,
+        _parse_purpose_targets,
     )
 
     out = {
@@ -76,6 +78,7 @@ def _serialize(g: HumanGuidance, *, full: bool = False) -> dict:
         "backend_targets": _parse_backend_targets(getattr(g, "backend_targets", None)),
         "provider_targets": _parse_backend_targets(getattr(g, "backend_targets", None)),
         "model_targets": _parse_model_targets(getattr(g, "model_targets", None)),
+        "purpose_targets": _parse_purpose_targets(getattr(g, "purpose_targets", None)),
     }
     if full:
         out["disabled_at"] = g.disabled_at.isoformat() if g.disabled_at else None
@@ -117,6 +120,7 @@ def create_project_guidance(
         created_by=getattr(current_user, "email", None),
         backend_targets=body.backend_targets or body.provider_targets,
         model_targets=body.model_targets,
+        purpose_targets=body.purpose_targets,
     )
     if not created:
         from fastapi.responses import JSONResponse
@@ -344,6 +348,7 @@ def get_rendered_guidance(
     task_id: Optional[int] = None,
     backend: str = "all",
     model_family: str = "all",
+    purpose: str = "all",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -366,10 +371,13 @@ def get_rendered_guidance(
         task_id=task_id,
         backend="all",
         model_family="all",
+        purpose="all",
     )
-    if backend == "all" and model_family == "all":
+    no_filters = backend == "all" and model_family == "all" and purpose == "all"
+    if no_filters:
         entries = all_entries
         filtered_target_ids: List[int] = []
+        filtered_purpose_ids: List[int] = []
     else:
         entries = collect_active_guidance(
             db,
@@ -379,10 +387,25 @@ def get_rendered_guidance(
             task_id=task_id,
             backend=backend,
             model_family=model_family,
+            purpose=purpose,
         )
         all_ids = {e.get("id") for e in all_entries}
         matched_ids = {e.get("id") for e in entries}
         filtered_target_ids = sorted(all_ids - matched_ids)
+
+        # Purpose-filtered IDs: entries excluded only because of purpose mismatch
+        backend_model_entries = collect_active_guidance(
+            db,
+            user_id=current_user.id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=task_id,
+            backend=backend,
+            model_family=model_family,
+            purpose="all",
+        )
+        backend_model_ids = {e.get("id") for e in backend_model_entries}
+        filtered_purpose_ids = sorted(backend_model_ids - matched_ids)
 
     selection = select_guidance_for_injection(entries, _INJECTION_BUDGET)
     selected_entries = selection["selected"]
@@ -413,8 +436,10 @@ def get_rendered_guidance(
         "block": block,
         "backend": backend,
         "model_family": model_family,
+        "purpose": purpose,
         "filtered_backend_ids": filtered_target_ids,
         "filtered_target_ids": filtered_target_ids,
+        "filtered_purpose_ids": filtered_purpose_ids,
     }
 
 

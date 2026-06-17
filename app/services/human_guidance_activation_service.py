@@ -346,6 +346,13 @@ def readiness_status(
         "selected_guidance": 0,
         "trimmed_guidance": 0,
     }
+    purpose_statistics: Dict[str, int] = {
+        "planning": 0,
+        "execution": 0,
+        "repair": 0,
+        "validation": 0,
+        "all": 0,
+    }
 
     try:
         activation = get_effective_activation(
@@ -361,6 +368,7 @@ def readiness_status(
             "effective": None,
             "global_flags": global_flags,
             "guidance_statistics": guidance_statistics,
+            "purpose_statistics": purpose_statistics,
             "ready": False,
             "blocking_reasons": blocking_reasons,
         }
@@ -410,6 +418,13 @@ def readiness_status(
         "matching_guidance": 0,
         "filtered_guidance": 0,
     }
+    purpose_statistics: Dict[str, int] = {
+        "planning": 0,
+        "execution": 0,
+        "repair": 0,
+        "validation": 0,
+        "all": 0,
+    }
     try:
         from app.services.human_guidance_service import collect_active_guidance
         from app.services.human_guidance_selection_service import (
@@ -450,6 +465,15 @@ def readiness_status(
             "selected_guidance": selection["selection_metadata"]["selected_count"],
             "trimmed_guidance": selection["selection_metadata"]["trimmed_count"],
         }
+
+        # Count guidance per purpose using the full (unfiltered) entry set
+        from app.services.human_guidance_service import _parse_purpose_targets
+
+        for entry in all_entries:
+            pts = _parse_purpose_targets(entry.get("purpose_targets"))
+            for pt in pts:
+                if pt in purpose_statistics:
+                    purpose_statistics[pt] += 1
     except Exception as exc:
         logger.warning("[HGA] guidance statistics failed: %s", exc)
 
@@ -473,6 +497,7 @@ def readiness_status(
         "global_flags": global_flags,
         "guidance_statistics": guidance_statistics,
         "backend_statistics": backend_statistics,
+        "purpose_statistics": purpose_statistics,
         "ready": ready,
         "blocking_reasons": blocking_reasons,
     }

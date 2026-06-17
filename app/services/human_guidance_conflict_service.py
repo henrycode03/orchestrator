@@ -152,6 +152,7 @@ def detect_guidance_task_conflicts(
     task_description: str,
     backend: str = "all",
     model_family: str = "all",
+    purpose: str = "planning",
 ) -> List[Dict[str, Any]]:
     """Scan active guidance vs task text for heuristic conflicts.
 
@@ -170,6 +171,12 @@ def detect_guidance_task_conflicts(
             task_id=task_id,
             backend=backend,
             model_family=model_family,
+            purpose=purpose,
+        )
+        logger.debug(
+            "[GUIDANCE_CONFLICT] collected purpose=%s candidates=%d",
+            purpose,
+            len(guidance_entries),
         )
     except Exception as exc:
         logger.warning("[GUIDANCE_CONFLICT] collect_active_guidance failed: %s", exc)
