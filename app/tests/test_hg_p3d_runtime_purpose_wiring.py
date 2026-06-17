@@ -453,12 +453,14 @@ class TestRepairRendererPurposeRepair:
 
 
 # ---------------------------------------------------------------------------
-# Working Memory injection uses purpose="execution"
+# Working Memory injection — planning-visible (excludes execution-only)
+# HG Hardening Phase 3: WM now collects purpose=all and filters execution-only entries.
+# Planning and repair guidance IS included; execution-only guidance is NOT.
 # ---------------------------------------------------------------------------
 
 
 class TestWMInjectionPurposeExecution:
-    def test_execution_only_guidance_written_to_wm(
+    def test_execution_only_guidance_not_written_to_wm(
         self,
         db_session,
         tmp_path,
@@ -498,9 +500,11 @@ class TestWMInjectionPurposeExecution:
         )
 
         wm = json.loads((tmp_path / ".agent" / _FILENAME).read_text(encoding="utf-8"))
-        assert "use stdout" in _messages(wm["human_guidance"])
+        assert "use stdout" not in _messages(
+            wm["human_guidance"]
+        ), "Execution-only guidance must not appear in planning-context WM (Phase 3 fix)"
 
-    def test_planning_only_guidance_excluded_from_wm(
+    def test_planning_only_guidance_included_in_wm(
         self,
         db_session,
         tmp_path,
@@ -540,7 +544,9 @@ class TestWMInjectionPurposeExecution:
         )
 
         wm = json.loads((tmp_path / ".agent" / _FILENAME).read_text(encoding="utf-8"))
-        assert "planning only excluded from wm" not in _messages(wm["human_guidance"])
+        assert "planning only excluded from wm" in _messages(
+            wm["human_guidance"]
+        ), "Planning-only guidance must appear in planning-context WM (Phase 3 fix)"
 
     def test_all_purpose_guidance_included_in_wm(
         self,

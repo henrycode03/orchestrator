@@ -543,9 +543,11 @@ class TestRuntimeRepairRenderer:
 
 
 class TestRuntimeWMInjection:
-    """WM injection uses purpose="execution": only G1+G4 written."""
+    """WM injection (Phase 3): collects purpose=all, filters execution-only.
+    For direct_ollama/qwen: G1(all) + G2(planning) + G3(repair) written; G4(execution-only) excluded.
+    """
 
-    def test_wm_contains_G1_and_G4_only(
+    def test_wm_contains_G1_G2_G3_not_G4(
         self,
         db_session,
         tmp_path,
@@ -582,18 +584,25 @@ class TestRuntimeWMInjection:
         wm = json.loads((tmp_path / ".agent" / _FILENAME).read_text(encoding="utf-8"))
         wm_msgs = {e["message"] for e in wm["human_guidance"]}
 
-        assert "Global rule applies everywhere." in wm_msgs, "G1 must be in WM"
+        # Phase 3: WM collects purpose=all, filters execution-only entries
         assert (
-            "Execution rule: all runtime output must go to stdout." in wm_msgs
-        ), "G4 must be in WM"
+            "Global rule applies everywhere." in wm_msgs
+        ), "G1 (all-purpose) must be in WM"
         assert (
-            "Planning rule: never use mutable default arguments." not in wm_msgs
-        ), "G2 must NOT be in WM"
+            "Planning rule: never use mutable default arguments." in wm_msgs
+        ), "G2 (planning) must be in WM (Phase 3 fix)"
         assert (
-            "Repair rule: preserve existing tests during repair." not in wm_msgs
-        ), "G3 must NOT be in WM"
-        assert "OpenClaw Claude-only rule." not in wm_msgs, "G5 must NOT be in WM"
-        assert "Ollama Llama-only rule." not in wm_msgs, "G6 must NOT be in WM"
+            "Repair rule: preserve existing tests during repair." in wm_msgs
+        ), "G3 (repair) must be in WM"
+        assert (
+            "Execution rule: all runtime output must go to stdout." not in wm_msgs
+        ), "G4 (execution-only) must NOT be in WM (Phase 3 fix)"
+        assert (
+            "OpenClaw Claude-only rule." not in wm_msgs
+        ), "G5 must NOT be in WM (backend mismatch)"
+        assert (
+            "Ollama Llama-only rule." not in wm_msgs
+        ), "G6 must NOT be in WM (model mismatch)"
 
     def test_wm_entry_count_is_two(
         self,
@@ -630,7 +639,8 @@ class TestRuntimeWMInjection:
         )
 
         wm = json.loads((tmp_path / ".agent" / _FILENAME).read_text(encoding="utf-8"))
-        assert len(wm["human_guidance"]) == 2
+        # Phase 3: G1(all) + G2(planning/direct_ollama/qwen) + G3(repair/direct_ollama/qwen) = 3
+        assert len(wm["human_guidance"]) == 3
 
 
 class TestRuntimeConflictDetection:
@@ -711,7 +721,7 @@ class TestRuntimeConflictDetection:
 
 
 class TestTelemetry:
-    def test_usage_rows_created_for_execution_entries(
+    def test_usage_rows_created_for_wm_planning_visible_entries(
         self,
         db_session,
         tmp_path,
@@ -750,19 +760,22 @@ class TestTelemetry:
             .filter(HumanGuidanceUsage.session_id == session_row.id)
             .all()
         )
+        # Phase 3: G1(all) + G2(planning) + G3(repair) are written; G4(execution-only) is filtered
         assert (
-            len(usage_rows) == 2
-        ), f"Expected 2 usage rows (G1+G4), got {len(usage_rows)}"
+            len(usage_rows) == 3
+        ), f"Expected 3 usage rows (G1+G2+G3), got {len(usage_rows)}"
 
         recorded_ids = {r.guidance_id for r in usage_rows}
         assert guidance_matrix["G1"] in recorded_ids, "G1 usage must be recorded"
-        assert guidance_matrix["G4"] in recorded_ids, "G4 usage must be recorded"
         assert (
-            guidance_matrix["G2"] not in recorded_ids
-        ), "G2 usage must NOT be recorded"
+            guidance_matrix["G2"] in recorded_ids
+        ), "G2 (planning) usage must be recorded"
         assert (
-            guidance_matrix["G3"] not in recorded_ids
-        ), "G3 usage must NOT be recorded"
+            guidance_matrix["G3"] in recorded_ids
+        ), "G3 (repair) usage must be recorded"
+        assert (
+            guidance_matrix["G4"] not in recorded_ids
+        ), "G4 (execution-only) usage must NOT be recorded"
 
     def test_usage_rows_all_marked_selected(
         self,
@@ -815,7 +828,7 @@ class TestTelemetry:
 
 
 class TestObservabilityLogs:
-    def test_wm_log_includes_purpose_execution(
+    def test_wm_log_includes_purpose_wm_planning_visible(
         self,
         db_session,
         tmp_path,
@@ -857,8 +870,8 @@ class TestObservabilityLogs:
             r.message for r in caplog.records if "[HG_BACKEND]" in r.message
         ]
         assert any(
-            "purpose=execution" in line for line in hg_backend_lines
-        ), f"Expected 'purpose=execution' in HG_BACKEND log. Got: {hg_backend_lines}"
+            "purpose=wm_planning_visible" in line for line in hg_backend_lines
+        ), f"Expected 'purpose=wm_planning_visible' in HG_BACKEND log. Got: {hg_backend_lines}"
 
     def test_plan_validator_log_includes_purpose_planning(
         self,

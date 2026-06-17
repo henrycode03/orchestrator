@@ -90,6 +90,23 @@ def _extract_active_constraints(orchestration_state: Any) -> List[str]:
 
 _HUMAN_GUIDANCE_LIMIT = 10  # max entries stored/rendered
 
+# Entries whose purpose_targets are exclusively execution-targeted must not appear
+# in WM because WM is injected into the planning context, not the execution runtime.
+_WM_EXCLUDED_SOLE_PURPOSES = frozenset({"execution"})
+
+
+def _is_wm_eligible_entry(entry: Dict[str, Any]) -> bool:
+    """Return True if guidance should be stored in WM (planning-context compatible).
+
+    Excludes entries whose purpose_targets are exclusively {"execution"}.
+    All-purpose, planning, repair, and validation entries are included.
+    """
+    pts = entry.get("purpose_targets")
+    if not pts:
+        return True  # NULL/missing → defaults to "all" → include
+    targets = frozenset(pts) if isinstance(pts, list) else frozenset({str(pts)})
+    return not targets.issubset(_WM_EXCLUDED_SOLE_PURPOSES)
+
 
 def _extract_operator_guidance(
     db: Any,
@@ -331,7 +348,7 @@ def _wm_write_table_guidance(
         except (TypeError, ValueError):
             pass
 
-        table_entries = collect_active_guidance(
+        all_entries = collect_active_guidance(
             db,
             user_id=user_id,
             project_id=project_id,
@@ -339,13 +356,20 @@ def _wm_write_table_guidance(
             task_id=numeric_task_id,
             backend=backend,
             model_family=model_family,
-            purpose=purpose,
+            purpose="all",
         )
+        # Exclude entries targeted exclusively at execution — WM is planning-context.
+        table_entries = [e for e in all_entries if _is_wm_eligible_entry(e)]
+        # Annotate each entry with its effective purposes for downstream observability.
+        for e in table_entries:
+            pts = e.get("purpose_targets") or ["all"]
+            e["effective_purposes"] = pts if isinstance(pts, list) else [str(pts)]
         logger.info(
-            "[HG_BACKEND] write_working_memory guidance_backend=%s guidance_model_family=%s purpose=%s selected_candidates=%d",
+            "[HG_BACKEND] write_working_memory guidance_backend=%s guidance_model_family=%s"
+            " purpose=wm_planning_visible all_candidates=%d eligible=%d",
             backend,
             model_family,
-            purpose,
+            len(all_entries),
             len(table_entries),
         )
 
@@ -499,7 +523,7 @@ def write_working_memory(
                 )
 
                 if _use_table:
-                    # HG-P1b: table-backed path
+                    # HG-P1b: table-backed path (collects all purposes, filters execution-only)
                     _wm_write_table_guidance(
                         db=db,
                         wm=wm,
@@ -508,7 +532,7 @@ def write_working_memory(
                         logger=logger,
                         backend=guidance_backend,
                         model_family=guidance_model_family,
-                        purpose="execution",
+                        purpose="all",
                     )
                 else:
                     _wm_write_legacy_guidance(db, wm, session_id, task_id)

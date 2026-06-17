@@ -1946,6 +1946,13 @@ def finalize_successful_task(
         guidance_backend=ctx.guidance_backend,
         guidance_model_family=ctx.guidance_model_family,
     )
+
+    from app.services.human_guidance_post_write_checker import (
+        run_post_write_check_if_enabled,
+    )
+
+    run_post_write_check_if_enabled(ctx, reported_changed_files=reported_changed_files)
+
     promoted_workspace_archive_result = finalization.get(
         "promoted_workspace_archive_result"
     )
