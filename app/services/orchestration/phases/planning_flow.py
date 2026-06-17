@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict
 
@@ -2579,7 +2580,7 @@ def __coerce_output_text(
             type(output_result),
         )
     if isinstance(output_text, str):
-        output_text = __strip_markdown_fences(output_text)
+        output_text = re.sub(r"^\s*```(?:json)?\s*|\s*```$", "", output_text.strip())
     return output_text
 
 
@@ -2595,10 +2596,3 @@ def __build_planning_prompt(
         project_dir=str(orchestration_state.project_dir),
         execution_profile=execution_profile,
     )
-
-
-def __strip_markdown_fences(output_text: str) -> str:
-    import re
-
-    markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
-    return re.sub(markdown_pattern, "", output_text.strip())
