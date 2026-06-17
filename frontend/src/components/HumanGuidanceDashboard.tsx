@@ -468,7 +468,7 @@ interface ConflictPanelProps {
   onResolve: (conflictId: number, status: 'resolved' | 'ignored') => void;
 }
 
-function ConflictPanel({ projectId: _projectId, conflicts, onResolve }: ConflictPanelProps) {
+function ConflictPanel({ conflicts, onResolve }: ConflictPanelProps) {
   if (conflicts.length === 0) {
     return (
       <p className="text-xs text-slate-500 italic">No open conflicts detected.</p>
