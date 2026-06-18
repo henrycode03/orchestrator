@@ -10,8 +10,8 @@ import {
   type PilotPermissionStats,
   type QueueLatencyStats,
   type AuditEventsResponse,
-  type Project,
 } from '@/api/client';
+import type { Project } from '@/types/api';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -577,12 +577,15 @@ export default function AdminPilotDashboard() {
   const [audit, setAudit] = useState<AuditEventsResponse | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     projectsAPI.getAll({ limit: 100 }).then((r) => {
+      if (cancelled) return;
       setProjects(r.data);
-      if (r.data.length > 0 && selectedProjectId === null) {
-        setSelectedProjectId(r.data[0].id);
-      }
+      setSelectedProjectId((prev) => prev ?? r.data[0]?.id ?? null);
     });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const fetchAll = useCallback(async () => {
