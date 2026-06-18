@@ -532,6 +532,162 @@ def render_active_human_guidance_section(
         return ""
 
 
+_GUIDANCE_REMEDIATION_SECTION_HEADER = "## GUIDANCE REMEDIATION"
+_GUIDANCE_REMEDIATION_SECTION_AUTHORITY = (
+    "Previous work conflicted with active Human Guidance. Correct these patterns "
+    "before continuing."
+)
+_GUIDANCE_REMEDIATION_SOURCES = frozenset({"post_write_check", "heuristic"})
+
+
+def _decode_conflict_patterns(raw: Any) -> List[str]:
+    try:
+        parsed = json.loads(raw or "[]")
+    except Exception:
+        return []
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return []
+
+
+def _remediation_task_is_previous(
+    conflict_task_id: Any,
+    current_task_id: Any,
+) -> bool:
+    try:
+        conflict_numeric = int(conflict_task_id)
+        current_numeric = int(current_task_id)
+    except (TypeError, ValueError):
+        return False
+    return conflict_numeric < current_numeric
+
+
+def render_guidance_remediation_section(
+    db,
+    project_id,
+    session_id,
+    task_id,
+    max_entries=3,
+    max_chars=800,
+) -> str:
+    """Render recent unresolved guidance conflicts as machine-generated remediation.
+
+    This is intentionally separate from operator-authored guidance. It reads
+    existing HumanGuidanceConflict rows and never writes LogEntry feedback.
+    """
+    try:
+        from app.models import GuidanceStatus, HumanGuidance, HumanGuidanceConflict
+
+        if db is None or project_id is None:
+            return ""
+
+        query = db.query(HumanGuidanceConflict).filter(
+            HumanGuidanceConflict.project_id == project_id,
+            HumanGuidanceConflict.status == "open",
+            HumanGuidanceConflict.source.in_(list(_GUIDANCE_REMEDIATION_SOURCES)),
+        )
+        if session_id is not None:
+            query = query.filter(
+                (HumanGuidanceConflict.session_id == session_id)
+                | (HumanGuidanceConflict.session_id.is_(None))
+            )
+        rows = (
+            query.order_by(HumanGuidanceConflict.detected_at.desc())
+            .limit(max(max_entries * 8, max_entries))
+            .all()
+        )
+
+        selected: List[Dict[str, Any]] = []
+        seen: set[tuple[Any, str]] = set()
+        for row in rows:
+            source = str(getattr(row, "source", "") or "")
+            row_task_id = getattr(row, "task_id", None)
+            if str(row_task_id or "") == str(task_id or ""):
+                continue
+            if source == "heuristic" and not _remediation_task_is_previous(
+                row_task_id, task_id
+            ):
+                continue
+
+            guidance = None
+            guidance_id = getattr(row, "guidance_id", None)
+            if guidance_id is not None:
+                try:
+                    guidance = (
+                        db.query(HumanGuidance)
+                        .filter(HumanGuidance.id == guidance_id)
+                        .first()
+                    )
+                except Exception:
+                    guidance = None
+                if guidance is None:
+                    continue
+                status = getattr(guidance, "status", None)
+                if status not in {GuidanceStatus.ACTIVE, "active"}:
+                    continue
+                guidance_message = str(getattr(guidance, "message", "") or "").strip()
+            else:
+                continue
+
+            patterns = _decode_conflict_patterns(
+                getattr(row, "conflict_patterns", None)
+            )
+            pattern_key = ",".join(patterns) or "unknown"
+            dedup_key = (guidance_id, pattern_key)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            excerpt = _trim_text(getattr(row, "conflict_excerpt", "") or "", 120)
+            selected.append(
+                {
+                    "guidance_message": guidance_message,
+                    "pattern": pattern_key,
+                    "task_id": row_task_id,
+                    "excerpt": excerpt,
+                }
+            )
+            if len(selected) >= max_entries:
+                break
+
+        if not selected:
+            return ""
+
+        lines = [
+            _GUIDANCE_REMEDIATION_SECTION_HEADER,
+            _GUIDANCE_REMEDIATION_SECTION_AUTHORITY,
+        ]
+        for item in selected:
+            guidance_message = _trim_text(item["guidance_message"], 180)
+            previous_task = (
+                item["task_id"] if item["task_id"] is not None else "unknown"
+            )
+            line = (
+                f"- {guidance_message} | pattern={item['pattern']} | "
+                f"previous task={previous_task}"
+            )
+            if item["excerpt"]:
+                line += f" | excerpt={item['excerpt']}"
+            lines.append(line)
+
+        rendered = "\n".join(lines).strip()
+        try:
+            limit = int(max_chars or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit > 0 and len(rendered) > limit:
+            rendered = rendered[: max(0, limit - 3)].rstrip() + "..."
+        return rendered
+    except Exception as exc:
+        try:
+            logger.warning(
+                "[HG_REMEDIATION_SECTION] render failed (non-fatal): %s", exc
+            )
+        except Exception:
+            pass
+        return ""
+
+
 def _runtime_metadata(ctx: OrchestrationContext) -> Dict[str, Any]:
     runtime_service = getattr(ctx, "runtime_service", None)
     if runtime_service is None or not hasattr(runtime_service, "get_backend_metadata"):
@@ -790,8 +946,19 @@ def assemble_execution_prompt(
         purpose="execution",
         max_chars=900 if not compact else 450,
     )
-    if human_guidance_section:
-        raw_prompt = human_guidance_section + "\n\n" + raw_prompt
+    remediation_section = render_guidance_remediation_section(
+        ctx.db,
+        project_id=getattr(project, "id", None),
+        session_id=_state_session_id(ctx.orchestration_state),
+        task_id=getattr(ctx.orchestration_state, "task_id", None),
+        max_entries=3,
+        max_chars=800 if not compact else 400,
+    )
+    prompt_sections = [
+        section for section in (human_guidance_section, remediation_section) if section
+    ]
+    if prompt_sections:
+        raw_prompt = "\n\n".join(prompt_sections + [raw_prompt])
     return render_adapted_runtime_prompt(
         ctx.db,
         objective=(
