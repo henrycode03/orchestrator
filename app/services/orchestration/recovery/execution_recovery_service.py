@@ -1,22 +1,21 @@
-"""Phase 13B-S1: Bounded execution recovery service — skeleton.
+"""Phase 13B-S2: Bounded execution recovery service.
 
-LLM patch generation is DISABLED in this phase. The service provides:
-  - Eligibility gating (budget, failure class, evidence, repeated-signature checks)
-  - Audit event emission for every decision
-  - A safe noop attempt_recovery() that never modifies workspace files
+Step-scope patch generation is ENABLED. Completion-scope is still disabled.
 
-Production behavior change in S1: none beyond additional audit events emitted
-near terminal failure paths.
+Phase 13B-S1 behaviour is preserved when llm_callable is not provided (noop path).
+Phase 13B-S2 behaviour: when scope=="step" and llm_callable is provided, a real
+recovery patch is generated, validated, applied, and the rerun_command is executed.
 
-When Phase 13B-full enables LLM patch generation, set _LLM_PATCH_GENERATION_ENABLED
-to True and implement the patch-and-rerun logic inside attempt_recovery().
+When Phase 13B-S3 enables completion-scope recovery, set
+_COMPLETION_SCOPE_RECOVERY_ENABLED to True and wire the llm_callable in
+completion_flow.py.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
@@ -30,8 +29,6 @@ logger = logging.getLogger(__name__)
 RECOVERY_BUDGET: int = 2
 
 # Failure classes eligible for execution recovery.
-# Mirrors ELIGIBLE_DEBUG_FAILURE_CLASSES from diagnostics/debug_feedback.py
-# and adds missing_requested_symbol (surfaced by 10K-c, not covered by Phase 7F).
 ELIGIBLE_RECOVERY_FAILURE_CLASSES: frozenset = frozenset(
     {
         "pytest_failure",
@@ -46,9 +43,11 @@ ELIGIBLE_RECOVERY_FAILURE_CLASSES: frozenset = frozenset(
     }
 )
 
-# Phase 13B-S1: LLM patch generation stays False until Phase 13B-full.
-# Changing this flag requires a separate approved implementation phase.
-_LLM_PATCH_GENERATION_ENABLED: bool = False
+# Phase 13B-S2: step-scope patch generation is enabled.
+_LLM_PATCH_GENERATION_ENABLED: bool = True
+_STEP_SCOPE_RECOVERY_ENABLED: bool = True
+# Phase 13B-S3: set to True when completion-scope recovery is implemented.
+_COMPLETION_SCOPE_RECOVERY_ENABLED: bool = False
 
 
 def _failure_signature_hash(evidence: ExecutionRecoveryEvidence) -> str:
@@ -67,16 +66,17 @@ def _failure_signature_hash(evidence: ExecutionRecoveryEvidence) -> str:
     return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
-def _prior_recovery_signature_hashes(orchestration_state: Any) -> list:
+def _prior_hashes(orchestration_state: Any) -> list:
     return list(
         getattr(orchestration_state, "execution_recovery_signature_hashes", []) or []
     )
 
 
 class ExecutionRecoveryService:
-    """Bounded execution recovery — skeleton (Phase 13B-S1).
+    """Bounded execution recovery — Phase 13B-S2.
 
-    All methods are static so the service is stateless and trivially mockable.
+    Step-scope: full patch-and-rerun pipeline.
+    Completion-scope: noop (disabled until Phase 13B-S3).
     """
 
     @staticmethod
@@ -102,7 +102,7 @@ class ExecutionRecoveryService:
             return False, "ineligible_failure_class"
 
         sig = _failure_signature_hash(evidence)
-        if sig in _prior_recovery_signature_hashes(orchestration_state):
+        if sig in _prior_hashes(orchestration_state):
             return False, "repeated_failure_signature"
 
         return True, ""
@@ -118,19 +118,33 @@ class ExecutionRecoveryService:
         scope: str,
         step_index: Optional[int] = None,
         parent_event_id: Optional[str] = None,
+        llm_callable: Optional[Callable[[str], str]] = None,
+        command_runner: Optional[Callable[[str], Tuple[int, str, str]]] = None,
+        validator_callable: Optional[Callable[[str], Tuple[bool, str]]] = None,
     ) -> Dict[str, Any]:
         """Attempt to recover from a terminal execution failure.
 
-        Phase 13B-S1 behaviour:
+        Phase 13B-S2 behaviour for scope=="step" when llm_callable is provided:
           1. Calls should_attempt() — emits RECOVERY_SKIPPED and returns if ineligible.
-          2. If eligible: consumes one budget slot, emits RECOVERY_ATTEMPTED,
-             then immediately emits RECOVERY_FAILED (no patch applied).
-          3. Never returns status="success".
-          4. Never modifies any file in the workspace.
+          2. If eligible: consumes one budget slot.
+          3. Calls llm_callable(prompt) → parse → validate → apply → rerun.
+          4. On rerun exit 0: calls validator_callable(patch_path) if provided.
+          5. On rerun exit 0 + validator accepts: emits RECOVERY_SUCCEEDED.
+          6. On any failure after budget consumed: emits RECOVERY_FAILED.
 
-        Return dict always has "status" key: "skipped" | "failed".
-        "success" is reserved for Phase 13B-full.
+        validator_callable(patch_path) -> (accepted: bool, reason: str).
+        When None, validation is skipped (S2 backward-compat for tests without validator).
+
+        Phase 13B-S1/noop behaviour (scope=="completion" OR llm_callable is None):
+          - Emits RECOVERY_ATTEMPTED + RECOVERY_FAILED(llm_disabled or scope_disabled).
+          - Never returns status="success".
+
+        Return dict always has "status": "skipped" | "failed" | "success".
         """
+        from pathlib import Path as _Path
+
+        project_dir = _Path(str(project_dir))
+
         should, skip_reason = ExecutionRecoveryService.should_attempt(
             evidence, orchestration_state
         )
@@ -159,29 +173,77 @@ class ExecutionRecoveryService:
                 logger.debug("[RECOVERY] SKIPPED event emit failed: %s", exc)
             return {"status": "skipped", "reason": skip_reason}
 
-        # Eligible — consume one budget slot.
-        sig = _failure_signature_hash(evidence)
+        # Consume one budget slot.
+        failure_sig = _failure_signature_hash(evidence)
         new_attempts = attempts_used + 1
 
-        prior_sigs = _prior_recovery_signature_hashes(orchestration_state)
-        if sig not in prior_sigs:
-            prior_sigs = prior_sigs + [sig]
+        prior = _prior_hashes(orchestration_state)
+        if failure_sig not in prior:
+            prior = prior + [failure_sig]
         try:
-            setattr(
-                orchestration_state,
-                "execution_recovery_signature_hashes",
-                prior_sigs,
-            )
-        except Exception:
-            pass
-
-        try:
+            setattr(orchestration_state, "execution_recovery_signature_hashes", prior)
             orchestration_state.execution_recovery_attempts = new_attempts
         except Exception:
             pass
 
-        budget_exhausted = new_attempts >= RECOVERY_BUDGET
+        budget_exhausted_after = new_attempts >= RECOVERY_BUDGET
 
+        # --- Completion scope: always noop in S2. ---
+        if scope == "completion" or not _COMPLETION_SCOPE_RECOVERY_ENABLED:
+            if scope == "completion":
+                stop_reason = "completion_scope_disabled"
+            elif llm_callable is None:
+                # Keep S1-compatible stop_reason so existing tests pass.
+                stop_reason = "llm_patch_generation_disabled"
+            else:
+                stop_reason = "completion_scope_disabled"
+
+            if scope != "step" or llm_callable is None:
+                return ExecutionRecoveryService._noop_attempt(
+                    project_dir=project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    evidence=evidence,
+                    scope=scope,
+                    step_index=step_index,
+                    parent_event_id=parent_event_id,
+                    new_attempts=new_attempts,
+                    budget_exhausted=budget_exhausted_after,
+                    stop_reason=stop_reason,
+                )
+
+        # --- Step scope with LLM callable: real recovery. ---
+        return ExecutionRecoveryService._step_recovery(
+            project_dir=project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            evidence=evidence,
+            orchestration_state=orchestration_state,
+            scope=scope,
+            step_index=step_index,
+            parent_event_id=parent_event_id,
+            new_attempts=new_attempts,
+            budget_exhausted=budget_exhausted_after,
+            llm_callable=llm_callable,
+            command_runner=command_runner,
+            validator_callable=validator_callable,
+        )
+
+    @staticmethod
+    def _noop_attempt(
+        *,
+        project_dir: Any,
+        session_id: int,
+        task_id: int,
+        evidence: ExecutionRecoveryEvidence,
+        scope: str,
+        step_index: Optional[int],
+        parent_event_id: Optional[str],
+        new_attempts: int,
+        budget_exhausted: bool,
+        stop_reason: str,
+    ) -> Dict[str, Any]:
+        """S1-compatible noop: emit ATTEMPTED + FAILED, never succeed."""
         try:
             append_orchestration_event(
                 project_dir=project_dir,
@@ -206,9 +268,6 @@ class ExecutionRecoveryService:
         except Exception as exc:
             logger.debug("[RECOVERY] ATTEMPTED event emit failed: %s", exc)
 
-        # Phase 13B-S1: LLM patch generation disabled — always FAILED.
-        stop_reason = "llm_patch_generation_disabled"
-
         try:
             append_orchestration_event(
                 project_dir=project_dir,
@@ -232,9 +291,261 @@ class ExecutionRecoveryService:
             logger.debug("[RECOVERY] FAILED event emit failed: %s", exc)
 
         logger.info(
-            "[RECOVERY] Attempt %s/%s (%s scope) — noop (LLM patch generation disabled in S1)",
+            "[RECOVERY] Noop attempt %s/%s (%s): %s",
             new_attempts,
             RECOVERY_BUDGET,
             scope,
+            stop_reason,
         )
         return {"status": "failed", "reason": stop_reason}
+
+    @staticmethod
+    def _step_recovery(
+        *,
+        project_dir: Any,
+        session_id: int,
+        task_id: int,
+        evidence: ExecutionRecoveryEvidence,
+        orchestration_state: Any,
+        scope: str,
+        step_index: Optional[int],
+        parent_event_id: Optional[str],
+        new_attempts: int,
+        budget_exhausted: bool,
+        llm_callable: Callable[[str], str],
+        command_runner: Optional[Callable[[str], Tuple[int, str, str]]],
+        validator_callable: Optional[Callable[[str], Tuple[bool, str]]] = None,
+    ) -> Dict[str, Any]:
+        """Full step-scope recovery: LLM patch → validate → apply → rerun → validator."""
+        from app.services.orchestration.recovery.recovery_patch import (
+            RecoveryPatch,
+            apply_recovery_patch,
+            build_recovery_prompt,
+            parse_recovery_patch,
+            post_apply_test_preservation_check,
+            validate_recovery_patch,
+        )
+
+        # Tracks whether patch was applied to disk (determines rollback_performed in events).
+        _patch_applied = False
+
+        def _emit_failed(
+            stop_reason: str,
+            rerun_exit_code: Optional[int] = None,
+            extra: Optional[dict] = None,
+            rollback_performed: bool = False,
+        ) -> None:
+            try:
+                append_orchestration_event(
+                    project_dir=project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.EXECUTION_RECOVERY_FAILED,
+                    parent_event_id=parent_event_id,
+                    details={
+                        "scope": scope,
+                        "step_index": step_index,
+                        "attempt": new_attempts,
+                        "failure_class": evidence.failure_class,
+                        "stop_reason": stop_reason,
+                        "rerun_exit_code": rerun_exit_code,
+                        "rollback_performed": rollback_performed,
+                        "total_recovery_attempts_used": new_attempts,
+                        "budget_exhausted": budget_exhausted,
+                        "llm_patch_generation_enabled": _LLM_PATCH_GENERATION_ENABLED,
+                        **(extra or {}),
+                    },
+                )
+            except Exception as exc:
+                logger.debug("[RECOVERY] FAILED event emit failed: %s", exc)
+
+        # Step 1: Call LLM.
+        try:
+            prompt = build_recovery_prompt(evidence)
+            raw_text = llm_callable(prompt)
+        except Exception as exc:
+            logger.warning("[RECOVERY] LLM call failed: %s", exc)
+            _emit_failed("llm_call_failed")
+            return {"status": "failed", "reason": "llm_call_failed"}
+
+        # Step 2: Parse response.
+        patch, parse_error = parse_recovery_patch(raw_text)
+        if patch is None:
+            logger.info("[RECOVERY] Patch parse failed: %s", parse_error)
+            _emit_failed("prose_response", extra={"parse_error": parse_error})
+            return {"status": "failed", "reason": "prose_response"}
+
+        # Step 3: Validate patch (scope, safety, test-preservation pre-check).
+        valid, validation_reason = validate_recovery_patch(patch, evidence, project_dir)
+        if not valid:
+            logger.info("[RECOVERY] Patch validation failed: %s", validation_reason)
+            _emit_failed(validation_reason)
+            return {"status": "failed", "reason": validation_reason}
+
+        # Step 4: Check for repeated patch hash.
+        patch_hash = patch.content_hash()
+        prior = _prior_hashes(orchestration_state)
+        if patch_hash in prior:
+            logger.info("[RECOVERY] Repeated patch hash rejected: %s", patch_hash)
+            _emit_failed("repeated_patch")
+            return {"status": "failed", "reason": "repeated_patch"}
+
+        # Store patch hash to prevent future repeats.
+        try:
+            setattr(
+                orchestration_state,
+                "execution_recovery_signature_hashes",
+                prior + [patch_hash],
+            )
+        except Exception:
+            pass
+
+        # Step 5: Emit ATTEMPTED (valid patch about to be applied).
+        try:
+            append_orchestration_event(
+                project_dir=project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.EXECUTION_RECOVERY_ATTEMPTED,
+                parent_event_id=parent_event_id,
+                details={
+                    "scope": scope,
+                    "step_index": step_index,
+                    "attempt": new_attempts,
+                    "failure_class": evidence.failure_class,
+                    "failed_command": evidence.failed_command[:200],
+                    "exit_code": evidence.exit_code,
+                    "evidence_chars": evidence.total_chars,
+                    "changed_files_count": len(evidence.changed_files),
+                    "requested_symbols": evidence.requested_symbols[:10],
+                    "patch_type": patch.patch_type,
+                    "patch_path": patch.path,
+                    "rerun_command": patch.rerun_command[:200],
+                    "llm_patch_generation_enabled": _LLM_PATCH_GENERATION_ENABLED,
+                },
+            )
+        except Exception as exc:
+            logger.debug("[RECOVERY] ATTEMPTED event emit failed: %s", exc)
+
+        # Step 6: Apply the patch.
+        apply_ok, apply_error, rollback = apply_recovery_patch(patch, project_dir)
+        if not apply_ok:
+            logger.info("[RECOVERY] Patch apply failed: %s", apply_error)
+            _emit_failed(
+                "apply_failed",
+                extra={"apply_error": apply_error},
+                rollback_performed=False,
+            )
+            return {"status": "failed", "reason": "apply_failed"}
+
+        # Patch is now on disk — all subsequent failures must call rollback().
+        _patch_applied = True
+
+        # Step 7: Post-apply test preservation check (reads from disk).
+        tp_violation = post_apply_test_preservation_check(patch, project_dir)
+        if tp_violation:
+            rollback()
+            logger.info("[RECOVERY] Test preservation violated after apply")
+            _emit_failed("test_preservation_violated", rollback_performed=True)
+            return {"status": "failed", "reason": "test_preservation_violated"}
+
+        # Step 8: Run rerun command.
+        rerun_exit_code = -1
+        rerun_stdout = ""
+        rerun_stderr = ""
+
+        if command_runner is None:
+            rollback()
+            _emit_failed("command_runner_not_provided", rollback_performed=True)
+            return {"status": "failed", "reason": "command_runner_not_provided"}
+
+        try:
+            rerun_exit_code, rerun_stdout, rerun_stderr = command_runner(
+                patch.rerun_command
+            )
+        except Exception as exc:
+            rollback()
+            logger.warning("[RECOVERY] Rerun command raised: %s", exc)
+            _emit_failed(
+                "rerun_command_raised", rerun_exit_code=-1, rollback_performed=True
+            )
+            return {"status": "failed", "reason": "rerun_command_raised"}
+
+        if rerun_exit_code != 0:
+            rollback()
+            logger.info(
+                "[RECOVERY] Rerun command failed (exit %s): %s",
+                rerun_exit_code,
+                patch.rerun_command,
+            )
+            _emit_failed(
+                "rerun_still_failing",
+                rerun_exit_code=rerun_exit_code,
+                rollback_performed=True,
+            )
+            return {"status": "failed", "reason": "rerun_still_failing"}
+
+        # Step 9: Post-recovery validation gate.
+        # Calls validator_callable(patch.path) when provided; None means skip (S2 compat).
+        _validator_accepted = True
+        _validation_reason = ""
+        if validator_callable is not None:
+            try:
+                _validator_accepted, _validation_reason = validator_callable(patch.path)
+            except Exception as exc:
+                _validator_accepted = False
+                _validation_reason = f"validator_exception:{exc}"
+                logger.warning("[RECOVERY] Validator raised: %s", exc)
+
+            if not _validator_accepted:
+                rollback()
+                logger.info(
+                    "[RECOVERY] Post-recovery validator rejected: %s",
+                    _validation_reason,
+                )
+                _emit_failed(
+                    "validator_rejected",
+                    rerun_exit_code=rerun_exit_code,
+                    rollback_performed=True,
+                    extra={"post_recovery_validation_reason": _validation_reason},
+                )
+                return {"status": "failed", "reason": "validator_rejected"}
+
+        # Step 10: Recovery succeeded.
+        try:
+            append_orchestration_event(
+                project_dir=project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.EXECUTION_RECOVERY_SUCCEEDED,
+                parent_event_id=parent_event_id,
+                details={
+                    "scope": scope,
+                    "step_index": step_index,
+                    "attempt": new_attempts,
+                    "patch_type": patch.patch_type,
+                    "patch_path": patch.path,
+                    "rerun_command": patch.rerun_command[:200],
+                    "rerun_exit_code": rerun_exit_code,
+                    "validator_accepted": _validator_accepted,
+                    "total_recovery_attempts_used": new_attempts,
+                    "llm_patch_generation_enabled": _LLM_PATCH_GENERATION_ENABLED,
+                },
+            )
+        except Exception as exc:
+            logger.debug("[RECOVERY] SUCCEEDED event emit failed: %s", exc)
+
+        logger.info(
+            "[RECOVERY] Step recovery succeeded — attempt %s/%s, patch_type=%s, path=%s",
+            new_attempts,
+            RECOVERY_BUDGET,
+            patch.patch_type,
+            patch.path,
+        )
+        return {
+            "status": "success",
+            "patch_type": patch.patch_type,
+            "patch_path": patch.path,
+            "rerun_stdout": rerun_stdout[:1000],
+            "rerun_exit_code": rerun_exit_code,
+        }

@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1727,9 +1728,44 @@ def execute_step_loop(
             max_attempts = MAX_STEP_ATTEMPTS + 1
 
         if current_attempt >= max_attempts:
-            # Phase 13B-S1: bounded execution recovery — attempt before aborting.
-            # In S1 (LLM patch disabled), recovery always falls through to the ABORT path
-            # below while emitting audit events for eligibility decisions.
+            # Phase 13B-S2.5: bounded execution recovery — attempt before aborting.
+            # Build callables that the recovery service uses for LLM, subprocess, and validation.
+            _recovery_timeout = 90
+
+            def _recovery_llm_callable(_prompt_text: str) -> str:
+                _result = _run_coroutine(
+                    runtime_service.execute_task(
+                        _prompt_text,
+                        timeout_seconds=_recovery_timeout,
+                    )
+                )
+                return extract_structured_text(_result.get("output", ""))
+
+            def _recovery_command_runner(_cmd: str) -> tuple:
+                try:
+                    _proc = subprocess.run(
+                        _cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        cwd=str(orchestration_state.project_dir),
+                        timeout=120,
+                    )
+                    return _proc.returncode, _proc.stdout, _proc.stderr
+                except subprocess.TimeoutExpired:
+                    return -1, "", "Recovery rerun timed out"
+                except Exception as _exc:
+                    return -1, "", f"Recovery rerun error: {_exc}"
+
+            def _recovery_validator_callable(_patch_path: str) -> tuple:
+                from app.services.orchestration.recovery.recovery_patch import (
+                    post_recovery_step_validation,
+                )
+
+                return post_recovery_step_validation(
+                    _patch_path, orchestration_state.project_dir
+                )
+
             _step_recovery_evidence = build_step_recovery_evidence(
                 failure_envelope=failure_envelope,
                 debug_feedback_envelope=debug_feedback_envelope,
@@ -1747,10 +1783,46 @@ def execute_step_loop(
                 scope="step",
                 step_index=step_index + 1,
                 parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                llm_callable=_recovery_llm_callable,
+                command_runner=_recovery_command_runner,
+                validator_callable=_recovery_validator_callable,
             )
             if _step_recovery_result.get("status") == "success":
-                # Phase 13B-S1: unreachable (LLM patch disabled).
-                # Phase 13B-full: reset this step's debug_attempts and retry.
+                # Recovery patched the file, rerun passed, and validator accepted.
+                # Use the same success path as normal step completion.
+                _recovery_changed = list(step_record.files_changed or [])
+                _patch_path = _step_recovery_result.get("patch_path")
+                if _patch_path and _patch_path not in _recovery_changed:
+                    _recovery_changed.append(_patch_path)
+                orchestration_state.record_success(
+                    StepResult(
+                        step_number=step_index + 1,
+                        status="success",
+                        output=_step_recovery_result.get("rerun_stdout", ""),
+                        verification_output=_step_recovery_result.get(
+                            "rerun_stdout", ""
+                        ),
+                        files_changed=_recovery_changed,
+                        error_message="",
+                        attempt=current_attempt,
+                    )
+                )
+                save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
+                db.commit()
+                emit_live(
+                    "INFO",
+                    (
+                        f"[ORCHESTRATION] Step {step_index + 1} recovered successfully"
+                        f" via patch to {_patch_path or 'unknown'}"
+                    ),
+                    metadata={
+                        "phase": "executing",
+                        "step_index": step_index + 1,
+                        "recovered": True,
+                    },
+                )
                 continue
             # Existing ABORT path — unchanged:
             emit_live(

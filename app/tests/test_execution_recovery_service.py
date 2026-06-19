@@ -27,6 +27,8 @@ from app.services.orchestration.recovery.execution_recovery_service import (
     RECOVERY_BUDGET,
     ExecutionRecoveryService,
     _LLM_PATCH_GENERATION_ENABLED,
+    _STEP_SCOPE_RECOVERY_ENABLED,
+    _COMPLETION_SCOPE_RECOVERY_ENABLED,
     _failure_signature_hash,
 )
 from app.services.orchestration.state.persistence import read_orchestration_events
@@ -110,8 +112,11 @@ def test_orchestration_state_recovery_fields_can_be_set():
 # ── LLM gate ─────────────────────────────────────────────────────────────────
 
 
-def test_llm_patch_generation_disabled_in_s1():
-    assert _LLM_PATCH_GENERATION_ENABLED is False
+def test_recovery_scope_flags_s2():
+    # S2: step scope enabled, completion scope disabled.
+    assert _LLM_PATCH_GENERATION_ENABLED is True
+    assert _STEP_SCOPE_RECOVERY_ENABLED is True
+    assert _COMPLETION_SCOPE_RECOVERY_ENABLED is False
 
 
 # ── should_attempt: budget exhausted ─────────────────────────────────────────
@@ -269,7 +274,8 @@ def test_eligible_attempt_emits_attempted_and_failed_events(tmp_path):
     assert len(failed) == 1
     assert attempted[0]["details"]["failure_class"] == "import_error"
     assert failed[0]["details"]["stop_reason"] == "llm_patch_generation_disabled"
-    assert failed[0]["details"]["llm_patch_generation_enabled"] is False
+    # S2: LLM patch generation is enabled globally; noop path still used when llm_callable absent.
+    assert "llm_patch_generation_enabled" in failed[0]["details"]
 
 
 def test_eligible_attempt_stores_signature_hash(tmp_path):
