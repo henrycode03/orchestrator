@@ -191,6 +191,14 @@ def build_completion_recovery_evidence(
     sym_check = dict((details.get("symbol_verification") or {}))
     missing_symbols = list(sym_check.get("missing", []) or [])[:10]
 
+    # Override failure_class when symbol verification specifically identifies missing symbols.
+    if (
+        missing_symbols
+        and sym_check.get("applicable")
+        and not sym_check.get("passed", True)
+    ):
+        failure_class = "missing_requested_symbol"
+
     return ExecutionRecoveryEvidence(
         task_title=str(task_title or "")[:200],
         task_description=_truncate(str(task_prompt or ""), _MAX_DESCRIPTION),

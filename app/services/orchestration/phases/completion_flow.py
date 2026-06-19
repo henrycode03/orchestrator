@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import subprocess
 from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
@@ -1282,9 +1283,9 @@ def finalize_successful_task(
                 "reported_changed_files": reported_changed_files[:20],
             },
         )
-        # Phase 13B-S1: bounded execution recovery — attempt before aborting.
-        # In S1 (LLM patch disabled), recovery always falls through to the ABORT path
-        # below while emitting audit events for eligibility decisions.
+        # Phase 13B-S3: bounded execution recovery before aborting.
+        # Routes to real recovery only when failure_class=="missing_requested_symbol".
+        # All other failures fall through to ABORT unchanged.
         _completion_recovery_evidence = build_completion_recovery_evidence(
             completion_validation=completion_validation,
             debug_feedback_envelope=debug_feedback_envelope,
@@ -1292,6 +1293,65 @@ def finalize_successful_task(
             task_title=getattr(task, "title", "") or "",
             task_prompt=prompt,
         )
+
+        _completion_recovery_timeout = 90
+
+        def _completion_recovery_llm_callable(_prompt_text: str) -> str:
+            try:
+                _result = asyncio.run(
+                    runtime_service.execute_task(
+                        _prompt_text,
+                        timeout_seconds=_completion_recovery_timeout,
+                    )
+                )
+                return extract_structured_text(_result.get("output", ""))
+            except Exception:
+                return ""
+
+        def _completion_recovery_command_runner(_cmd: str) -> tuple:
+            try:
+                _proc = subprocess.run(
+                    _cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(orchestration_state.project_dir),
+                    timeout=120,
+                )
+                return _proc.returncode, _proc.stdout, _proc.stderr
+            except subprocess.TimeoutExpired:
+                return -1, "", "Recovery rerun timed out"
+            except Exception as _exc:
+                return -1, "", f"Recovery rerun error: {_exc}"
+
+        def _completion_recovery_validator_callable(_patch_path: str) -> tuple:
+            try:
+                _verdict = ValidatorService.validate_task_completion(
+                    project_dir=orchestration_state.project_dir,
+                    plan=orchestration_state.plan,
+                    task_prompt=prompt,
+                    execution_profile=execution_profile,
+                    workspace_consistency=workspace_consistency,
+                    title=task.title if task else None,
+                    description=task.description if task else None,
+                    relaxed_mode=orchestration_state.relaxed_mode,
+                    completion_evidence={
+                        "summary_generated": bool(summary_result),
+                        "execution_results_count": len(
+                            orchestration_state.execution_results
+                        ),
+                        "reported_changed_files": reported_changed_files,
+                    },
+                    validation_severity=ctx.validation_severity,
+                    workflow_stage=ctx.workflow_stage,
+                    is_first_ordered_task=bool(task and task.plan_position == 1),
+                )
+                if not _verdict.accepted:
+                    return False, " | ".join(_verdict.reasons[:3])
+                return True, ""
+            except Exception as _exc:
+                return False, f"validator_exception:{_exc}"
+
         _completion_recovery_result = ExecutionRecoveryService.attempt_recovery(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
@@ -1300,51 +1360,83 @@ def finalize_successful_task(
             orchestration_state=orchestration_state,
             scope="completion",
             step_index=None,
+            llm_callable=_completion_recovery_llm_callable,
+            command_runner=_completion_recovery_command_runner,
+            validator_callable=_completion_recovery_validator_callable,
         )
-        # Phase 13B-S1: recovery result is always "skipped" or "failed" here.
-        # Phase 13B-full: if "success", re-validate and fall through to success path.
-        # Existing ABORT path — unchanged:
-        completion_error = "Completion validation failed: " + "; ".join(
-            completion_validation.reasons[:5]
-        )
-        orchestration_state.status = OrchestrationStatus.ABORTED
-        orchestration_state.abort_reason = completion_error
-        task_execution = (
-            db.query(TaskExecution)
-            .filter(TaskExecution.id == ctx.task_execution_id)
-            .first()
-            if ctx.task_execution_id
-            else None
-        )
-        mark_task_attempt_failed(
-            task=task,
-            session_task_link=session_task_link,
-            task_execution=task_execution,
-            error_message=completion_error,
-            completed_at=datetime.now(UTC),
-            workspace_status="blocked",
-        )
-        task.current_step = len(orchestration_state.plan)
-        if session:
-            mark_session_paused(
-                session, alert_level="error", alert_message=completion_error[:2000]
+
+        # S3: if recovery succeeded, re-run the authoritative completion validator.
+        if _completion_recovery_result.get("status") == "success":
+            completion_validation = ValidatorService.validate_task_completion(
+                project_dir=orchestration_state.project_dir,
+                plan=orchestration_state.plan,
+                task_prompt=prompt,
+                execution_profile=execution_profile,
+                workspace_consistency=workspace_consistency,
+                title=task.title if task else None,
+                description=task.description if task else None,
+                relaxed_mode=orchestration_state.relaxed_mode,
+                completion_evidence={
+                    "summary_generated": bool(summary_result),
+                    "execution_results_count": len(
+                        orchestration_state.execution_results
+                    ),
+                    "reported_changed_files": reported_changed_files,
+                },
+                validation_severity=ctx.validation_severity,
+                workflow_stage=ctx.workflow_stage,
+                is_first_ordered_task=bool(task and task.plan_position == 1),
             )
-        db.commit()
-        emit_live(
-            "ERROR",
-            "[ORCHESTRATION] Task completion failed validation",
-            metadata={
-                "phase": "task_validation",
-                "validation_status": completion_validation.status,
-                "profile": completion_validation.profile,
-                "reasons": completion_validation.reasons[:10],
-            },
-        )
-        save_orchestration_checkpoint_fn(
-            db, session_id, task_id, prompt, orchestration_state
-        )
-        write_project_state_snapshot_fn(db, project, task, session_id)
-        return {"status": "failed", "reason": "completion_validation_failed"}
+            record_validation_verdict(
+                db, session_id, task_id, orchestration_state, completion_validation
+            )
+            db.commit()
+
+        # ABORT path — fires when original validation failed and recovery did not succeed,
+        # OR when recovery succeeded but re-validation still rejected.
+        if not completion_validation.accepted:
+            completion_error = "Completion validation failed: " + "; ".join(
+                completion_validation.reasons[:5]
+            )
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = completion_error
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == ctx.task_execution_id)
+                .first()
+                if ctx.task_execution_id
+                else None
+            )
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=completion_error,
+                completed_at=datetime.now(UTC),
+                workspace_status="blocked",
+            )
+            task.current_step = len(orchestration_state.plan)
+            if session:
+                mark_session_paused(
+                    session, alert_level="error", alert_message=completion_error[:2000]
+                )
+            db.commit()
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Task completion failed validation",
+                metadata={
+                    "phase": "task_validation",
+                    "validation_status": completion_validation.status,
+                    "profile": completion_validation.profile,
+                    "reasons": completion_validation.reasons[:10],
+                },
+            )
+            save_orchestration_checkpoint_fn(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {"status": "failed", "reason": "completion_validation_failed"}
+        # else: recovery succeeded and re-validation accepted — fall through to success path.
 
     completion_verification_command, completion_verification_source = (
         _detect_completion_verification_command(orchestration_state.project_dir)

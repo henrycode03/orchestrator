@@ -304,6 +304,13 @@ def validate_recovery_patch(
             if codes & {"skip_added", "test_weakened_or_removed"}:
                 return False, "test_preservation_violated"
 
+    # 6. Symbol rename guard: requested symbols must not be renamed away.
+    # If a requested symbol appears in old text but not in new text, that's a rename.
+    if evidence.requested_symbols:
+        for sym in evidence.requested_symbols[:5]:
+            if patch.old and sym in patch.old and sym not in patch.new:
+                return False, "symbol_rename_detected"
+
     return True, ""
 
 

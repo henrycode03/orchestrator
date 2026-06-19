@@ -1,14 +1,13 @@
-"""Phase 13B-S2: Bounded execution recovery service.
+"""Phase 13B-S3: Bounded execution recovery service.
 
-Step-scope patch generation is ENABLED. Completion-scope is still disabled.
+Step-scope patch generation is ENABLED. Completion-scope recovery is ENABLED
+for failure_class == "missing_requested_symbol" only.
 
 Phase 13B-S1 behaviour is preserved when llm_callable is not provided (noop path).
 Phase 13B-S2 behaviour: when scope=="step" and llm_callable is provided, a real
 recovery patch is generated, validated, applied, and the rerun_command is executed.
-
-When Phase 13B-S3 enables completion-scope recovery, set
-_COMPLETION_SCOPE_RECOVERY_ENABLED to True and wire the llm_callable in
-completion_flow.py.
+Phase 13B-S3 behaviour: scope=="completion" is also routed to _step_recovery when
+failure_class is "missing_requested_symbol" and llm_callable is provided.
 """
 
 from __future__ import annotations
@@ -46,8 +45,13 @@ ELIGIBLE_RECOVERY_FAILURE_CLASSES: frozenset = frozenset(
 # Phase 13B-S2: step-scope patch generation is enabled.
 _LLM_PATCH_GENERATION_ENABLED: bool = True
 _STEP_SCOPE_RECOVERY_ENABLED: bool = True
-# Phase 13B-S3: set to True when completion-scope recovery is implemented.
+# Phase 13B-S3: generic completion-scope recovery remains disabled.
+# Narrow completion recovery is enabled only for missing_requested_symbol.
 _COMPLETION_SCOPE_RECOVERY_ENABLED: bool = False
+_COMPLETION_MISSING_SYMBOL_RECOVERY_ENABLED: bool = True
+_COMPLETION_SCOPE_RECOVERY_ELIGIBLE_CLASSES: frozenset = frozenset(
+    {"missing_requested_symbol"}
+)
 
 
 def _failure_signature_hash(evidence: ExecutionRecoveryEvidence) -> str:
@@ -73,10 +77,11 @@ def _prior_hashes(orchestration_state: Any) -> list:
 
 
 class ExecutionRecoveryService:
-    """Bounded execution recovery — Phase 13B-S2.
+    """Bounded execution recovery — Phase 13B-S3.
 
     Step-scope: full patch-and-rerun pipeline.
-    Completion-scope: noop (disabled until Phase 13B-S3).
+    Completion-scope: patch-and-rerun ONLY for missing_requested_symbol.
+    Generic completion-scope recovery remains disabled.
     """
 
     @staticmethod
@@ -135,7 +140,12 @@ class ExecutionRecoveryService:
         validator_callable(patch_path) -> (accepted: bool, reason: str).
         When None, validation is skipped (S2 backward-compat for tests without validator).
 
-        Phase 13B-S1/noop behaviour (scope=="completion" OR llm_callable is None):
+        Phase 13B-S3 completion-scope behaviour (scope=="completion"):
+          - Routes to _step_recovery ONLY when failure_class=="missing_requested_symbol"
+            AND _COMPLETION_MISSING_SYMBOL_RECOVERY_ENABLED AND llm_callable is provided.
+          - All other completion failures remain noop (scope_disabled).
+
+        Phase 13B-S1/noop behaviour (scope=="completion" ineligible OR llm_callable is None):
           - Emits RECOVERY_ATTEMPTED + RECOVERY_FAILED(llm_disabled or scope_disabled).
           - Never returns status="success".
 
@@ -188,17 +198,17 @@ class ExecutionRecoveryService:
 
         budget_exhausted_after = new_attempts >= RECOVERY_BUDGET
 
-        # --- Completion scope: always noop in S2. ---
-        if scope == "completion" or not _COMPLETION_SCOPE_RECOVERY_ENABLED:
-            if scope == "completion":
+        # --- Scope routing ---
+        if scope == "completion":
+            # S3: allow recovery only for missing_requested_symbol when enabled.
+            _completion_eligible = (
+                _COMPLETION_MISSING_SYMBOL_RECOVERY_ENABLED
+                and evidence.failure_class
+                in _COMPLETION_SCOPE_RECOVERY_ELIGIBLE_CLASSES
+                and llm_callable is not None
+            )
+            if not _completion_eligible:
                 stop_reason = "completion_scope_disabled"
-            elif llm_callable is None:
-                # Keep S1-compatible stop_reason so existing tests pass.
-                stop_reason = "llm_patch_generation_disabled"
-            else:
-                stop_reason = "completion_scope_disabled"
-
-            if scope != "step" or llm_callable is None:
                 return ExecutionRecoveryService._noop_attempt(
                     project_dir=project_dir,
                     session_id=session_id,
@@ -211,8 +221,24 @@ class ExecutionRecoveryService:
                     budget_exhausted=budget_exhausted_after,
                     stop_reason=stop_reason,
                 )
+            # Fall through to _step_recovery for eligible completion-scope recovery.
+        elif llm_callable is None:
+            # Keep S1-compatible stop_reason so existing tests pass.
+            stop_reason = "llm_patch_generation_disabled"
+            return ExecutionRecoveryService._noop_attempt(
+                project_dir=project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                evidence=evidence,
+                scope=scope,
+                step_index=step_index,
+                parent_event_id=parent_event_id,
+                new_attempts=new_attempts,
+                budget_exhausted=budget_exhausted_after,
+                stop_reason=stop_reason,
+            )
 
-        # --- Step scope with LLM callable: real recovery. ---
+        # --- Step scope OR eligible completion scope: real recovery. ---
         return ExecutionRecoveryService._step_recovery(
             project_dir=project_dir,
             session_id=session_id,
