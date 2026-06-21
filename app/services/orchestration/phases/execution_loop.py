@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import re
@@ -214,6 +215,83 @@ def _bounded_debug_repair_source_edit_context(
         str(path or "").replace("\\", "/").lstrip("./").startswith("src/")
         for path in changed_files
     )
+
+
+def _bounded_debug_repair_prior_source_paths(
+    orchestration_state: Any,
+    failed_step_index: int,
+) -> list[str]:
+    """Return ordered source paths written before the failed execution step."""
+
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add_path(path: Any) -> None:
+        normalized = str(path or "").replace("\\", "/").lstrip("./")
+        if (
+            normalized.startswith("src/")
+            and normalized.endswith(".py")
+            and normalized not in seen
+        ):
+            seen.add(normalized)
+            paths.append(normalized)
+
+    for result in getattr(orchestration_state, "execution_results", []) or []:
+        step_number = getattr(result, "step_number", 0) or 0
+        if step_number <= failed_step_index:
+            for path in getattr(result, "files_changed", []) or []:
+                add_path(path)
+
+    for prior_step in (getattr(orchestration_state, "plan", []) or [])[
+        :failed_step_index
+    ]:
+        if not isinstance(prior_step, dict):
+            continue
+        for operation in prior_step.get("ops") or []:
+            if isinstance(operation, dict) and operation.get("op") in {
+                "write_file",
+                "append_file",
+                "replace_in_file",
+            }:
+                add_path(operation.get("path"))
+    return paths
+
+
+def _bounded_debug_repair_prompt_manifest(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Select non-sensitive changed-file context fields for prompt observability."""
+
+    return {
+        "bounded_execution_debug_repair_changed_file_context_present": bool(
+            metadata.get("bounded_execution_debug_repair_changed_file_context_present")
+        ),
+        "bounded_execution_debug_repair_changed_file_context_paths": list(
+            metadata.get("bounded_execution_debug_repair_changed_file_context_paths")
+            or []
+        ),
+        "bounded_execution_debug_repair_changed_file_context_chars": int(
+            metadata.get("bounded_execution_debug_repair_changed_file_context_chars")
+            or 0
+        ),
+    }
+
+
+def _bounded_debug_repair_output_observability(
+    repair_output: str,
+    debug_data: dict[str, Any],
+) -> dict[str, Any]:
+    paths: list[str] = []
+    for operation in debug_data.get("ops") or []:
+        if not isinstance(operation, dict):
+            continue
+        path = _safe_relative_op_path(operation.get("path"))
+        if path and path not in paths:
+            paths.append(path)
+    return {
+        "repair_output_sha256": hashlib.sha256(
+            str(repair_output or "").encode("utf-8")
+        ).hexdigest(),
+        "repair_output_changed_paths": paths,
+    }
 
 
 def _is_low_value_weak_verifier_command_fix(
@@ -2041,6 +2119,10 @@ def execute_step_loop(
                     debug_feedback_envelope,
                     _evidence_capsule,
                     source_edit_context=source_edit_context_for_prompt,
+                    prior_source_paths=_bounded_debug_repair_prior_source_paths(
+                        orchestration_state,
+                        step_index,
+                    ),
                 )
                 debug_prompt = debug_prompt_result.prompt
                 debug_source_api_contract_metadata = dict(
@@ -2131,6 +2213,9 @@ def execute_step_loop(
                         diff_capsule.diff_line_count if diff_capsule else 0
                     ),
                     "diff_repair_fallback_reason": diff_repair_fallback_reason,
+                    "prompt_manifest": _bounded_debug_repair_prompt_manifest(
+                        debug_source_api_contract_metadata
+                    ),
                     **debug_source_api_contract_metadata,
                 },
             )
@@ -2160,6 +2245,9 @@ def execute_step_loop(
                     ),
                     "evidence_chars_total": (
                         _evidence_capsule.total_chars if _evidence_capsule else 0
+                    ),
+                    "prompt_manifest": _bounded_debug_repair_prompt_manifest(
+                        debug_source_api_contract_metadata
                     ),
                     **debug_source_api_contract_metadata,
                 },
@@ -2385,6 +2473,9 @@ def execute_step_loop(
                             "debug_repair_rejection_reason": debug_repair_rejection_reason,
                             "debug_repair_parsed_shape": debug_repair_parsed_shape,
                             "debug_repair_raw_output_excerpt": debug_repair_raw_output_excerpt,
+                            "repair_output_sha256": hashlib.sha256(
+                                str(final_repair_output or "").encode("utf-8")
+                            ).hexdigest(),
                             **_bounded_debug_repair_rejection_alias_details(
                                 rejection_reason=debug_repair_rejection_reason,
                                 parsed_shape=debug_repair_parsed_shape,
@@ -2670,6 +2761,27 @@ def execute_step_loop(
                 orchestration_state.debug_repair_task_execution_ids = sorted(
                     {*debug_repair_used_ids, int(task_execution_id)}
                 )
+
+            if bounded_debug_repair_allowed and debug_data is not None:
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.REPAIR_GENERATED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                        details={
+                            "phase": "execution",
+                            "task_execution_id": ctx.task_execution_id,
+                            "step_index": step_index + 1,
+                            **_bounded_debug_repair_output_observability(
+                                final_repair_output,
+                                debug_data,
+                            ),
+                        },
+                    )
+                except Exception:
+                    pass
 
             max_plan_revisions = ctx.policy_profile.max_plan_revisions
             if fix_type == "revise_plan" and plan_revision_count >= max_plan_revisions:

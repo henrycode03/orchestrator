@@ -43,6 +43,9 @@ _DEBUG_SOURCE_CONTRACT_MAX_CHARS = 1100
 _SOURCE_STEP_EXCERPT_MAX_FILES = 4
 _SOURCE_STEP_EXCERPT_PER_FILE_CHARS = 900
 _SOURCE_STEP_EXCERPT_TOTAL_CHARS = 2600
+_BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES = 3
+_BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_PER_FILE_CHARS = 1200
+_BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS = 3000
 
 _CANNOT_IMPORT_FROM_FILE_RE = re.compile(
     r"cannot import name '([A-Za-z_][A-Za-z0-9_]*)' from '([A-Za-z_][A-Za-z0-9_.]*)'"
@@ -355,6 +358,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
     *,
     source_edit_context: bool = False,
     candidate_repair: Optional[Any] = None,
+    prior_source_paths: Optional[Iterable[str]] = None,
 ) -> DebugRepairPromptBuildResult:
     """Render the bounded debug repair prompt with source/API metadata."""
 
@@ -383,9 +387,18 @@ def build_bounded_debug_repair_prompt_with_metadata(
             candidate_repair=candidate_repair,
         )
     )
+    changed_file_context, changed_file_context_metadata = (
+        build_bounded_debug_repair_changed_file_context(
+            envelope,
+            prior_source_paths=prior_source_paths,
+        )
+    )
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
     source_api_contract_section = (
         f"\n{source_api_contract}\n" if source_api_contract else ""
+    )
+    changed_file_context_section = (
+        f"\n{changed_file_context}\n" if changed_file_context else ""
     )
     source_ops_contract_section = ""
     if source_contract:
@@ -460,12 +473,131 @@ def build_bounded_debug_repair_prompt_with_metadata(
         f"{source_contract_section}"
         f"{source_ops_contract_section}"
         f"{source_api_contract_section}"
+        f"{changed_file_context_section}"
         f"{rules_section}"
     )
     return DebugRepairPromptBuildResult(
         prompt=prompt,
-        metadata=source_api_metadata,
+        metadata={**source_api_metadata, **changed_file_context_metadata},
     )
+
+
+def build_bounded_debug_repair_changed_file_context(
+    envelope: DebugFeedbackEnvelope,
+    *,
+    prior_source_paths: Optional[Iterable[str]] = None,
+) -> tuple[str, dict[str, Any]]:
+    """Render bounded current source content for a Phase 7F repair prompt.
+
+    Earlier source writes are supplied by the execution loop because a failing
+    verification step normally reports no writes of its own. Traceback paths are
+    appended after those prior paths so the prompt retains execution order.
+    """
+
+    metadata: dict[str, Any] = {
+        "bounded_execution_debug_repair_changed_file_context_present": False,
+        "bounded_execution_debug_repair_changed_file_context_paths": [],
+        "bounded_execution_debug_repair_changed_file_context_chars": 0,
+    }
+    project_dir = Path(envelope.workspace_path or ".")
+    if not project_dir.is_dir():
+        return "", metadata
+
+    ordered_paths: list[str] = []
+    seen: set[str] = set()
+
+    def add_path(raw_path: Any) -> None:
+        normalized = _normalize_bounded_debug_repair_source_path(raw_path, project_dir)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            ordered_paths.append(normalized)
+
+    for path in prior_source_paths or ():
+        add_path(path)
+    for path in envelope.changed_files:
+        add_path(path)
+    for path in _traceback_python_paths(envelope):
+        add_path(path)
+
+    lines = [
+        "## CURRENT CONTENT OF IMPLICATED SOURCE FILES",
+        "Treat these files as the current source truth. Preserve existing APIs unless the failure requires a change.",
+    ]
+    included_paths: list[str] = []
+    for relative_path in ordered_paths:
+        if len(included_paths) >= _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES:
+            break
+        path = project_dir / relative_path
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(project_dir.resolve())
+            if not resolved.is_file():
+                continue
+            content = resolved.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+        section_header = f"--- {relative_path}"
+        current_length = len("\n".join(lines))
+        remaining = (
+            _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS - current_length
+        )
+        content_limit = min(
+            _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_PER_FILE_CHARS,
+            remaining - len(section_header) - 2,
+        )
+        if content_limit < 4:
+            break
+        lines.extend((section_header, _excerpt(content, content_limit)))
+        included_paths.append(relative_path)
+
+    if not included_paths:
+        return "", metadata
+    rendered = _excerpt(
+        "\n".join(lines),
+        _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS,
+    )
+    metadata.update(
+        {
+            "bounded_execution_debug_repair_changed_file_context_present": True,
+            "bounded_execution_debug_repair_changed_file_context_paths": included_paths,
+            "bounded_execution_debug_repair_changed_file_context_chars": len(rendered),
+        }
+    )
+    return rendered, metadata
+
+
+def _normalize_bounded_debug_repair_source_path(
+    raw_path: Any, project_dir: Path
+) -> str:
+    """Return a safe ``src/`` Python path; tests are intentionally excluded."""
+
+    candidate = Path(str(raw_path or "").strip().replace("\\", "/"))
+    if not candidate.name or candidate.suffix != ".py":
+        return ""
+    try:
+        resolved = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (project_dir / candidate).resolve()
+        )
+        relative = resolved.relative_to(project_dir.resolve()).as_posix()
+    except (OSError, ValueError):
+        return ""
+    if not relative.startswith("src/"):
+        return ""
+    return relative
+
+
+def _traceback_python_paths(envelope: DebugFeedbackEnvelope) -> list[str]:
+    text = "\n".join(
+        (
+            str(envelope.stdout_excerpt or ""),
+            str(envelope.stderr_excerpt or ""),
+            str(envelope.pytest_excerpt or ""),
+        )
+    )
+    return re.findall(r"(?:[A-Za-z]:)?[^\s:'\"]+\.py", text)
 
 
 def build_debug_source_api_contract_context_block(
