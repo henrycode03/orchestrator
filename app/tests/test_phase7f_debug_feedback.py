@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ast
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ from app.services.orchestration.reporting.decision_timeline import (
     get_session_decision_timeline_payload,
 )
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.phases import execution_loop as execution_loop_module
 from app.services.orchestration.phases.execution_loop import (
     _bounded_debug_repair_source_edit_context,
     _bounded_debug_repair_stale_replace_issues,
@@ -1402,6 +1404,116 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         "python3 -c \"print('fixed')\""
     ]
     assert ctx.orchestration_state.current_step_index == 1
+
+
+def _effective_format_summary_signatures(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        [arg.arg for arg in node.args.args]
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "format_summary"
+    ]
+
+
+def _run_signature_guard_wiring_case(db_session, tmp_path, monkeypatch, candidate):
+    events = []
+    monkeypatch.setattr(
+        execution_loop_module,
+        "append_orchestration_event",
+        lambda **kwargs: events.append(kwargs) or {"event_id": f"event-{len(events)}"},
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_formatting.py",
+                "error": "AssertionError",
+                "returncode": 1,
+                "files_changed": ["src/pkg/formatting.py"],
+            },
+            {"output": json.dumps([candidate])},
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/pkg/formatting.py"],
+        step_overrides={"commands": ["custom-test-command"], "ops": []},
+    )
+    source = ctx.orchestration_state.project_dir / "src" / "pkg" / "formatting.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "def format_summary(total: int, completed: int) -> str:\n    return f'{total} tasks, {completed} complete'\n",
+        encoding="utf-8",
+    )
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+    rejected = [e for e in events if e["event_type"] == EventType.REPAIR_REJECTED]
+    return result, rejected, source, ctx
+
+
+def test_bounded_execution_debug_repair_rejects_signature_change_before_apply(
+    db_session, tmp_path, monkeypatch
+):
+    candidate = {
+        "repair_type": "ops_fix",
+        "ops": [
+            {
+                "op": "write_file",
+                "path": "src/pkg/formatting.py",
+                "content": "def format_summary(store):\n    return str(store)\n",
+            }
+        ],
+        "verification_command": "python3 -m py_compile src/pkg/formatting.py",
+    }
+    result, rejected, source, ctx = _run_signature_guard_wiring_case(
+        db_session, tmp_path, monkeypatch, candidate
+    )
+    assert (
+        result["reason"]
+        == "bounded_execution_debug_repair_signature_contract_violation"
+    )
+    details = rejected[-1]["details"]
+    violation = details["bounded_execution_debug_repair_signature_violations"][0]
+    assert violation["violation_type"] == "signature_changed"
+    assert violation["path"] == "src/pkg/formatting.py"
+    assert violation["qualified_name"] == "format_summary"
+    assert _effective_format_summary_signatures(source) == [["total", "completed"]]
+    assert ctx.orchestration_state.plan[0].get("ops") == []
+
+
+def test_bounded_execution_debug_repair_rejects_duplicate_signature_before_apply(
+    db_session, tmp_path, monkeypatch
+):
+    content = "def format_summary(total: int, completed: int) -> str:\n    return ''\n\ndef format_summary(store):\n    return str(store)\n"
+    candidate = {
+        "repair_type": "ops_fix",
+        "ops": [
+            {"op": "write_file", "path": "src/pkg/formatting.py", "content": content}
+        ],
+        "verification_command": "python3 -m py_compile src/pkg/formatting.py",
+    }
+    result, rejected, source, _ctx = _run_signature_guard_wiring_case(
+        db_session, tmp_path, monkeypatch, candidate
+    )
+    assert (
+        result["reason"]
+        == "bounded_execution_debug_repair_signature_contract_violation"
+    )
+    violation = rejected[-1]["details"][
+        "bounded_execution_debug_repair_signature_violations"
+    ][0]
+    assert violation["violation_type"] == "duplicate_definition"
+    assert violation["qualified_name"] == "format_summary"
+    assert _effective_format_summary_signatures(source) == [["total", "completed"]]
 
 
 def test_weak_verifier_command_fix_is_low_value_marker_repair():
