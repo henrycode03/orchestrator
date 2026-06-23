@@ -67,7 +67,7 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_running": 1,
     },
     "app/services/orchestration/phases/completion_flow.py": {
-        "mark_session_paused": 8,
+        "mark_session_paused": 9,
     },
     "app/services/orchestration/phases/failure_flow.py": {
         "mark_session_paused": 3,
@@ -117,7 +117,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_pending": 2,
     },
     "app/services/orchestration/phases/completion_flow.py": {
-        "mark_task_attempt_failed": 7,
+        "mark_task_attempt_failed": 8,
     },
     "app/services/orchestration/phases/failure_flow.py": {
         "mark_task_attempt_failed": 4,

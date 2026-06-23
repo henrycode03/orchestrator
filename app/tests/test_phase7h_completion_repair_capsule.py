@@ -167,13 +167,9 @@ def test_bounded_completion_repair_prompt_excludes_broad_context(tmp_path):
     assert "step=1 verdict=success" not in prompt
     assert "src/main.py" in prompt
     assert "tests/test_format.py" in prompt
-    assert "Commands execute from the workspace root" in prompt
-    assert (
-        "Do not cd into the workspace root or any path containing vault/projects"
-        in prompt
-    )
-    assert "`commands` must be a closed JSON array" in prompt
-    assert "never place it inside `commands`" in prompt
+    assert '"path" (relative to workspace root)' in prompt
+    assert 'Do not use a "commands" key. Use ops only.' in prompt
+    assert 'Use relative paths only; no absolute paths, "..", or "~".' in prompt
     assert len(prompt) < 4000
 
 
@@ -284,7 +280,10 @@ def test_completion_repair_compliance_retry_recovers_valid_json(db_session, tmp_
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {"status": "failed", "reason": "repair_step_missing_commands"}
+    assert result == {
+        "status": "failed",
+        "reason": "repair_step_missing_commands_or_ops",
+    }
     assert len(runtime.prompts) == 2
     assert runtime.prompts[1].startswith("Your previous response was not valid JSON.")
     assert "Relevant existing files:" not in runtime.prompts[1]
