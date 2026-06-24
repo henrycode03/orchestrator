@@ -100,9 +100,9 @@ def test_read_bounded_respects_total_cap(tmp_path):
 
 
 def test_read_bounded_skips_files_beyond_total_cap(tmp_path):
-    # Four files of 500 chars each fill the 2000-char total cap exactly.
+    # Four files of (MAX_SOURCE_CONTENT_TOTAL_CHARS // 4) chars each fill the total cap exactly.
     # A fifth file written after should be skipped.
-    chunk = "y" * 500
+    chunk = "y" * (MAX_SOURCE_CONTENT_TOTAL_CHARS // 4)
     for i in range(4):
         _write(tmp_path / f"src/f{i}.py", chunk)
     _write(tmp_path / "src/extra.py", "z = 1\n")

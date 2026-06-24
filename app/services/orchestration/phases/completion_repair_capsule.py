@@ -13,8 +13,8 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 MAX_RELEVANT_FILES = 25
 MAX_LAST_STEP_CHARS = 400
 MAX_TASK_PROMPT_EXCERPT_CHARS = 800
-MAX_SOURCE_CONTENT_PER_FILE_CHARS = 800
-MAX_SOURCE_CONTENT_TOTAL_CHARS = 2000
+MAX_SOURCE_CONTENT_PER_FILE_CHARS = 2000
+MAX_SOURCE_CONTENT_TOTAL_CHARS = 5000
 _SOURCE_TRUNCATED_MARKER = "... [truncated]"
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./:-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9_.-]+)(?![\w./:-])"
