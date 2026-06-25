@@ -8,7 +8,7 @@ from pydantic import (
     computed_field,
     field_validator,
 )
-from typing import Optional, Any, List
+from typing import Optional, Any, Dict, List
 from datetime import datetime
 from enum import Enum
 
@@ -276,6 +276,7 @@ class SessionResponse(SessionBase):
     model_lane_label: Optional[str] = None
     model_lane_metadata: Optional[dict[str, Any]] = None
     failure_category: Optional[str] = None
+    orchestration_state: Optional[Dict[str, Any]] = None
 
 
 # Log Entry Schemas

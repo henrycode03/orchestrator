@@ -100,6 +100,7 @@ from app.services.workspace.system_settings import get_effective_mobile_gateway_
 from app.services.task_service import TaskService
 from app.services.session.session_inspection_service import (
     delete_session_checkpoint_payload,
+    derive_orchestration_state_block,
     list_session_checkpoints_payload,
     load_session_checkpoint_payload,
     refresh_session_dispatch_watchdog_alert,
@@ -705,6 +706,7 @@ def get_session_summary(
             }
             for log in reversed(recent_logs)
         ],
+        "orchestration_state": derive_orchestration_state_block(db, session),
     }
 
 

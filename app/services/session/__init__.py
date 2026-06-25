@@ -32,6 +32,7 @@ from .session_execution_service import (
     track_tool_execution_payload,
 )
 from .session_inspection_service import (
+    derive_orchestration_state_block,
     check_session_overwrites_payload,
     cleanup_orphaned_checkpoints_payload,
     cleanup_session_checkpoints_payload,
@@ -138,6 +139,7 @@ __all__ = [
     "start_openclaw_session_payload",
     "start_session_payload",
     "track_tool_execution_payload",
+    "derive_orchestration_state_block",
     "check_session_overwrites_payload",
     "cleanup_orphaned_checkpoints_payload",
     "cleanup_session_checkpoints_payload",

@@ -95,6 +95,9 @@ from app.services import (
     track_tool_execution_payload as _track_tool_execution_payload,
     execute_task_payload as _execute_task_payload,
 )
+from app.services.session.session_inspection_service import (
+    derive_orchestration_state_block as _derive_orchestration_state_block,
+)
 from app.services.name_formatter import humanize_display_name
 from app.services.auth_rate_limit import enforce_api_rate_limit
 from app.services.orchestration.reporting.decision_timeline import (
@@ -405,6 +408,9 @@ def get_session(
     response.log_count = log_count
     response.task_count = len(session_tasks)
     response.failure_category = failure_category
+    response.orchestration_state = _derive_orchestration_state_block(
+        db, session, latest_task_execution=latest_execution
+    )
 
     return response
 
