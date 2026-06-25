@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,6 +21,7 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.log_stream_service import LogStreamService
+from app.services.session.orchestration_event_bus import orchestration_event_bus
 from app.services.streaming_health import (
     record_stream_error,
     register_stream_connection,
@@ -89,6 +91,90 @@ def _prepare_initial_orchestration_events(
     if replay_limit > 0 and len(events) > replay_limit:
         events = events[-replay_limit:]
     return events, cursors
+
+
+_DEDUP_MAXSIZE = 1024
+_SSE_HEARTBEAT_INTERVAL = 30.0
+_SSE_HEARTBEAT = b": heartbeat\n\n"
+
+
+def _format_sse_frame(event: dict) -> bytes:
+    data = json.dumps({"type": "orchestration_event", **event})
+    return f"event: orchestration_event\ndata: {data}\n\n".encode()
+
+
+def _should_send_event(
+    event: dict,
+    seen_event_ids: OrderedDict,
+    *,
+    maxsize: int = _DEDUP_MAXSIZE,
+) -> bool:
+    """Return True if *event* should be sent, False if already delivered.
+
+    Events without an ``event_id`` field always pass through.
+    Maintains a bounded LRU set; oldest entries are evicted at capacity.
+    """
+    event_id = event.get("event_id")
+    if not event_id:
+        return True
+    if event_id in seen_event_ids:
+        return False
+    seen_event_ids[event_id] = None
+    if len(seen_event_ids) > maxsize:
+        seen_event_ids.popitem(last=False)
+    return True
+
+
+async def mobile_sse_event_generator(
+    session_id: int,
+    workspace_path: Optional[str],
+):
+    """Async generator that yields SSE-formatted bytes for a session.
+
+    Yields catch-up events from JSONL first, then streams from the in-process
+    event bus with JSONL polling as fallback.  Deduplicates by event_id.
+    Sends a heartbeat comment every _SSE_HEARTBEAT_INTERVAL seconds.
+    Unsubscribes from the bus in its finally block (safe for client disconnect).
+    """
+    seen_event_ids: OrderedDict = OrderedDict()
+
+    initial_events, task_event_cursors = _prepare_initial_orchestration_events(
+        workspace_path, session_id
+    )
+    for event in initial_events:
+        if _should_send_event(event, seen_event_ids):
+            yield _format_sse_frame(event)
+
+    bus_queue = orchestration_event_bus.subscribe(session_id)
+    loop = asyncio.get_running_loop()
+    last_heartbeat = loop.time()
+
+    try:
+        while True:
+            while True:
+                try:
+                    bus_event = bus_queue.get_nowait()
+                    if _should_send_event(bus_event, seen_event_ids):
+                        yield _format_sse_frame(bus_event)
+                except asyncio.QueueEmpty:
+                    break
+
+            if workspace_path:
+                new_events, task_event_cursors = _poll_new_orchestration_events(
+                    workspace_path, session_id, task_event_cursors
+                )
+                for event in new_events:
+                    if _should_send_event(event, seen_event_ids):
+                        yield _format_sse_frame(event)
+
+            now = loop.time()
+            if now - last_heartbeat >= _SSE_HEARTBEAT_INTERVAL:
+                yield _SSE_HEARTBEAT
+                last_heartbeat = now
+
+            await asyncio.sleep(1.0)
+    finally:
+        orchestration_event_bus.unsubscribe(session_id, bus_queue)
 
 
 active_websockets: dict = {}
@@ -255,11 +341,16 @@ async def stream_session_logs(
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
 
+    _seen_event_ids: OrderedDict = OrderedDict()
+
     initial_orch_events, _task_event_cursors = _prepare_initial_orchestration_events(
         _workspace_path, session_id
     )
     for orch_event in initial_orch_events:
-        await websocket.send_json({"type": "orchestration_event", **orch_event})
+        if _should_send_event(orch_event, _seen_event_ids):
+            await websocket.send_json({"type": "orchestration_event", **orch_event})
+
+    _bus_queue = orchestration_event_bus.subscribe(session_id)
 
     logger.info("Sent %s initial logs, starting main loop...", len(recent_logs))
 
@@ -334,7 +425,19 @@ async def stream_session_logs(
                             }
                         )
 
-                    # Emit new orchestration events from the JSONL journal.
+                    # Drain bus queue first (push path: sub-second delivery).
+                    while True:
+                        try:
+                            bus_event = _bus_queue.get_nowait()
+                            if _should_send_event(bus_event, _seen_event_ids):
+                                await websocket.send_json(
+                                    {"type": "orchestration_event", **bus_event}
+                                )
+                        except asyncio.QueueEmpty:
+                            break
+
+                    # Emit new orchestration events from the JSONL journal (fallback
+                    # for events emitted by out-of-process Celery workers).
                     if _workspace_path:
                         new_orch_events, _task_event_cursors = (
                             _poll_new_orchestration_events(
@@ -342,9 +445,10 @@ async def stream_session_logs(
                             )
                         )
                         for orch_event in new_orch_events:
-                            await websocket.send_json(
-                                {"type": "orchestration_event", **orch_event}
-                            )
+                            if _should_send_event(orch_event, _seen_event_ids):
+                                await websocket.send_json(
+                                    {"type": "orchestration_event", **orch_event}
+                                )
 
                     # Detect terminal state after draining all pending logs
                     if (
@@ -399,6 +503,7 @@ async def stream_session_logs(
         record_stream_error("session_logs", exc)
         logger.error("WebSocket error for session %s: %s", session_id, str(exc))
     finally:
+        orchestration_event_bus.unsubscribe(session_id, _bus_queue)
         heartbeat_task.cancel()
         _remove_active_websocket(session_id, websocket)
         unregister_stream_connection("session_logs")

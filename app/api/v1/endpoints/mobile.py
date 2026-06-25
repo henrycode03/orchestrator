@@ -88,9 +88,12 @@ class MobileChangeSetRejectBody(BaseModel):
     note: Optional[str] = None
 
 
+from fastapi.responses import StreamingResponse
+
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.session.session_stream_service import mobile_sse_event_generator
 from app.services.streaming_health import (
     record_stream_error,
     register_stream_connection,
@@ -391,6 +394,7 @@ def get_mobile_connection_info(
             f"{mobile_base_url}/sessions/{{session_id}}/resume",
             f"{mobile_base_url}/sessions/{{session_id}}/stop",
             f"{mobile_base_url}/sessions/{{session_id}}/pause",
+            f"{mobile_base_url}/sessions/{{session_id}}/events/stream",
             f"{mobile_base_url}/tasks/{{task_id}}/retry",
         ],
     }
@@ -1284,6 +1288,61 @@ async def mobile_log_stream(
             await websocket.close()
         except Exception:
             pass
+
+
+@router.get("/mobile/sessions/{session_id}/events/stream")
+async def mobile_session_sse_stream(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Stream orchestration events for a session as Server-Sent Events (Phase 14F-5).
+
+    Auth: router-level require_mobile_gateway_key (X-OpenClaw-API-Key or Bearer).
+    Each orchestration_event frame uses the same payload shape as the WebSocket stream.
+    A heartbeat comment is emitted every 30 s to keep connections alive.
+    """
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    workspace_path: Optional[str] = None
+    if session.project_id:
+        _project = (
+            db.query(Project)
+            .filter(Project.id == session.project_id, Project.deleted_at.is_(None))
+            .first()
+        )
+        if _project and _project.workspace_path:
+            workspace_path = str(
+                resolve_project_workspace_path(_project.workspace_path, _project.name)
+            )
+
+    _log_mobile_request(request, "session_sse_stream", session_id=session_id)
+    register_stream_connection("mobile_session_sse")
+
+    async def _stream():
+        try:
+            async for frame in mobile_sse_event_generator(session_id, workspace_path):
+                yield frame
+        except Exception as exc:
+            record_stream_error("mobile_session_sse", exc)
+            raise
+        finally:
+            unregister_stream_connection("mobile_session_sse")
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── US3: Task Position / Workspace Review ─────────────────────

@@ -116,6 +116,8 @@ class TaskCompletionFinalizer:
                 "steps_completed": len(orchestration_state.plan),
                 "execution_profile": ctx.execution_profile,
             },
+            phase="task_summary",
+            coordinator="CompletionCoordinator",
         )
 
         write_progress_notes_fn(
@@ -300,6 +302,8 @@ class TaskCompletionFinalizer:
                 "status": completion_validation.status,
                 "task_status": str(task.status.value if task else "done"),
             },
+            phase="task_summary",
+            coordinator="CompletionCoordinator",
         )
 
         return {

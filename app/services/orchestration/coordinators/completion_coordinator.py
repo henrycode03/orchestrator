@@ -164,6 +164,8 @@ class CompletionCoordinator:
             task_id=task_id,
             event_type=EventType.PHASE_STARTED,
             details={"phase": "task_summary"},
+            phase="task_summary",
+            coordinator="CompletionCoordinator",
         )
 
         summary_prompt = assemble_task_summary_prompt(ctx)
@@ -343,6 +345,8 @@ class CompletionCoordinator:
                         "status": "repair_failed",
                         "task_status": str(task.status.value if task else "failed"),
                     },
+                    phase="task_summary",
+                    coordinator="CompletionCoordinator",
                 )
                 write_project_state_snapshot_fn(db, project, task, session_id)
                 return {
@@ -396,6 +400,8 @@ class CompletionCoordinator:
                     "reasons": completion_validation.reasons[:10],
                     "reported_changed_files": reported_changed_files[:20],
                 },
+                phase="task_summary",
+                coordinator="CompletionCoordinator",
             )
             # Phase 13B-S3: bounded execution recovery before aborting.
             # Routes to real recovery only when failure_class=="missing_requested_symbol".
@@ -693,6 +699,8 @@ class CompletionCoordinator:
                                     task.status.value if task else "failed"
                                 ),
                             },
+                            phase="task_summary",
+                            coordinator="CompletionCoordinator",
                         )
                         write_project_state_snapshot_fn(db, project, task, session_id)
                         return {
@@ -879,6 +887,8 @@ class CompletionCoordinator:
                                 "status": "verification_failed",
                                 "verification_command": completion_verification_command,
                             },
+                            phase="task_summary",
+                            coordinator="CompletionCoordinator",
                         )
                         write_project_state_snapshot_fn(db, project, task, session_id)
                         return {
@@ -995,6 +1005,8 @@ class CompletionCoordinator:
                         "status": "verification_integrity_failed",
                         "task_status": str(task.status.value if task else "failed"),
                     },
+                    phase="task_summary",
+                    coordinator="CompletionCoordinator",
                 )
                 write_project_state_snapshot_fn(db, project, task, session_id)
                 return {

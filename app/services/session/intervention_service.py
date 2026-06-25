@@ -32,6 +32,7 @@ from app.models import (
     Task,
     TaskStatus,
 )
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     reset_active_attempts_for_session_stop,
@@ -214,7 +215,7 @@ def create_intervention_request(
         db,
         session_id=session_id,
         task_id=task_id,
-        event_type="human_intervention_requested",
+        event_type=EventType.HUMAN_INTERVENTION_REQUESTED,
         details={
             "intervention_id": req.id,
             "intervention_type": intervention_type,
@@ -721,7 +722,7 @@ def submit_intervention_reply(
         db,
         session_id=req.session_id,
         task_id=req.task_id,
-        event_type="human_intervention_replied",
+        event_type=EventType.HUMAN_INTERVENTION_REPLIED,
         details={
             "intervention_id": req.id,
             "intervention_type": req.intervention_type,
@@ -794,7 +795,7 @@ def approve_intervention(
         db,
         session_id=req.session_id,
         task_id=req.task_id,
-        event_type="human_intervention_replied",
+        event_type=EventType.HUMAN_INTERVENTION_REPLIED,
         details={
             "intervention_id": req.id,
             "intervention_type": "approval",
@@ -865,7 +866,7 @@ def deny_intervention(
         db,
         session_id=req.session_id,
         task_id=req.task_id,
-        event_type="human_intervention_replied",
+        event_type=EventType.HUMAN_INTERVENTION_REPLIED,
         details={
             "intervention_id": req.id,
             "intervention_type": "approval",

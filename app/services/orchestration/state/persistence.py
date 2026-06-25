@@ -792,8 +792,10 @@ def append_orchestration_event(
     event_type: str,
     details: Optional[Dict[str, Any]] = None,
     parent_event_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    coordinator: Optional[str] = None,
 ) -> Dict[str, Any]:
-    payload = {
+    payload: Dict[str, Any] = {
         "event_id": str(uuid.uuid4()),
         "timestamp": datetime.now(UTC).isoformat(),
         "event_type": event_type,
@@ -802,8 +804,20 @@ def append_orchestration_event(
         "parent_event_id": parent_event_id,
         "details": details or {},
     }
+    if phase is not None:
+        payload["phase"] = phase
+    if coordinator is not None:
+        payload["coordinator"] = coordinator
     log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
     _append_jsonl_line(log_path, payload)
+    try:
+        from app.services.session.orchestration_event_bus import (
+            orchestration_event_bus,
+        )
+
+        orchestration_event_bus.publish(payload)
+    except Exception:
+        pass
     suppress_health_update_for = {
         EventType.HEALTH_SCORE_UPDATED,
         EventType.TASK_QUEUED,

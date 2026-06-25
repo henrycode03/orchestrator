@@ -6,6 +6,7 @@ import os
 import pytest
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
+from app.services.orchestration.events.event_types import EventType, is_known_event_type
 from app.services.orchestration.state.persistence import (
     _write_json_payload_atomic,
     append_orchestration_event,
@@ -363,3 +364,165 @@ def test_intent_outcome_mismatch_event_emitted_for_file_gap(tmp_path):
     assert mismatch is not None
     assert mismatch["event_type"] == "intent_outcome_mismatch"
     assert mismatch["details"]["mismatch_score"] >= 40
+
+
+# ── Phase 14F-2: event envelope hardening ────────────────────────────────────
+
+
+def test_append_event_without_phase_coordinator_preserves_old_shape(tmp_path):
+    project_dir = tmp_path / "old-shape-project"
+    project_dir.mkdir()
+
+    event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=30,
+        task_id=1,
+        event_type="phase_started",
+        details={"phase": "planning"},
+    )
+
+    assert "event_id" in event
+    assert "timestamp" in event
+    assert event["event_type"] == "phase_started"
+    assert event["session_id"] == 30
+    assert event["task_id"] == 1
+    assert event["parent_event_id"] is None
+    assert event["details"] == {"phase": "planning"}
+    # Optional fields absent when not supplied
+    assert "phase" not in event
+    assert "coordinator" not in event
+
+
+def test_append_event_with_phase_writes_top_level_field(tmp_path):
+    project_dir = tmp_path / "phase-field-project"
+    project_dir.mkdir()
+
+    event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=31,
+        task_id=2,
+        event_type="phase_started",
+        details={"phase": "task_summary"},
+        phase="task_summary",
+    )
+
+    assert event["phase"] == "task_summary"
+    assert "coordinator" not in event
+
+    log_path = project_dir / ".agent" / "events" / "session_31_task_2.jsonl"
+    import json
+
+    lines = [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines()]
+    phase_event = next(ev for ev in lines if ev["event_type"] == "phase_started")
+    assert phase_event["phase"] == "task_summary"
+
+
+def test_append_event_with_coordinator_writes_top_level_field(tmp_path):
+    project_dir = tmp_path / "coordinator-field-project"
+    project_dir.mkdir()
+
+    event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=32,
+        task_id=3,
+        event_type="task_completed",
+        details={},
+        coordinator="CompletionCoordinator",
+    )
+
+    assert event["coordinator"] == "CompletionCoordinator"
+    assert "phase" not in event
+
+
+def test_append_event_with_both_fields_writes_both(tmp_path):
+    project_dir = tmp_path / "both-fields-project"
+    project_dir.mkdir()
+
+    event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=33,
+        task_id=4,
+        event_type="phase_finished",
+        details={"phase": "task_summary", "status": "done"},
+        phase="task_summary",
+        coordinator="CompletionCoordinator",
+    )
+
+    assert event["phase"] == "task_summary"
+    assert event["coordinator"] == "CompletionCoordinator"
+
+    import json
+
+    log_path = project_dir / ".agent" / "events" / "session_33_task_4.jsonl"
+    lines = [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines()]
+    persisted = next(ev for ev in lines if ev["event_type"] == "phase_finished")
+    assert persisted["phase"] == "task_summary"
+    assert persisted["coordinator"] == "CompletionCoordinator"
+
+
+def test_existing_readers_tolerate_new_top_level_fields(tmp_path):
+    project_dir = tmp_path / "backward-compat-project"
+    project_dir.mkdir()
+
+    append_orchestration_event(
+        project_dir=project_dir,
+        session_id=34,
+        task_id=5,
+        event_type="phase_started",
+        details={"phase": "planning"},
+        phase="planning",
+        coordinator="PlanningCoordinator",
+    )
+
+    import json
+
+    log_path = project_dir / ".agent" / "events" / "session_34_task_5.jsonl"
+    lines = [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines()]
+    # All mandatory fields must still be present
+    phase_event = next(ev for ev in lines if ev["event_type"] == "phase_started")
+    for field in (
+        "event_id",
+        "timestamp",
+        "event_type",
+        "session_id",
+        "task_id",
+        "parent_event_id",
+        "details",
+    ):
+        assert field in phase_event, f"mandatory field {field!r} missing"
+
+
+def test_jsonl_roundtrip_preserves_new_fields(tmp_path):
+    import json
+
+    project_dir = tmp_path / "roundtrip-project"
+    project_dir.mkdir()
+
+    written = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=35,
+        task_id=6,
+        event_type="step_finished",
+        details={"step_index": 0},
+        phase="step_executing",
+        coordinator="ExecutionCoordinator",
+    )
+
+    log_path = project_dir / ".agent" / "events" / "session_35_task_6.jsonl"
+    lines = [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines()]
+    step_event = next(ev for ev in lines if ev["event_type"] == "step_finished")
+
+    assert step_event["event_id"] == written["event_id"]
+    assert step_event["phase"] == "step_executing"
+    assert step_event["coordinator"] == "ExecutionCoordinator"
+    assert step_event["details"]["step_index"] == 0
+
+
+def test_hitl_event_types_are_known_constants():
+    assert is_known_event_type(EventType.HUMAN_INTERVENTION_REQUESTED)
+    assert is_known_event_type(EventType.HUMAN_INTERVENTION_REPLIED)
+
+
+def test_hitl_event_type_constants_match_expected_strings():
+    assert EventType.HUMAN_INTERVENTION_REQUESTED == "human_intervention_requested"
+    assert EventType.HUMAN_INTERVENTION_REPLIED == "human_intervention_replied"

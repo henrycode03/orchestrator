@@ -13,6 +13,7 @@ _STREAM_KINDS = (
     "session_status",
     "project_logs",
     "mobile_session_logs",
+    "mobile_session_sse",
 )
 _RECENT_ERROR_WINDOW = timedelta(minutes=15)
 _MAX_RECENT_ERRORS = 25
