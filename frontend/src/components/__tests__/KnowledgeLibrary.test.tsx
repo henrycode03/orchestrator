@@ -11,6 +11,7 @@ vi.mock('@/api/client', () => ({
     list: vi.fn(),
     getById: vi.fn(),
     getUsageSummary: vi.fn(),
+    getUsageList: vi.fn(),
     getRevisions: vi.fn(),
     getEvents: vi.fn(),
     patch: vi.fn(),
@@ -244,6 +245,7 @@ describe('KnowledgeLibrary — usage summary renders', () => {
     setupList([item]);
     setupDetail(item);
     setupUsageSummary(makeUsageSummary({ retrieval_count: 10, used_in_prompt_count: 8, effective_count: 5 }));
+    (knowledgeLibraryAPI.getUsageList as Mock).mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 15 } });
     setupRevisions();
     setupEvents();
     await render();
@@ -271,6 +273,7 @@ describe('KnowledgeLibrary — usage summary renders', () => {
     setupList([item]);
     setupDetail(item);
     setupUsageSummary(makeUsageSummary({ retrieval_count: 0 }));
+    (knowledgeLibraryAPI.getUsageList as Mock).mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 15 } });
     await render();
 
     const btn = Array.from(container.querySelectorAll('button')).find(b =>
@@ -645,5 +648,411 @@ describe('KnowledgeLibrary — edit cancel', () => {
 
     expect(getSaveButton()).toBeUndefined();
     expect(knowledgeLibraryAPI.patch).not.toHaveBeenCalled();
+  });
+});
+
+// ── helpers for URL param tests ───────────────────────────────────────────────
+
+async function renderWithParams(search: string) {
+  await act(async () => {
+    root.render(
+      <MemoryRouter initialEntries={[`/knowledge${search}`]}>
+        <KnowledgeLibrary />
+      </MemoryRouter>,
+    );
+  });
+}
+
+describe('KnowledgeLibrary — URL param ?item= loads item directly', () => {
+  it('calls getById with the item id from ?item= param on mount', async () => {
+    const item = makeItem({ id: 'abc-123' });
+    setupList([item]);
+    setupDetail(item);
+    await renderWithParams('?item=abc-123');
+    expect(knowledgeLibraryAPI.getById).toHaveBeenCalledWith('abc-123');
+  });
+
+  it('shows the detail panel for the item from URL param', async () => {
+    const item = makeItem({ id: 'abc-123', title: 'URL Selected Item' });
+    setupList([item]);
+    setupDetail(item);
+    await renderWithParams('?item=abc-123');
+    expect(container.textContent).toContain('URL Selected Item');
+  });
+
+  it('shows "Item not found" when ?item= ID does not resolve', async () => {
+    setupList([]);
+    (knowledgeLibraryAPI.getById as Mock).mockRejectedValue(new Error('Not found'));
+    await renderWithParams('?item=nonexistent-id');
+    expect(container.textContent).toContain('Item not found');
+  });
+
+  it('does not show "Item not found" when no item param', async () => {
+    setupEmptyList();
+    await render();
+    expect(container.textContent).not.toContain('Item not found');
+  });
+});
+
+describe('KnowledgeLibrary — decision context banner', () => {
+  it('shows decision banner when ?source=decision is in URL', async () => {
+    const item = makeItem({ id: 'abc-123' });
+    setupList([item]);
+    setupDetail(item);
+    setupUsageSummary(makeUsageSummary());
+    (knowledgeLibraryAPI.getUsageList as Mock).mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 15 } });
+    await renderWithParams('?item=abc-123&source=decision');
+    expect(container.textContent).toContain('Opened from Decision Intelligence');
+    expect(container.textContent).toContain('improvement opportunity');
+  });
+
+  it('does not show decision banner without ?source=decision', async () => {
+    const item = makeItem({ id: 'abc-123' });
+    setupList([item]);
+    setupDetail(item);
+    await renderWithParams('?item=abc-123');
+    expect(container.textContent).not.toContain('Opened from Decision Intelligence');
+  });
+
+  it('does not show decision banner when opened without params', async () => {
+    setupEmptyList();
+    await render();
+    expect(container.textContent).not.toContain('Opened from Decision Intelligence');
+  });
+
+  it('shows action hint when ?source=decision and item is loaded', async () => {
+    const item = makeItem({ id: 'abc-123' });
+    setupList([item]);
+    setupDetail(item);
+    setupUsageSummary(makeUsageSummary());
+    (knowledgeLibraryAPI.getUsageList as Mock).mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 15 } });
+    await renderWithParams('?item=abc-123&source=decision');
+    expect(container.textContent).toContain('Recommended actions');
+  });
+
+  it('does not show action hint without source=decision', async () => {
+    const item = makeItem({ id: 'abc-123' });
+    setupList([item]);
+    setupDetail(item);
+    await renderWithParams('?item=abc-123');
+    expect(container.textContent).not.toContain('Recommended actions');
+  });
+});
+
+describe('KnowledgeLibrary — direct nav behavior unchanged', () => {
+  it('shows empty detail panel when opened with no params', async () => {
+    setupList([makeItem()]);
+    await render();
+    expect(container.textContent).toContain('Select a knowledge item to inspect it');
+  });
+
+  it('allows manual item selection after direct nav', async () => {
+    const item = makeItem({ title: 'Manual Pick' });
+    setupList([item]);
+    setupDetail(item);
+    await render();
+    const btn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes('Manual Pick')
+    );
+    await act(async () => { btn!.click(); });
+    expect(knowledgeLibraryAPI.getById).toHaveBeenCalledWith(item.id);
+  });
+});
+
+describe('KnowledgeLibrary — edit/retire/restore work after URL selection', () => {
+  it('retire works after item loaded from URL param', async () => {
+    const item = makeItem({ id: 'url-item', is_active: true });
+    const retired = { ...item, is_active: false };
+    setupList([item]);
+    setupDetail(item);
+    (knowledgeLibraryAPI.retire as Mock).mockResolvedValue({ data: retired });
+    await renderWithParams('?item=url-item');
+
+    const retireBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes('Retire')
+    );
+    expect(retireBtn).toBeTruthy();
+    await act(async () => { retireBtn!.click(); });
+    expect(knowledgeLibraryAPI.retire).toHaveBeenCalledWith(item.id);
+  });
+
+  it('restore works after item loaded from URL param', async () => {
+    const item = makeItem({ id: 'url-item', is_active: false });
+    const restored = { ...item, is_active: true };
+    setupList([item]);
+    setupDetail(item);
+    (knowledgeLibraryAPI.restore as Mock).mockResolvedValue({ data: restored });
+    await renderWithParams('?item=url-item');
+
+    const restoreBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes('Restore')
+    );
+    expect(restoreBtn).toBeTruthy();
+    await act(async () => { restoreBtn!.click(); });
+    expect(knowledgeLibraryAPI.restore).toHaveBeenCalledWith(item.id);
+  });
+});
+
+// ── usage drilldown fixtures ──────────────────────────────────────────────────
+
+function makeUsageRecord(overrides: Partial<{
+  id: string;
+  session_id: number;
+  task_id: number | null;
+  trigger_phase: string;
+  retrieval_reason: string;
+  retrieval_query: string | null;
+  confidence: number;
+  rank: number;
+  used_in_prompt: boolean;
+  was_effective: boolean | null;
+  created_at: string | null;
+}> = {}) {
+  return {
+    id: 'rec-1',
+    session_id: 42,
+    task_id: 7,
+    trigger_phase: 'planning',
+    retrieval_reason: 'Matched format guide query',
+    retrieval_query: 'how to format output',
+    confidence: 0.85,
+    rank: 1,
+    used_in_prompt: true,
+    was_effective: true,
+    created_at: '2026-06-01T10:00:00Z',
+    ...overrides,
+  };
+}
+
+function makeUsageLogPage(items: ReturnType<typeof makeUsageRecord>[], total?: number) {
+  return { items, total: total ?? items.length, page: 1, page_size: 15 };
+}
+
+function setupUsageList(items: ReturnType<typeof makeUsageRecord>[], total?: number) {
+  (knowledgeLibraryAPI.getUsageList as Mock).mockResolvedValue({
+    data: makeUsageLogPage(items, total),
+  });
+}
+
+async function openUsageTab(item: ReturnType<typeof makeItem>) {
+  setupList([item]);
+  setupDetail(item);
+  setupUsageSummary(makeUsageSummary());
+  await render();
+  const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+    b.textContent?.includes(item.title)
+  );
+  await act(async () => { listBtn!.click(); });
+  const usageTab = Array.from(container.querySelectorAll('button')).find(b =>
+    b.textContent?.trim().startsWith('Usage')
+  );
+  await act(async () => { usageTab!.click(); });
+}
+
+function setSelectValue(el: HTMLSelectElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(el, value);
+  const propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
+  if (propsKey) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any)[propsKey]?.onChange?.({ target: el, currentTarget: el });
+  }
+}
+
+// ── usage drilldown tests ─────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — usage drilldown loads', () => {
+  it('calls getUsageList when usage tab is clicked', async () => {
+    setupUsageList([]);
+    const item = makeItem();
+    await openUsageTab(item);
+    expect(knowledgeLibraryAPI.getUsageList).toHaveBeenCalledWith(item.id, expect.objectContaining({ page: 1 }));
+  });
+
+  it('shows "No usage records" empty state when list is empty', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    expect(container.textContent).toContain('No usage records for this item yet');
+  });
+});
+
+describe('KnowledgeLibrary — usage drilldown table', () => {
+  it('renders record rows with phase, session, task, confidence, rank', async () => {
+    const rec = makeUsageRecord({ session_id: 99, task_id: 5, trigger_phase: 'execution', confidence: 0.92, rank: 2 });
+    setupUsageList([rec]);
+    await openUsageTab(makeItem());
+    expect(container.textContent).toContain('execution');
+    expect(container.textContent).toContain('99');
+    expect(container.textContent).toContain('5');
+    expect(container.textContent).toContain('0.92');
+  });
+
+  it('renders session ID as a link to /sessions/{id}', async () => {
+    const rec = makeUsageRecord({ session_id: 42 });
+    setupUsageList([rec]);
+    await openUsageTab(makeItem());
+    const link = container.querySelector('a[href="/sessions/42"]');
+    expect(link).not.toBeNull();
+  });
+
+  it('shows Yes badge for used_in_prompt=true records', async () => {
+    setupUsageList([makeUsageRecord({ used_in_prompt: true })]);
+    await openUsageTab(makeItem());
+    const cells = Array.from(container.querySelectorAll('td'));
+    expect(cells.some(c => c.textContent?.trim() === 'Yes')).toBe(true);
+  });
+
+  it('shows No badge for was_effective=false records', async () => {
+    setupUsageList([makeUsageRecord({ was_effective: false, used_in_prompt: false })]);
+    await openUsageTab(makeItem());
+    const cells = Array.from(container.querySelectorAll('td'));
+    expect(cells.some(c => c.textContent?.trim() === 'No')).toBe(true);
+  });
+
+  it('shows — for was_effective=null records', async () => {
+    setupUsageList([makeUsageRecord({ was_effective: null })]);
+    await openUsageTab(makeItem());
+    expect(container.textContent).toContain('—');
+  });
+
+  it('shows retrieval_reason in table', async () => {
+    setupUsageList([makeUsageRecord({ retrieval_reason: 'Matched special pattern' })]);
+    await openUsageTab(makeItem());
+    expect(container.textContent).toContain('Matched special pattern');
+  });
+
+  it('shows — for task_id=null records', async () => {
+    setupUsageList([makeUsageRecord({ task_id: null })]);
+    await openUsageTab(makeItem());
+    const cells = Array.from(container.querySelectorAll('td'));
+    expect(cells.some(c => c.textContent?.trim() === '—')).toBe(true);
+  });
+});
+
+describe('KnowledgeLibrary — usage drilldown pagination', () => {
+  it('shows pagination controls when total exceeds page size', async () => {
+    const recs = Array.from({ length: 15 }, (_, i) =>
+      makeUsageRecord({ id: `rec-${i}`, session_id: i + 1 })
+    );
+    setupUsageList(recs, 30);
+    await openUsageTab(makeItem());
+    expect(container.textContent).toContain('Page 1 of 2');
+  });
+
+  it('shows total record count when single page', async () => {
+    setupUsageList([makeUsageRecord()]);
+    await openUsageTab(makeItem());
+    expect(container.textContent).toContain('1 record');
+  });
+});
+
+describe('KnowledgeLibrary — usage drilldown filters', () => {
+  it('renders all filter inputs', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    expect(container.querySelector('[aria-label="Filter by phase"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Filter by used in prompt"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Filter by effective"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Filter by session ID"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Filter by task ID"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Filter by created after"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Filter by created before"]')).not.toBeNull();
+  });
+
+  it('calls getUsageList with trigger_phase when phase filter is set', async () => {
+    setupUsageList([]);
+    const item = makeItem();
+    await openUsageTab(item);
+    const phaseInput = container.querySelector('[aria-label="Filter by phase"]') as HTMLInputElement;
+    await act(async () => { setInputValue(phaseInput, 'execution'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ trigger_phase: 'execution' });
+  });
+
+  it('calls getUsageList with used_in_prompt=true when Yes selected', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const sel = container.querySelector('[aria-label="Filter by used in prompt"]') as HTMLSelectElement;
+    await act(async () => { setSelectValue(sel, 'true'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ used_in_prompt: true });
+  });
+
+  it('calls getUsageList with was_effective=false when No selected', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const sel = container.querySelector('[aria-label="Filter by effective"]') as HTMLSelectElement;
+    await act(async () => { setSelectValue(sel, 'false'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ was_effective: false });
+  });
+
+  it('calls getUsageList with session_id when session filter is set', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const sessionInput = container.querySelector('[aria-label="Filter by session ID"]') as HTMLInputElement;
+    await act(async () => { setInputValue(sessionInput, '42'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ session_id: 42 });
+  });
+
+  it('calls getUsageList with task_id when task filter is set', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const taskInput = container.querySelector('[aria-label="Filter by task ID"]') as HTMLInputElement;
+    await act(async () => { setInputValue(taskInput, '7'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ task_id: 7 });
+  });
+
+  it('calls getUsageList with created_after date filter', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const afterInput = container.querySelector('[aria-label="Filter by created after"]') as HTMLInputElement;
+    await act(async () => { setInputValue(afterInput, '2026-01-01'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ created_after: '2026-01-01' });
+  });
+
+  it('calls getUsageList with created_before date filter', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const beforeInput = container.querySelector('[aria-label="Filter by created before"]') as HTMLInputElement;
+    await act(async () => { setInputValue(beforeInput, '2026-06-30'); });
+    const calls = (knowledgeLibraryAPI.getUsageList as Mock).mock.calls;
+    expect(calls[calls.length - 1][1]).toMatchObject({ created_before: '2026-06-30' });
+  });
+
+  it('shows "No records matching current filters" when filtered result is empty', async () => {
+    setupUsageList([]);
+    await openUsageTab(makeItem());
+    const phaseInput = container.querySelector('[aria-label="Filter by phase"]') as HTMLInputElement;
+    (knowledgeLibraryAPI.getUsageList as Mock).mockResolvedValue({ data: makeUsageLogPage([]) });
+    await act(async () => { setInputValue(phaseInput, 'nonexistent_phase'); });
+    expect(container.textContent).toContain('No records matching current filters');
+  });
+});
+
+describe('KnowledgeLibrary — decision context activates usage tab', () => {
+  it('auto-activates usage tab when opened with ?source=decision', async () => {
+    const item = makeItem({ id: 'dec-item' });
+    setupList([item]);
+    setupDetail(item);
+    setupUsageSummary(makeUsageSummary());
+    setupUsageList([]);
+    await renderWithParams('?item=dec-item&source=decision');
+    expect(knowledgeLibraryAPI.getUsageList).toHaveBeenCalledWith('dec-item', expect.any(Object));
+  });
+
+  it('does not call getUsageList when no fromDecision and usage tab not clicked', async () => {
+    const item = makeItem();
+    setupList([item]);
+    setupDetail(item);
+    setupUsageSummary(makeUsageSummary());
+    await render();
+    const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { listBtn!.click(); });
+    expect(knowledgeLibraryAPI.getUsageList).not.toHaveBeenCalled();
   });
 });

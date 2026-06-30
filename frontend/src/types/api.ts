@@ -1226,6 +1226,7 @@ export interface DecisionEvidence {
 export interface DecisionImprovementOpportunity {
   kind: 'knowledge' | 'coordinator' | 'project' | 'failure_signature' | string;
   target: string;
+  knowledge_item_id?: string | null;
   metric_label: string;
   metric_value: number | null;
   confidence: number;
@@ -1353,6 +1354,27 @@ export interface KnowledgeRevisionsPage {
 
 export interface KnowledgeEventsPage {
   items: KnowledgeLifecycleEvent[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface KnowledgeUsageLogEntry {
+  id: string;
+  session_id: number;
+  task_id: number | null;
+  trigger_phase: string;
+  retrieval_reason: string;
+  retrieval_query: string | null;
+  confidence: number;
+  rank: number;
+  used_in_prompt: boolean;
+  was_effective: boolean | null;
+  created_at: string | null;
+}
+
+export interface KnowledgeUsageLogPage {
+  items: KnowledgeUsageLogEntry[];
   total: number;
   page: number;
   page_size: number;

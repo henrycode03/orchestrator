@@ -232,6 +232,14 @@ function DecisionSection({
                 <p className="text-lg text-slate-500">↓</p>
               </div>
               <p className="mt-2 text-xs text-slate-300">{item.recommendation}</p>
+              {item.kind === 'knowledge' && item.knowledge_item_id && (
+                <Link
+                  to={`/knowledge?item=${item.knowledge_item_id}&source=decision`}
+                  className="mt-2 inline-block text-[11px] text-[color:var(--oc-accent)] hover:underline"
+                >
+                  Open in Knowledge Library →
+                </Link>
+              )}
               <div className="mt-2 flex items-center justify-between gap-3">
                 <p className="text-[10px] text-slate-600">
                   {fmtNum(item.evidence.sample_size)} samples · {fmtPct(item.confidence)} confidence

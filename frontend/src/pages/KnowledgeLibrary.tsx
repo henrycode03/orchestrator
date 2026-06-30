@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Search, ChevronRight, RefreshCw, Archive, RotateCcw, Pencil, X } from 'lucide-react';
+import { useSearchParams, Link } from 'react-router-dom';
+import { BookOpen, Search, ChevronRight, RefreshCw, Archive, RotateCcw, Pencil, X, Info } from 'lucide-react';
 import { knowledgeLibraryAPI } from '@/api/client';
 import type {
   KnowledgeLibraryItem,
   KnowledgeUpdatePayload,
   KnowledgeUsageSummary,
+  KnowledgeUsageLogEntry,
   KnowledgeRevision,
   KnowledgeLifecycleEvent,
 } from '@/types/api';
@@ -160,6 +162,256 @@ function UsageSummaryPanel({ itemId }: { itemId: string }) {
 
       {summary.retrieval_count === 0 && (
         <p className="text-xs text-slate-500">No usage data for this item yet.</p>
+      )}
+    </div>
+  );
+}
+
+// ── UsageDrilldownPanel ──────────────────────────────────────────────────────
+
+interface UsageFilters {
+  triggerPhase: string;
+  usedInPrompt: string;
+  wasEffective: string;
+  sessionId: string;
+  taskId: string;
+  createdAfter: string;
+  createdBefore: string;
+}
+
+const EMPTY_FILTERS: UsageFilters = {
+  triggerPhase: '',
+  usedInPrompt: '',
+  wasEffective: '',
+  sessionId: '',
+  taskId: '',
+  createdAfter: '',
+  createdBefore: '',
+};
+
+const DRILLDOWN_PAGE_SIZE = 15;
+
+function UsageDrilldownPanel({ itemId }: { itemId: string }) {
+  const [filters, setFilters] = useState<UsageFilters>(EMPTY_FILTERS);
+  const [page, setPage] = useState(1);
+  const [records, setRecords] = useState<KnowledgeUsageLogEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback((p: number, f: UsageFilters) => {
+    setLoading(true);
+    setError(null);
+    const params: Record<string, unknown> = { page: p, page_size: DRILLDOWN_PAGE_SIZE };
+    if (f.triggerPhase.trim()) params.trigger_phase = f.triggerPhase.trim();
+    if (f.usedInPrompt) params.used_in_prompt = f.usedInPrompt === 'true';
+    if (f.wasEffective) params.was_effective = f.wasEffective === 'true';
+    const sid = parseInt(f.sessionId.trim(), 10);
+    if (!isNaN(sid)) params.session_id = sid;
+    const tid = parseInt(f.taskId.trim(), 10);
+    if (!isNaN(tid)) params.task_id = tid;
+    if (f.createdAfter) params.created_after = f.createdAfter;
+    if (f.createdBefore) params.created_before = f.createdBefore;
+    knowledgeLibraryAPI.getUsageList(itemId, params as Parameters<typeof knowledgeLibraryAPI.getUsageList>[1])
+      .then(r => { setRecords(r.data.items); setTotal(r.data.total); })
+      .catch(() => setError('Failed to load usage records.'))
+      .finally(() => setLoading(false));
+  }, [itemId]);
+
+  useEffect(() => { setPage(1); load(1, filters); }, [load, filters]);
+
+  // Reset when item changes
+  useEffect(() => { setFilters(EMPTY_FILTERS); setPage(1); }, [itemId]);
+
+  const totalPages = Math.ceil(total / DRILLDOWN_PAGE_SIZE);
+  const hasFilters = Object.values(filters).some(Boolean);
+
+  const setFilter = <K extends keyof UsageFilters>(key: K, val: UsageFilters[K]) =>
+    setFilters(prev => ({ ...prev, [key]: val }));
+
+  const filterCls = 'w-full rounded border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-[color:var(--oc-border)]';
+  const labelCls = 'block text-[10px] text-slate-500 mb-0.5';
+
+  return (
+    <div className="mt-5 pt-4 border-t border-[color:var(--oc-border-soft)]">
+      <SectionHeader title="Usage Records" />
+
+      {/* Filters */}
+      <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div>
+          <label className={labelCls}>Phase</label>
+          <input
+            type="text"
+            placeholder="e.g. planning"
+            value={filters.triggerPhase}
+            onChange={e => setFilter('triggerPhase', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by phase"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>In Prompt</label>
+          <select
+            value={filters.usedInPrompt}
+            onChange={e => setFilter('usedInPrompt', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by used in prompt"
+          >
+            <option value="">All</option>
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div>
+          <label className={labelCls}>Effective</label>
+          <select
+            value={filters.wasEffective}
+            onChange={e => setFilter('wasEffective', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by effective"
+          >
+            <option value="">All</option>
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div>
+          <label className={labelCls}>Session ID</label>
+          <input
+            type="number"
+            placeholder="Session ID"
+            value={filters.sessionId}
+            onChange={e => setFilter('sessionId', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by session ID"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>Task ID</label>
+          <input
+            type="number"
+            placeholder="Task ID"
+            value={filters.taskId}
+            onChange={e => setFilter('taskId', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by task ID"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>After</label>
+          <input
+            type="date"
+            value={filters.createdAfter}
+            onChange={e => setFilter('createdAfter', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by created after"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>Before</label>
+          <input
+            type="date"
+            value={filters.createdBefore}
+            onChange={e => setFilter('createdBefore', e.target.value)}
+            className={filterCls}
+            aria-label="Filter by created before"
+          />
+        </div>
+        {hasFilters && (
+          <div className="flex items-end">
+            <button
+              onClick={() => setFilters(EMPTY_FILTERS)}
+              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              Clear filters
+            </button>
+          </div>
+        )}
+      </div>
+
+      {loading ? (
+        <p className="py-3 text-xs text-slate-500">Loading usage records…</p>
+      ) : error ? (
+        <p className="py-3 text-xs text-red-400">{error}</p>
+      ) : records.length === 0 ? (
+        <p className="py-3 text-xs text-slate-500">
+          {hasFilters ? 'No records matching current filters.' : 'No usage records for this item yet.'}
+        </p>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="border-b border-[color:var(--oc-border-soft)]">
+                  {['Date', 'Phase', 'Session', 'Task', 'Conf', 'Rank', 'Prompt', 'Effective', 'Reason'].map(h => (
+                    <th key={h} className={cn(
+                      'pb-1.5 pr-3 font-medium text-slate-500 whitespace-nowrap',
+                      ['Conf', 'Rank'].includes(h) ? 'text-right' : ['Prompt', 'Effective'].includes(h) ? 'text-center' : 'text-left'
+                    )}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {records.map(rec => (
+                  <tr key={rec.id} className="border-b border-[color:var(--oc-border-soft)]/40 hover:bg-[color:var(--oc-surface)]/30 transition-colors">
+                    <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap">{fmtDate(rec.created_at)}</td>
+                    <td className="py-1.5 pr-3 text-slate-300 whitespace-nowrap">{rec.trigger_phase}</td>
+                    <td className="py-1.5 pr-3 whitespace-nowrap">
+                      <Link
+                        to={`/sessions/${rec.session_id}`}
+                        className="text-[color:var(--oc-accent)] hover:underline"
+                        aria-label={`Session ${rec.session_id}`}
+                      >
+                        {rec.session_id}
+                      </Link>
+                    </td>
+                    <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap">{rec.task_id ?? '—'}</td>
+                    <td className="py-1.5 pr-3 text-right text-slate-300 tabular-nums">{rec.confidence.toFixed(2)}</td>
+                    <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">{rec.rank}</td>
+                    <td className="py-1.5 pr-3 text-center">
+                      {rec.used_in_prompt
+                        ? <Badge className="bg-emerald-500/15 text-emerald-300">Yes</Badge>
+                        : <Badge className="bg-slate-500/10 text-slate-500">No</Badge>}
+                    </td>
+                    <td className="py-1.5 pr-3 text-center">
+                      {rec.was_effective == null
+                        ? <span className="text-slate-600">—</span>
+                        : rec.was_effective
+                          ? <Badge className="bg-emerald-500/15 text-emerald-300">Yes</Badge>
+                          : <Badge className="bg-amber-500/10 text-amber-400">No</Badge>}
+                    </td>
+                    <td className="py-1.5 text-slate-400 max-w-[180px]">
+                      <span className="line-clamp-2 block" title={rec.retrieval_reason}>{rec.retrieval_reason}</span>
+                      {rec.retrieval_query && (
+                        <span className="block text-[10px] text-slate-600 line-clamp-1 mt-0.5" title={rec.retrieval_query}>
+                          q: {rec.retrieval_query}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 ? (
+            <div className="mt-3 flex items-center justify-between">
+              <button
+                disabled={page <= 1}
+                onClick={() => { const p = page - 1; setPage(p); load(p, filters); }}
+                className="text-xs text-slate-400 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              >← Previous</button>
+              <span className="text-xs text-slate-500">{total} records · Page {page} of {totalPages}</span>
+              <button
+                disabled={page >= totalPages}
+                onClick={() => { const p = page + 1; setPage(p); load(p, filters); }}
+                className="text-xs text-slate-400 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              >Next →</button>
+            </div>
+          ) : (
+            <p className="mt-2 text-[10px] text-slate-600">{total} record{total !== 1 ? 's' : ''}</p>
+          )}
+        </>
       )}
     </div>
   );
@@ -493,10 +745,11 @@ const DETAIL_TABS: { id: DetailTab; label: string }[] = [
 interface DetailPanelProps {
   item: KnowledgeLibraryItem;
   onRefresh: (updated: KnowledgeLibraryItem) => void;
+  fromDecision?: boolean;
 }
 
-function DetailPanel({ item, onRefresh }: DetailPanelProps) {
-  const [activeTab, setActiveTab] = useState<DetailTab>('metadata');
+function DetailPanel({ item, onRefresh, fromDecision }: DetailPanelProps) {
+  const [activeTab, setActiveTab] = useState<DetailTab>(fromDecision ? 'usage' : 'metadata');
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -552,6 +805,17 @@ function DetailPanel({ item, onRefresh }: DetailPanelProps) {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Decision context banner */}
+      {fromDecision && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-md border border-blue-500/25 bg-blue-500/8 px-3.5 py-3">
+          <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-blue-400" />
+          <div>
+            <p className="text-xs font-medium text-blue-300">Opened from Decision Intelligence</p>
+            <p className="mt-0.5 text-[11px] text-blue-400/80">Review this item because it appeared in an improvement opportunity.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="mb-4 pb-4 border-b border-[color:var(--oc-border-soft)]">
         <div className="flex items-start justify-between gap-3 mb-2">
@@ -603,6 +867,11 @@ function DetailPanel({ item, onRefresh }: DetailPanelProps) {
         </div>
         {actionError && <p className="mt-2 text-xs text-red-400">{actionError}</p>}
         {successMsg && <p className="mt-2 text-xs text-emerald-400">{successMsg}</p>}
+        {fromDecision && !isEditing && (
+          <p className="mt-2 text-[11px] text-slate-500">
+            Recommended actions: inspect usage, edit content, or retire if obsolete.
+          </p>
+        )}
       </div>
 
       {/* Edit mode */}
@@ -630,6 +899,9 @@ function DetailPanel({ item, onRefresh }: DetailPanelProps) {
                 )}
               >
                 {tab.label}
+                {fromDecision && tab.id === 'usage' && activeTab !== 'usage' && (
+                  <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-blue-400 align-middle" />
+                )}
               </button>
             ))}
           </div>
@@ -693,7 +965,12 @@ function DetailPanel({ item, onRefresh }: DetailPanelProps) {
               </div>
             )}
 
-            {activeTab === 'usage' && <UsageSummaryPanel itemId={item.id} />}
+            {activeTab === 'usage' && (
+              <>
+                <UsageSummaryPanel itemId={item.id} />
+                <UsageDrilldownPanel itemId={item.id} />
+              </>
+            )}
             {activeTab === 'revisions' && <RevisionsPanel key={revKey} itemId={item.id} />}
             {activeTab === 'events' && <AuditEventsPanel key={evKey} itemId={item.id} />}
           </div>
@@ -756,6 +1033,10 @@ const KNOWLEDGE_TYPES = [
 ];
 
 export default function KnowledgeLibrary() {
+  const [searchParams] = useSearchParams();
+  const paramItemId = searchParams.get('item');
+  const fromDecision = searchParams.get('source') === 'decision';
+
   const [items, setItems] = useState<KnowledgeLibraryItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -764,8 +1045,9 @@ export default function KnowledgeLibrary() {
   const [typeFilter, setTypeFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(paramItemId);
   const [selectedItem, setSelectedItem] = useState<KnowledgeLibraryItem | null>(null);
+  const [itemNotFound, setItemNotFound] = useState(false);
 
   const load = useCallback((p: number, type: string, query: string) => {
     setLoading(true);
@@ -792,10 +1074,11 @@ export default function KnowledgeLibrary() {
 
   // Fetch full detail when selectedId changes
   useEffect(() => {
-    if (!selectedId) { setSelectedItem(null); return; }
+    if (!selectedId) { setSelectedItem(null); setItemNotFound(false); return; }
+    setItemNotFound(false);
     knowledgeLibraryAPI.getById(selectedId)
       .then(r => setSelectedItem(r.data))
-      .catch(() => setSelectedItem(null));
+      .catch(() => { setSelectedItem(null); setItemNotFound(true); });
   }, [selectedId]);
 
   const totalPages = Math.ceil(total / pageSize);
@@ -904,7 +1187,15 @@ export default function KnowledgeLibrary() {
         {/* Right: detail */}
         <div className="flex-1 min-w-0 rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-raised)] p-5 overflow-y-auto">
           {selectedItem ? (
-            <DetailPanel item={selectedItem} onRefresh={handleItemRefresh} />
+            <DetailPanel item={selectedItem} onRefresh={handleItemRefresh} fromDecision={fromDecision} />
+          ) : itemNotFound ? (
+            <div className="flex h-full items-center justify-center">
+              <div className="text-center">
+                <BookOpen className="mx-auto mb-3 h-8 w-8 text-slate-700" />
+                <p className="text-sm text-slate-500">Item not found.</p>
+                <p className="mt-1 text-xs text-slate-600">The requested knowledge item could not be loaded.</p>
+              </div>
+            </div>
           ) : (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">

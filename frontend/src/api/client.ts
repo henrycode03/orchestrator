@@ -56,6 +56,7 @@ import type {
   KnowledgeRevisionsPage,
   KnowledgeEventsPage,
   KnowledgeUpdatePayload,
+  KnowledgeUsageLogPage,
 } from "../types/api";
 
 export type { Page, DashboardAttention };
@@ -1280,6 +1281,19 @@ export const knowledgeLibraryAPI = {
 
   getUsageSummary: (id: string) =>
     apiClient.get<KnowledgeUsageSummary>(`/knowledge/${id}/usage/summary`),
+
+  getUsageList: (id: string, params?: {
+    page?: number;
+    page_size?: number;
+    trigger_phase?: string;
+    used_in_prompt?: boolean;
+    was_effective?: boolean;
+    session_id?: number;
+    task_id?: number;
+    created_after?: string;
+    created_before?: string;
+  }) =>
+    apiClient.get<KnowledgeUsageLogPage>(`/knowledge/${id}/usage`, { params }),
 
   getRevisions: (id: string, params?: { page?: number; page_size?: number }) =>
     apiClient.get<KnowledgeRevisionsPage>(`/knowledge/${id}/revisions`, { params }),

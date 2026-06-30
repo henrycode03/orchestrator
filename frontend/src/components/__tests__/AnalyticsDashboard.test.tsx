@@ -762,3 +762,76 @@ describe('AnalyticsDashboard', () => {
     });
   });
 });
+
+// ── knowledge link tests ──────────────────────────────────────────────────────
+
+const decisionWithKnowledgeOpp = (knowledgeItemId: string | null | undefined): DecisionAnalytics => ({
+  windows: {
+    '7d': {
+      ...decisionWindow,
+      improvement_opportunities: [
+        {
+          kind: 'knowledge',
+          target: 'Low Effectiveness Item',
+          knowledge_item_id: knowledgeItemId as string | undefined,
+          metric_label: 'Effectiveness',
+          metric_value: 0.1,
+          confidence: 0.9,
+          recommendation: 'Candidate for rewrite.',
+          rationale: 'Knowledge is retrieved often but rarely contributes.',
+          severity: 'medium',
+          evidence: { sample_size: 5, affected_projects: [], affected_sessions: [], supporting_metrics: {} },
+        },
+      ],
+    },
+    '30d': { ...decisionWindow, improvement_opportunities: [] },
+    all_time: { ...decisionWindow, improvement_opportunities: [] },
+  },
+  generated_at: '2026-06-29T00:00:00Z',
+  metrics_version: 1,
+});
+
+describe('AnalyticsDashboard — knowledge recommendation link', () => {
+  beforeEach(() => {
+    (analyticsAPI.getOperational as Mock).mockResolvedValue({ data: operational });
+    (analyticsAPI.getFailures as Mock).mockResolvedValue({ data: failures });
+    (analyticsAPI.getKnowledge as Mock).mockResolvedValue({ data: knowledge });
+    (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
+    (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
+  });
+
+  it('renders a knowledge library link when knowledge_item_id is present', async () => {
+    (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decisionWithKnowledgeOpp('ki-abc-123') });
+    await render();
+    const links = container.querySelectorAll('a[href*="/knowledge"]');
+    expect(links.length).toBeGreaterThan(0);
+    const knowledgeLink = Array.from(links).find(l => l.getAttribute('href')?.includes('item=ki-abc-123'));
+    expect(knowledgeLink).toBeTruthy();
+  });
+
+  it('link href includes source=decision', async () => {
+    (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decisionWithKnowledgeOpp('ki-abc-123') });
+    await render();
+    const links = container.querySelectorAll('a[href*="/knowledge"]');
+    const knowledgeLink = Array.from(links).find(l => l.getAttribute('href')?.includes('item=ki-abc-123'));
+    expect(knowledgeLink?.getAttribute('href')).toContain('source=decision');
+  });
+
+  it('does not render a knowledge library link when knowledge_item_id is missing', async () => {
+    (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decisionWithKnowledgeOpp(undefined) });
+    await render();
+    const links = Array.from(container.querySelectorAll('a[href*="/knowledge"]')).filter(
+      l => l.getAttribute('href')?.includes('source=decision')
+    );
+    expect(links.length).toBe(0);
+  });
+
+  it('does not render a knowledge library link when knowledge_item_id is null', async () => {
+    (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decisionWithKnowledgeOpp(null) });
+    await render();
+    const links = Array.from(container.querySelectorAll('a[href*="/knowledge"]')).filter(
+      l => l.getAttribute('href')?.includes('source=decision')
+    );
+    expect(links.length).toBe(0);
+  });
+});

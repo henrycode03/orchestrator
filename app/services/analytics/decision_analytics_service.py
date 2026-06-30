@@ -679,6 +679,7 @@ class DecisionAnalyticsService:
                     {
                         "kind": "knowledge",
                         "target": item["title"] or item["knowledge_item_id"],
+                        "knowledge_item_id": item["knowledge_item_id"],
                         "metric_label": "Effectiveness",
                         "metric_value": item["effectiveness"],
                         "confidence": _confidence(
