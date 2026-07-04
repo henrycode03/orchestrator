@@ -449,11 +449,16 @@ class TestBackwardCompat:
 
 class TestRegressionP1f:
     def test_hg_flags_default_off(self):
-        assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
-        assert settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED is False
-        assert settings.WORKING_MEMORY_PERSISTENCE_ENABLED is False
-        assert settings.WORKING_MEMORY_RENDER_ENABLED is False
-        assert settings.WORKING_MEMORY_INJECTION_ENABLED is False
+        # Phase 18H: verify repository defaults directly, independent of
+        # local `.env` (which may enable these for pilot validation).
+        from app.tests.conftest import repo_default_settings
+
+        defaults = repo_default_settings()
+        assert defaults.HUMAN_GUIDANCE_TABLE_ENABLED is False
+        assert defaults.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED is False
+        assert defaults.WORKING_MEMORY_PERSISTENCE_ENABLED is False
+        assert defaults.WORKING_MEMORY_RENDER_ENABLED is False
+        assert defaults.WORKING_MEMORY_INJECTION_ENABLED is False
 
     def test_p1e_effective_activation_unchanged(
         self, db_session: Session, project: Project

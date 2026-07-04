@@ -660,8 +660,27 @@ class TestSmoke:
         user: User,
         project: Project,
         running_session: SessionModel,
+        monkeypatch,
     ):
-        """Both flags off: create guidance + conflicting task → no warning."""
+        """Both flags off: create guidance + conflicting task → no warning.
+
+        Phase 18H: pin to repository defaults via monkeypatch rather than
+        trusting the live `settings` singleton, which local `.env` may
+        override for pilot validation (see conftest.repo_default_settings).
+        """
+        from app.tests.conftest import repo_default_settings
+
+        defaults = repo_default_settings()
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            defaults.HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED",
+            defaults.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED,
+        )
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
         assert settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED is False
 

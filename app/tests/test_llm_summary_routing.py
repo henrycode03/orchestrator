@@ -320,14 +320,16 @@ class TestFallbackCase:
 
 class TestRenderInjectionUnchanged:
     def test_render_flag_defaults_false(self):
-        from app.config import settings
+        # Phase 18H: verify the repository default, independent of local
+        # `.env` (which may enable this for pilot validation).
+        from app.tests.conftest import repo_default_settings
 
-        assert settings.WORKING_MEMORY_RENDER_ENABLED is False
+        assert repo_default_settings().WORKING_MEMORY_RENDER_ENABLED is False
 
     def test_injection_flag_defaults_false(self):
-        from app.config import settings
+        from app.tests.conftest import repo_default_settings
 
-        assert settings.WORKING_MEMORY_INJECTION_ENABLED is False
+        assert repo_default_settings().WORKING_MEMORY_INJECTION_ENABLED is False
 
     def test_write_working_memory_no_op_when_render_only_flag_set(
         self, tmp_path, monkeypatch

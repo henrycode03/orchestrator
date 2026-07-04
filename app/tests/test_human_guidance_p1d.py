@@ -558,7 +558,22 @@ class TestRegressionP1d:
         user: User,
         project: Project,
         running_session: SessionModel,
+        monkeypatch,
     ):
+        # Phase 18H: pin to repository defaults, independent of local `.env`.
+        from app.tests.conftest import repo_default_settings
+
+        defaults = repo_default_settings()
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            defaults.HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED",
+            defaults.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED,
+        )
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
         assert settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED is False
 
@@ -701,8 +716,25 @@ class TestSmokeP1d:
         user: User,
         project: Project,
         running_session: SessionModel,
+        monkeypatch,
     ):
-        """Smoke 1: both flags OFF → no conflict rows, no LogEntry warnings."""
+        """Smoke 1: both flags OFF → no conflict rows, no LogEntry warnings.
+
+        Phase 18H: pin to repository defaults, independent of local `.env`.
+        """
+        from app.tests.conftest import repo_default_settings
+
+        defaults = repo_default_settings()
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            defaults.HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED",
+            defaults.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED,
+        )
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
         assert settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED is False
 

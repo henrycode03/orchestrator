@@ -201,8 +201,29 @@ class TestModelActivation:
 
 class TestServiceActivation:
     def test_effective_false_when_global_flags_off(
-        self, db_session: Session, project: Project
+        self, db_session: Session, project: Project, monkeypatch
     ):
+        # Phase 18H: pin to repository defaults, independent of local `.env`.
+        # This test's effective-activation result is bounded by three global
+        # flags (table, persistence, injection), so all three must be pinned.
+        from app.tests.conftest import repo_default_settings
+
+        defaults = repo_default_settings()
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            defaults.HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
+        monkeypatch.setattr(
+            settings,
+            "WORKING_MEMORY_PERSISTENCE_ENABLED",
+            defaults.WORKING_MEMORY_PERSISTENCE_ENABLED,
+        )
+        monkeypatch.setattr(
+            settings,
+            "WORKING_MEMORY_INJECTION_ENABLED",
+            defaults.WORKING_MEMORY_INJECTION_ENABLED,
+        )
         # All global flags are False by default
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
 
@@ -251,8 +272,16 @@ class TestServiceActivation:
         assert result["requested"]["table_enabled"] is False
 
     def test_readiness_blocking_includes_global_flags_off(
-        self, db_session: Session, project: Project
+        self, db_session: Session, project: Project, monkeypatch
     ):
+        # Phase 18H: pin to repository defaults, independent of local `.env`.
+        from app.tests.conftest import repo_default_settings
+
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            repo_default_settings().HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
         set_project_activation(db_session, project.id, _all_flags_on())
 
@@ -297,7 +326,16 @@ class TestActivationAPI:
         db_session: Session,
         user: User,
         project: Project,
+        monkeypatch,
     ):
+        # Phase 18H: pin to repository defaults, independent of local `.env`.
+        from app.tests.conftest import repo_default_settings
+
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            repo_default_settings().HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
         resp = client.get(f"/api/v1/projects/{project.id}/guidance/readiness")
         assert resp.status_code == 200
         data = resp.json()
@@ -418,7 +456,15 @@ class TestActivationAPI:
 
 
 class TestRegressionP1e:
-    def test_table_flag_defaults_off(self):
+    def test_table_flag_defaults_off(self, monkeypatch):
+        # Phase 18H: pin to repository defaults, independent of local `.env`.
+        from app.tests.conftest import repo_default_settings
+
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            repo_default_settings().HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
 
     def test_conflict_detection_defaults_off(self):
@@ -496,8 +542,19 @@ class TestSmokeP1e:
         db_session: Session,
         user: User,
         project: Project,
+        monkeypatch,
     ):
-        """Smoke 1: all global flags OFF, project activation ON → effective all false."""
+        """Smoke 1: all global flags OFF, project activation ON → effective all false.
+
+        Phase 18H: pin to repository defaults, independent of local `.env`.
+        """
+        from app.tests.conftest import repo_default_settings
+
+        monkeypatch.setattr(
+            settings,
+            "HUMAN_GUIDANCE_TABLE_ENABLED",
+            repo_default_settings().HUMAN_GUIDANCE_TABLE_ENABLED,
+        )
         assert settings.HUMAN_GUIDANCE_TABLE_ENABLED is False
 
         # Enable project activation with all flags

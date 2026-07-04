@@ -450,12 +450,18 @@ class TestFeatureFlagDefaults:
         assert flag_on == direct
 
     def test_no_other_flags_affected(self):
-        """Other feature flags must be unaffected by REDUCED_PLANNING_PROMPT_ENABLED."""
-        from app.config import settings
+        """Other feature flags must be unaffected by REDUCED_PLANNING_PROMPT_ENABLED.
 
-        assert settings.PSS_CONTINUATION_INJECTION_ENABLED is False
-        assert settings.ARTIFACT_CONTINUATION_ENABLED is False
-        assert settings.WORKING_MEMORY_INJECTION_ENABLED is False
+        Phase 18H: verify repository defaults, independent of local `.env`
+        (which may enable WORKING_MEMORY_INJECTION_ENABLED for pilot
+        validation).
+        """
+        from app.tests.conftest import repo_default_settings
+
+        defaults = repo_default_settings()
+        assert defaults.PSS_CONTINUATION_INJECTION_ENABLED is False
+        assert defaults.ARTIFACT_CONTINUATION_ENABLED is False
+        assert defaults.WORKING_MEMORY_INJECTION_ENABLED is False
 
 
 # ---------------------------------------------------------------------------

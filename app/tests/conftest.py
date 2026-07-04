@@ -10,11 +10,24 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.v1.router import api_router
-from app.config import settings
+from app.config import Settings, settings
 from app.database import get_db
 from app.dependencies import get_current_active_user, get_current_user
 from app.models import Base, User
 from app.services.auth_rate_limit import clear_auth_rate_limits
+
+
+def repo_default_settings() -> Settings:
+    """Repository-default Settings, bypassing any local `.env`.
+
+    Phase 18H: flag-default assertions must verify what a fresh clone gets,
+    not what this machine's local `.env` happens to set. Local `.env` may
+    legitimately diverge from repo defaults for pilot validation (see
+    `docs/roadmap/feature-flag-matrix.md`); tests asserting "repository
+    default is False" must not depend on that divergence being absent.
+    """
+    return Settings(_env_file=None)
+
 
 SEMANTIC_TEST_MODULES = {
     "test_decision_timeline_endpoint.py",

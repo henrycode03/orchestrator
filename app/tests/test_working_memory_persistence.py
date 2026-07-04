@@ -74,26 +74,28 @@ def _make_logger() -> MagicMock:
 
 
 def test_persistence_flag_defaults_false():
-    from app.config import settings
+    # Phase 18H: verify the repository default, independent of local `.env`
+    # (which may enable this for pilot validation).
+    from app.tests.conftest import repo_default_settings
 
-    assert settings.WORKING_MEMORY_PERSISTENCE_ENABLED is False, (
+    assert repo_default_settings().WORKING_MEMORY_PERSISTENCE_ENABLED is False, (
         "WORKING_MEMORY_PERSISTENCE_ENABLED must default to False — "
         "persistence must be opt-in"
     )
 
 
 def test_render_flag_defaults_false():
-    from app.config import settings
+    from app.tests.conftest import repo_default_settings
 
     assert (
-        settings.WORKING_MEMORY_RENDER_ENABLED is False
+        repo_default_settings().WORKING_MEMORY_RENDER_ENABLED is False
     ), "WORKING_MEMORY_RENDER_ENABLED must default to False"
 
 
 def test_injection_flag_defaults_false():
-    from app.config import settings
+    from app.tests.conftest import repo_default_settings
 
-    assert settings.WORKING_MEMORY_INJECTION_ENABLED is False, (
+    assert repo_default_settings().WORKING_MEMORY_INJECTION_ENABLED is False, (
         "WORKING_MEMORY_INJECTION_ENABLED must default to False — "
         "injection must be opt-in"
     )
