@@ -327,6 +327,7 @@ def test_reset_active_attempts_cancels_pending_and_running_executions(db_session
     assert link.completed_at is None
     assert execution.status == TaskStatus.CANCELLED
     assert execution.completed_at is not None
+    assert execution.failure_category == "manual_stop"
 
 
 def test_task_execution_id_from_context_rejects_bool_and_non_int():

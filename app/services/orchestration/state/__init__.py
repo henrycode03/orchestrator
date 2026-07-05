@@ -23,6 +23,7 @@ from .persistence import (
 from .session_state import (
     clear_session_alert,
     mark_session_completed,
+    mark_session_failed,
     mark_session_paused,
     mark_session_resumed,
     mark_session_running,
@@ -42,6 +43,7 @@ __all__ = [
     "emit_intent_outcome_mismatch",
     "find_latest_orchestration_event",
     "mark_session_completed",
+    "mark_session_failed",
     "mark_session_paused",
     "mark_session_resumed",
     "mark_session_running",

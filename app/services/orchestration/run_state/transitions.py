@@ -282,6 +282,8 @@ def reset_active_attempts_for_session_stop(
     for execution in active_executions:
         execution.status = TaskStatus.CANCELLED
         execution.completed_at = execution.completed_at or now
+        if getattr(execution, "failure_category", None) is None:
+            execution.failure_category = "manual_stop"
 
     running_links = (
         db.query(SessionTask)

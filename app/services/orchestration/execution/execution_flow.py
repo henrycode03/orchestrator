@@ -561,7 +561,12 @@ def assess_step_execution(
     relaxed_mode: bool = False,
 ) -> StepExecutionAssessment:
     step_output = str(step_result.get("output", ""))
-    step_status = "success" if step_result.get("status") != "failed" else "failed"
+    raw_status = str(step_result.get("status") or "").strip().lower()
+    step_status = (
+        "success"
+        if raw_status in {"completed", "complete", "success", "succeeded", "done"}
+        else "failed"
+    )
     error_message = str(step_result.get("error", ""))
     missing_files: List[str] = []
     tool_failures: List[str] = []

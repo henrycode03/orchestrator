@@ -2577,7 +2577,7 @@ export default function SessionDetail() {
         tasksCount={tasks.length}
       />
 
-      <OperatorStatePanel state={session.orchestration_state} />
+      <OperatorStatePanel state={session.orchestration_state} sessionStatus={session.status} />
 
       <SessionTabs
         activeTab={activeTab}

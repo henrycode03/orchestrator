@@ -83,6 +83,22 @@ describe('OperatorStatePanel', () => {
     expect(badge?.textContent).toBe('Terminal')
   })
 
+  it('shows Running badge when the session status is running', () => {
+    act(() => {
+      root.render(<OperatorStatePanel state={base({ is_terminal: false })} sessionStatus="running" />)
+    })
+    const badge = container.querySelector('[data-testid="operator-state-terminal"]')
+    expect(badge?.textContent).toBe('Running')
+  })
+
+  it('shows Active badge when non-terminal and not running (e.g. paused)', () => {
+    act(() => {
+      root.render(<OperatorStatePanel state={base({ is_terminal: false })} sessionStatus="paused" />)
+    })
+    const badge = container.querySelector('[data-testid="operator-state-terminal"]')
+    expect(badge?.textContent).toBe('Active')
+  })
+
   it('renders coordinator when present', () => {
     render(base({ coordinator: 'ExecutionCoordinator' }))
     const el = container.querySelector('[data-testid="operator-state-coordinator"]')

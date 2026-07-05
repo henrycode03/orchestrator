@@ -162,6 +162,22 @@ def mark_session_completed(
     set_session_alert(session, None, None)
 
 
+def mark_session_failed(
+    session: Any | None,
+    *,
+    failed_at: datetime | None = None,
+    alert_level: str | None = "error",
+    alert_message: str | None = None,
+) -> None:
+    if not session:
+        return
+    session.status = "failed"
+    session.is_active = False
+    if failed_at is not None:
+        session.stopped_at = failed_at
+    set_session_alert(session, alert_level, alert_message)
+
+
 def clear_session_alert(session: Any | None) -> None:
     set_session_alert(session, None, None)
 

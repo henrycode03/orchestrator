@@ -734,10 +734,17 @@ const phaseColorClass = (phase: string | null): string => {
 
 interface OperatorStatePanelProps {
   state: OrchestrationState | null | undefined;
+  sessionStatus?: string | null;
 }
 
-export function OperatorStatePanel({ state }: OperatorStatePanelProps) {
+export function OperatorStatePanel({ state, sessionStatus }: OperatorStatePanelProps) {
   if (!state) return null;
+
+  const stateLabel = state.is_terminal
+    ? 'Terminal'
+    : sessionStatus === 'running'
+      ? 'Running'
+      : 'Active';
 
   const phaseLabel = state.current_phase
     ? (PHASE_LABELS[state.current_phase] ?? humanizeToken(state.current_phase))
@@ -771,7 +778,7 @@ export function OperatorStatePanel({ state }: OperatorStatePanelProps) {
                 : 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
             )}
           >
-            {state.is_terminal ? 'Terminal' : 'Active'}
+            {stateLabel}
           </span>
         </div>
         {state.coordinator && (

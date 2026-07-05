@@ -42,6 +42,7 @@ from app.services.orchestration.run_state import (
 )
 from app.services.orchestration.state.session_state import (
     clear_session_alert,
+    mark_session_failed,
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
@@ -565,10 +566,14 @@ def reconcile_terminal_running_sessions(
             continue
 
         if latest_execution.status == TaskStatus.FAILED:
-            next_status = "paused"
             alert_level = "error"
             alert_message = (
                 "Recovered session status after its latest task execution failed."
+            )
+            next_status = (
+                "failed"
+                if latest_execution.failure_category == "execution_failure"
+                else "paused"
             )
         elif latest_execution.status in (TaskStatus.CANCELLED, TaskStatus.DONE):
             next_status = "stopped"
@@ -581,7 +586,14 @@ def reconcile_terminal_running_sessions(
             continue
 
         previous_status = session.status
-        if next_status == "paused":
+        if next_status == "failed":
+            mark_session_failed(
+                session,
+                failed_at=session.stopped_at or datetime.now(timezone.utc),
+                alert_level=alert_level,
+                alert_message=alert_message,
+            )
+        elif next_status == "paused":
             mark_session_paused(
                 session,
                 alert_level=alert_level,

@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.models import (
+    ExecutionFailureSummary,
     LogEntry,
     Project,
     Session as SessionModel,
@@ -17,6 +18,14 @@ from app.models import (
 )
 from app.config import settings
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.execution.execution_flow import assess_step_execution
+from app.services.orchestration.phases.execution_loop import (
+    _is_terminal_verification_only_failure,
+    _persist_terminal_execution_failure,
+)
+from app.services.orchestration.phases.execution_local_steps import (
+    _execute_simple_verification_step,
+)
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
@@ -618,3 +627,168 @@ def test_workspace_contract_detects_runtime_path_mismatch(tmp_path):
     assert result["expected_root"] == str(expected_root.resolve())
     assert result["task_dir"] == str(task_dir.resolve())
     assert "runtime task workspace path" in str(result["reason"])
+
+
+def test_failed_expected_status_is_not_treated_as_success(db_session, tmp_path):
+    project_dir = tmp_path / "verification-status"
+    project_dir.mkdir()
+
+    assessment = assess_step_execution(
+        db=db_session,
+        session_id=991,
+        task_id=992,
+        project_dir=project_dir,
+        step={
+            "commands": ['python -c "import sys; sys.exit(7)"'],
+            "verification": 'python -c "import sys; sys.exit(7)"',
+            "expected_files": [],
+            "ops": [],
+        },
+        step_result={
+            "status": "failed_expected",
+            "output": "Command exited with code 7 (explicit failure)",
+            "verification_output": "Verification command exited with code 7",
+            "files_changed": [],
+        },
+        step_started_at=datetime.now(timezone.utc),
+        validation_profile="mutation",
+    )
+
+    assert assessment.step_status == "failed"
+    assert "code 7" in assessment.verification_output
+
+
+def test_literal_sys_exit_verification_command_runs_locally(tmp_path):
+    project_dir = tmp_path / "literal-sys-exit"
+    project_dir.mkdir()
+    command = 'python -c "import sys; sys.exit(7)"'
+
+    result = _execute_simple_verification_step(
+        project_dir=project_dir,
+        commands=[command],
+        verification_command=command,
+    )
+
+    assert result is not None
+    assert result["status"] == "failed"
+    assert result["files_changed"] == []
+
+
+def test_literal_sys_exit_command_runs_locally_without_verification_field(tmp_path):
+    project_dir = tmp_path / "literal-sys-exit-no-verification"
+    project_dir.mkdir()
+    command = 'python -c "import sys; sys.exit(7)"'
+
+    result = _execute_simple_verification_step(
+        project_dir=project_dir,
+        commands=[command],
+        verification_command=None,
+    )
+
+    assert result is not None
+    assert result["status"] == "failed"
+    assert result["files_changed"] == []
+
+
+def test_terminal_verification_only_failure_guard_is_narrow():
+    failing_step = {
+        "commands": ['python -c "import sys; sys.exit(7)"'],
+        "verification": 'python -c "import sys; sys.exit(7)"',
+        "expected_files": [],
+        "ops": [],
+    }
+
+    assert _is_terminal_verification_only_failure(
+        step=failing_step,
+        step_result={"verification_output": "exit code 7"},
+        step_status="failed",
+    )
+    assert _is_terminal_verification_only_failure(
+        step={**failing_step, "verification": None},
+        step_result={"verification_output": "exit code 7"},
+        step_status="failed",
+    )
+    assert not _is_terminal_verification_only_failure(
+        step={**failing_step, "expected_files": ["src/app.py"]},
+        step_result={"verification_output": "exit code 7"},
+        step_status="failed",
+    )
+    assert not _is_terminal_verification_only_failure(
+        step={**failing_step, "verification": 'python -c "print(1)"'},
+        step_result={"verification_output": "exit code 7"},
+        step_status="failed",
+    )
+
+
+def test_terminal_execution_failure_persists_category_summary_and_final_state(
+    db_session, tmp_path
+):
+    project = Project(
+        name="Execution Failure Persistence",
+        workspace_path=str(tmp_path / "workspace-root"),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Verification Failure Session",
+        status="running",
+        is_active=True,
+    )
+    task = Task(
+        project_id=project.id,
+        title="Force explicit execution failure",
+        description='Run python -c "import sys; sys.exit(7)" and preserve failure.',
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-explicit-failure",
+    )
+    db_session.add_all([session, task])
+    db_session.commit()
+    db_session.refresh(session)
+    db_session.refresh(task)
+
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+    db_session.refresh(execution)
+
+    _persist_terminal_execution_failure(
+        db=db_session,
+        session=session,
+        task=task,
+        session_task_link=link,
+        task_execution_id=execution.id,
+        error_message="Verification command failed with exit code 7",
+        failure_category="execution_failure",
+    )
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+    db_session.refresh(link)
+    db_session.refresh(execution)
+    summary = (
+        db_session.query(ExecutionFailureSummary)
+        .filter(ExecutionFailureSummary.session_id == session.id)
+        .one()
+    )
+
+    assert execution.status == TaskStatus.FAILED
+    assert execution.failure_category == "execution_failure"
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    assert session.status == "failed"
+    assert session.is_active is False
+    assert "Verification command failed" in task.error_message
+    assert "Force explicit execution failure" in summary.summary

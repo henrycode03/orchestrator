@@ -290,6 +290,8 @@ def _python_inline_verification_script(
     )
     if any(fragment in lowered for fragment in blocked_fragments):
         return None
+    if _is_literal_sys_exit_script(script):
+        return script
     path_check = "pathlib.path(" in lowered and any(
         fragment in lowered for fragment in (".read_text(", ".exists(")
     )
@@ -302,6 +304,37 @@ def _python_inline_verification_script(
     if not any(fragment in lowered for fragment in ("sys.exit(", "print(")):
         return None
     return script
+
+
+def _is_literal_sys_exit_script(script: str) -> bool:
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return False
+
+    body = list(tree.body)
+    if body and isinstance(body[0], ast.Import):
+        names = {alias.name for alias in body[0].names}
+        if names != {"sys"}:
+            return False
+        body = body[1:]
+
+    if len(body) != 1 or not isinstance(body[0], ast.Expr):
+        return False
+    call = body[0].value
+    if not isinstance(call, ast.Call):
+        return False
+    if not (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "exit"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "sys"
+    ):
+        return False
+    if len(call.args) != 1 or call.keywords:
+        return False
+    arg = call.args[0]
+    return isinstance(arg, ast.Constant) and isinstance(arg.value, int)
 
 
 def _patch_python_verification_cmd(command: str) -> str:
@@ -677,6 +710,8 @@ def _execute_simple_verification_step(
     if not verification and _is_safe_compileall_command(
         command, project_dir=project_dir
     ):
+        command_to_run = command
+    elif not verification and command_is_simple_verification:
         command_to_run = command
     elif not verification:
         return None

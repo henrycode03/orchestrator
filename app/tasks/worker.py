@@ -97,6 +97,7 @@ from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
     ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
 )
+from app.services.orchestration.state.execution_states import TerminalReason
 from app.services.workspace.system_settings import get_effective_policy_profile
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
@@ -108,6 +109,7 @@ from app.services.session.session_execution_service import (
     mark_execution_running,
 )
 from app.services.orchestration.state.session_state import (
+    mark_session_failed,
     mark_session_paused,
     mark_session_running,
 )
@@ -2062,13 +2064,20 @@ def execute_orchestration_task(
                 reason=str(step_loop_result.get("reason") or "task_failed"),
                 level="WARN",
             )
-            mark_session_paused(
-                session,
-                alert_level="error",
-                alert_message=str(step_loop_result.get("reason") or "task_failed")[
-                    :2000
-                ],
-            )
+            failure_reason = str(step_loop_result.get("reason") or "task_failed")
+            if failure_reason == TerminalReason.VERIFICATION_FAILED:
+                mark_session_failed(
+                    session,
+                    failed_at=datetime.now(timezone.utc),
+                    alert_level="error",
+                    alert_message=failure_reason[:2000],
+                )
+            else:
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=failure_reason[:2000],
+                )
             db.commit()
         elif step_loop_result.get("status") == "completed":
             _emit_task1_product_event(

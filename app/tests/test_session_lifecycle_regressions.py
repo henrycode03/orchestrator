@@ -278,6 +278,46 @@ def test_reconcile_terminal_running_session_after_failed_execution(db_session):
     assert session.last_alert_level == "error"
 
 
+def test_reconcile_execution_failure_category_sets_failed_session(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.FAILED)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        failure_category="execution_failure",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    db_session.add_all([execution, link])
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == [
+        {
+            "session_id": session.id,
+            "task_execution_id": execution.id,
+            "previous_status": "running",
+            "next_status": "failed",
+            "terminal_task_status": "failed",
+        }
+    ]
+    assert session.status == "failed"
+    assert session.is_active is False
+    assert session.last_alert_level == "error"
+
+
 def test_reconcile_terminal_session_is_idempotent_after_failure(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="running", is_active=True)
