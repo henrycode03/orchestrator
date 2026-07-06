@@ -272,6 +272,27 @@ when the lock is older than `RELAY_LOCK_STALE_AFTER_S` (default 21600 seconds).
 Only delete `relay/relay.lock` manually after confirming the recorded PID is
 not an active relay process.
 
+**Relay Permission Recovery:** if `relay/metrics.jsonl` (or another relay
+runtime file) stops being writable — typically after a run as a different
+user (e.g. root) leaves files owned outside the operator's group — fix it by
+restoring the group-writable/setgid pattern rather than loosening
+permissions to world-writable:
+
+```bash
+chgrp -R ubuntu relay/
+chmod 2775 relay/
+chmod 664 relay/metrics.jsonl relay/relay.log relay/output.md \
+  relay/session_snapshot.json 2>/dev/null
+```
+
+`chmod 2775` sets the setgid bit on `relay/` so new files created by any
+future run automatically inherit group `ubuntu`, preventing the ownership
+drift from recurring. Confirm with `stat -c "%A %U:%G %n" relay relay/*` —
+`relay/` should show `drwxrwsr-x` and runtime files should show
+`rw-rw-r--`, both owned or grouped `ubuntu`. Never leave relay runtime files
+group- or world-unwritable, and never resolve this by running the relay as
+root.
+
 **Failure Classification:** relay failures are standardized in both
 `relay/relay.log` and `relay/metrics.jsonl` with `failure_reason` /
 `failure_category`:
@@ -356,7 +377,7 @@ validator/recovery decisions, and nothing currently enforces its retention.
 To collect and summarize retained evidence:
 
 ```bash
-python scripts/phase18e_collect_real_session_validator_evidence.py --db orchestrator.db
+python scripts/session_and_replay/phase18e_collect_real_session_validator_evidence.py --db orchestrator.db
 ```
 
 Run this after every evidence-gated validation batch (Candidate Recovery,

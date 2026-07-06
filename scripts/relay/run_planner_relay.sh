@@ -64,7 +64,7 @@ done
 
 bundle_replay() {
     mkdir -p "$REPLAY_DIR"
-    chmod a+rwx "$REPLAY_DIR"
+    chmod a+rwx "$REPLAY_DIR" 2>/dev/null || true
 
     local timestamp
     timestamp="$(date -u +%Y%m%d-%H%M%S)"
@@ -100,7 +100,7 @@ with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
 
 print(archive)
 PYEOF
-    chmod a+rw "$archive"
+    chmod a+rw "$archive" 2>/dev/null || true
     echo "[wrapper] Replay package created: $archive"
 }
 
@@ -134,7 +134,7 @@ else
     # Step 1: copy HANDOFF → input
     echo "[wrapper] Copying HANDOFF_DRAFT.md → relay/input.md"
     cp "$HANDOFF" "$INPUT"
-    chmod a+rw "$INPUT"
+    chmod a+rw "$INPUT" 2>/dev/null || true
 fi
 
 # Step 2: run the stateless relay
@@ -160,7 +160,7 @@ fi
 # Step 4: copy output → NEXT_PROMPT
 echo "[wrapper] Copying relay/output.md → NEXT_PROMPT.md"
 cp "$OUTPUT" "$NEXT_PROMPT"
-chmod a+rw "$NEXT_PROMPT"
+chmod a+rw "$NEXT_PROMPT" 2>/dev/null || true
 
 echo ""
 echo "=== Done ==="

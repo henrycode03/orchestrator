@@ -56,7 +56,9 @@ See the [Setup Guide](SETUP.md) for step-by-step instructions:
 - **Windows WSL2** (Ollama, no OpenClaw) → [Windows Ollama setup](SETUP.md#windows-nvidia-gpu--ollama-no-openclaw)
 - **Windows WSL2** (llama.cpp, no OpenClaw) → [Windows llama.cpp setup](SETUP.md#windows-llamacpp-no-openclaw)
 
-Linux `start.sh` runs the API, worker, Qdrant, and React dashboard as native processes. Windows/WSL Docker setup uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant. On the compact Ollama laptop, use `./wsl-start.sh --ollama`; on the llama.cpp Windows device, use plain `./wsl-start.sh`. Use the ingest command for the runtime you are actually running: native Linux uses `venv/bin/python scripts/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; Docker/WSL Ollama uses `./wsl-start.sh --ollama --ingest-knowledge`.
+Linux `start.sh` runs the API, worker, Qdrant, and React dashboard as native processes. Windows/WSL Docker setup uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant. On the compact Ollama laptop, use `./wsl-start.sh --ollama`; on the llama.cpp Windows device, use plain `./wsl-start.sh`. Use the ingest command for the runtime you are actually running: native Linux uses `venv/bin/python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; Docker/WSL Ollama uses `./wsl-start.sh --ollama --ingest-knowledge`.
+
+For day-2 operations (startup/shutdown, backup/restore, post-upgrade verification, the Planner Relay browser session, and database concurrency notes), see the [Operations Guide](OPERATIONS.md).
 
 ## Stack
 
@@ -87,8 +89,10 @@ orchestrator/
 │   └── workflow-templates/       YAML workflow template definitions
 ├── frontend/src/                 React dashboard
 ├── knowledge/                    Runtime knowledge source files
-├── scripts/                      Operational helpers
+├── scripts/                      Operational helpers (developer_utilities/, maintenance/,
+│                                  planning_and_knowledge/, session_and_replay/, evals/, relay/)
 ├── SETUP.md                      Step-by-step setup guide (Linux + Windows)
+├── OPERATIONS.md                 Day-2 operations guide (backup/restore, upgrades, Planner Relay)
 ├── docker-compose.yml            Linux: qdrant only
 ├── docker-compose.windows.yml    Windows: full stack (qdrant + redis + app + worker)
 ├── start.sh                      Linux native startup
@@ -164,10 +168,11 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | `./wsl-start.sh` | Start WSL Docker backend and dashboard for the Windows llama.cpp device |
 | `./wsl-start.sh --ollama --ingest-knowledge` | Start Ollama WSL runtime and ingest `knowledge/` into Docker runtime |
 | `./stop_all.sh` | Stop all processes |
-| `./scripts/orchestrator-mobile-api.sh` | Query mobile API from shell |
-| `./scripts/security_check.sh` | Run security audit |
-| `./scripts/capture_replay_report.py` | Replay reducer report from event journal |
-| `./scripts/capture_task_evidence_bundle.py` | Full evidence bundle for one TaskExecution |
+| `./scripts/developer_utilities/orchestrator-mobile-api.sh` | Query mobile API from shell |
+| `./scripts/developer_utilities/security_check.sh` | Run security audit |
+| `./scripts/session_and_replay/capture_replay_report.py` | Replay reducer report from event journal |
+| `./scripts/session_and_replay/capture_task_evidence_bundle.py` | Full evidence bundle for one TaskExecution |
+| `./scripts/relay/run_planner_relay.sh` | Run the Planner Relay (see [Operations Guide](OPERATIONS.md)) |
 
 ## Troubleshooting
 
@@ -183,24 +188,27 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | Mobile status pages empty | Set `MOBILE_GATEWAY_API_KEY` in `.env` |
 | OpenClaw operations fail | Confirm `OPENCLAW_GATEWAY_URL` points to port `8000`, not `8001` |
 
-## Workflow Infrastructure
+## Planner Relay (Workflow Infrastructure)
 
-- Start browser session
-docker compose -f docker-compose.browser-session.yml up -d
+The Planner Relay bridges the repo's file-based planning handoff
+(`HANDOFF_DRAFT.md` → `NEXT_PROMPT.md`) to a persistent, human-approved
+ChatGPT browser session. It never sends without operator confirmation and
+never touches Orchestrator's planner/validator/execution code.
 
-- Verify
-docker ps
-curl http://127.0.0.1:6080/vnc.html
+```bash
+docker compose -f docker-compose.browser-session.yml up -d   # start browser session
+scripts/relay/check_relay.sh                                 # preflight (container, CDP, noVNC, login)
+scripts/relay/run_planner_relay.sh                            # run relay (Send? [y/N] prompt)
+```
 
-- Open
-http://localhost:6080
-
-- If needed, verify CDP
-curl http://127.0.0.1:9222/json/version
+Open `http://localhost:6080` to view/log in to the browser session. See the
+[Operations Guide](OPERATIONS.md#browser-session--wf-b--wf-c--wf-d) for the
+full runbook: preflight checks, conversation URL pinning, metrics, resume
+after interruption, replay bundles, and permission recovery.
 
 ---
 
-**Last updated: 2026-07-04**
+**Last updated: 2026-07-06**
 
 <p align="center">
   <a href="https://github.com/henrycode03/orchestrator/stargazers">

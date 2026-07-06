@@ -7,7 +7,7 @@ reports latency, output length, quality classification, and audit completeness.
 No runtime mutation. No database. Offline only.
 
 Usage:
-    PYTHONPATH=. python3 scripts/reflection_replay.py [--profile standard|medium|low_resource]
+    PYTHONPATH=. python3 scripts/maintenance/reflection_replay.py [--profile standard|medium|low_resource]
 """
 
 from __future__ import annotations

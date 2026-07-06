@@ -17,6 +17,7 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `workspace_evidence_report.py` - summarize workspace/change-set evidence for recent task executions.
 - `planning_contract_report.py` - summarize recent planning contract violations.
 - `failure_taxonomy.py` - classify recent failures into reusable failure buckets.
+- `phase18e_collect_real_session_validator_evidence.py` - read-only aggregation of Phase 18B/18C validator/recovery telemetry from persisted sessions and their event journals.
 
 ## Planning And Knowledge
 
@@ -49,6 +50,9 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `validate_repo_memory_injection.py` - integration check for RepoMemory block assembly and injection gate.
 - `wm_off_runner.py` - WM OFF arm runner for Priority 5 WorkingMemory A/B measurement: creates 3 Python package projects × 6 tasks each, dispatches sequentially, collects debug_repair_attempted and planning repair events per task. Saves raw JSON to `docs/roadmap/reports/maintenance/`.
 - `wm_off_recovery.py` - recovery companion to `wm_off_runner.py`: monitors in-flight tasks from a prior runner session, re-dispatches failed/cancelled Task 1s, and collects full event data for the final report.
+- `phase18f_seed_real_session_evidence.py` - evidence-generation harness that seeds persisted project/session/task rows and candidate validation events for Phase 18F; no validator/recovery/policy/feature-flag defaults changed.
+- `phase18i_machine_a_limited_validation.py` - evidence-only harness running the Candidate Recovery path with Machine A standard runtime inputs; restores feature-flag settings after each controlled session.
+- `reflection_replay.py` - Phase 17B-V offline reflection replay tool: replays `ReflectionRetryStrategy` against a synthetic failure corpus (no runtime mutation, no database).
 
 Removed obsolete scripts: old `/tmp` log sync/status/cleanup helpers. Current
 startup no longer writes logs to `/tmp`.
