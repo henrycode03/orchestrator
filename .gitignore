@@ -127,11 +127,6 @@ graphify-out/
 
 # BEGIN OpenClaw workspace guard
 .agent/
-__pycache__/
-node_modules/
-.venv/
-venv/
-.pytest_cache/
 .openclaw/
 HEARTBEAT.md
 IDENTITY.md

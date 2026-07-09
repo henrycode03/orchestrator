@@ -808,6 +808,31 @@ def compute_workspace_checksum(project_dir: Path) -> Dict[str, str]:
     return checksums
 
 
+def has_recent_file_activity(project_dir: Path, since_epoch: float) -> bool:
+    """Cheap positive-evidence check: any file under ``project_dir`` touched
+    at/after ``since_epoch``.
+
+    Phase 22C-0: used as a fallback verification signal when OpenClaw's own
+    ``workspaceDir`` report is absent from a completed result, so a
+    completion is never accepted on missing evidence alone. Deliberately
+    cheaper than `compute_workspace_checksum` (no hashing, short-circuits on
+    the first match, prunes ignored directories during the walk) since it
+    only needs to run on that already-exceptional path.
+    """
+
+    if not project_dir.exists():
+        return False
+    for root, dirnames, filenames in os.walk(project_dir):
+        dirnames[:] = [d for d in dirnames if d not in _CHECKSUM_IGNORED]
+        for name in filenames:
+            try:
+                if os.stat(os.path.join(root, name)).st_mtime >= since_epoch:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 def detect_scope_violations(
     project_dir: Path,
     expected_files: List[str],

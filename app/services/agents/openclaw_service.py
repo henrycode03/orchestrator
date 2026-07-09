@@ -50,6 +50,18 @@ from app.services.workspace.project_isolation_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.services.orchestration.validation.git_containment_guard import (
+    build_git_containment_env,
+    cleanup_git_containment_shim,
+)
+from app.services.orchestration.validation.runtime_pollution_guard import (
+    detect_runtime_pollution,
+    existing_known_scaffold_entries,
+    snapshot_top_level_entries,
+)
+from app.services.orchestration.validation.workspace_guard import (
+    has_recent_file_activity,
+)
 from app.runtime_naming import (
     BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
     canonical_diagnostic_label,
@@ -103,6 +115,10 @@ OPENCLAW_CLI_LOCK_MARKERS = (
     "session file locked",
     "sessions.json.lock",
 )
+
+# Phase 22C-0: process-lifetime cache for `openclaw --version` diagnostics
+# (see OpenClawSessionService._resolve_openclaw_cli_version).
+_OPENCLAW_VERSION_CACHE: Dict[tuple, Optional[str]] = {}
 
 _NOISY_OPENCLAW_STDERR_PATTERNS = (
     re.compile(r"^[\[\]{}],?$"),
@@ -159,6 +175,12 @@ class OpenClawNoOutputTimeoutError(OpenClawSessionError):
     def __init__(self, message: str, diagnostics: Dict[str, Any]):
         super().__init__(message)
         self.runtime_diagnostics = diagnostics
+
+
+class OpenClawAgentSelectionError(OpenClawSessionError):
+    """Raised when no configured OpenClaw agent matches the resolved project
+    workspace and Orchestrator refuses to fall back to OpenClaw's default
+    agent/workspace (Phase 22C-0 fail-closed containment)."""
 
 
 class OpenClawSessionService:
@@ -219,6 +241,7 @@ class OpenClawSessionService:
         self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
+        self._last_selected_openclaw_agent_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
         self.backend_descriptor: BackendDescriptor = get_backend_descriptor(
             get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
@@ -380,10 +403,35 @@ class OpenClawSessionService:
     def _build_openclaw_agent_command(
         self, base_command: List[str], *, cwd: Optional[str]
     ) -> List[str]:
+        """Select the OpenClaw agent whose configured workspace matches ``cwd``.
+
+        Phase 22C-0: when ``cwd`` resolves to a real project directory but no
+        configured OpenClaw agent's workspace matches it, this used to
+        silently omit ``--agent`` and let OpenClaw fall back to its default
+        agent/workspace -- the exact mechanism behind the Phase 22A wrong-
+        workspace S1 (a task marked DONE while its artifact landed under
+        OpenClaw's own default workspace instead of the project). Refuse to
+        dispatch instead.
+        """
+
         full_cmd = [*base_command, "agent"]
         agent_id = self._find_openclaw_agent_for_workspace(cwd)
         if agent_id:
             full_cmd.extend(["--agent", agent_id])
+            self._last_selected_openclaw_agent_id = agent_id
+            return full_cmd
+
+        self._last_selected_openclaw_agent_id = None
+        if cwd:
+            error = (
+                "No OpenClaw agent is configured with a workspace matching the "
+                f"resolved project directory: {cwd}. Refusing to fall back to "
+                "OpenClaw's default agent/workspace (Phase 22C-0 fail-closed "
+                "containment). Register an OpenClaw agent whose `workspace` "
+                "equals this path, or route this task to a different backend."
+            )
+            self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
+            raise OpenClawAgentSelectionError(error)
         return full_cmd
 
     @staticmethod
@@ -413,12 +461,15 @@ class OpenClawSessionService:
         *,
         reported_workspace_dir: Optional[str],
         expected_project_root: Optional[str],
+        execution_started_at_epoch: Optional[float] = None,
     ) -> Dict[str, Any]:
         if reported_workspace_dir:
             result["reported_workspace_dir"] = reported_workspace_dir
+        if result.get("status") != "completed":
+            return result
+
         if (
-            result.get("status") == "completed"
-            and reported_workspace_dir
+            reported_workspace_dir
             and expected_project_root
             and not self._workspace_dir_is_under_project_root(
                 reported_workspace_dir, expected_project_root
@@ -436,7 +487,96 @@ class OpenClawSessionService:
                 "workspace_contract_failed": True,
                 "expected_project_root": expected_project_root,
             }
+
+        if not reported_workspace_dir and expected_project_root:
+            # Phase 22C-0: a completed result with no workspaceDir evidence
+            # must not be accepted on the absence of evidence alone (RCA F5:
+            # "a completion whose sole workspace evidence is absent is
+            # treated as compliant"). Fall back to positive evidence -- did
+            # any file under the expected project root actually change
+            # during this invocation -- before accepting.
+            has_file_evidence = False
+            if execution_started_at_epoch is not None:
+                try:
+                    has_file_evidence = has_recent_file_activity(
+                        Path(expected_project_root), execution_started_at_epoch
+                    )
+                except Exception:
+                    has_file_evidence = False
+            result["workspace_evidence_source"] = (
+                "file_activity_fallback" if has_file_evidence else "none"
+            )
+            if not has_file_evidence:
+                error = (
+                    "OpenClaw completed without reporting workspaceDir, and no "
+                    "file activity was detected under the expected project root "
+                    f"({expected_project_root}) during execution. Missing "
+                    "workspace evidence is not treated as success (Phase 22C-0 "
+                    "containment)."
+                )
+                self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
+                return {
+                    **result,
+                    "status": "failed",
+                    "error": error,
+                    "workspace_contract_failed": True,
+                    "workspace_evidence_missing": True,
+                    "expected_project_root": expected_project_root,
+                }
+
         return result
+
+    def _record_runtime_pollution(
+        self,
+        result: Dict[str, Any],
+        *,
+        expected_project_root: Optional[str],
+        pre_execution_top_level: set,
+    ) -> None:
+        """Attach runtime-pollution diagnostics to ``result`` (mutates in place).
+
+        Phase 22C-0: detects unexpected top-level artifacts left by this run
+        via a before/after diff (not solely the known-scaffold-name list --
+        see `runtime_pollution_guard`), plus a separate check for known
+        OpenClaw scaffold names already present on disk (persists across
+        runs; a single-run diff cannot re-surface pollution an earlier run
+        already wrote). This only detects and reports -- it never deletes or
+        modifies anything in the project workspace.
+        """
+
+        if not expected_project_root:
+            return
+        try:
+            root = Path(expected_project_root)
+            post_top_level = snapshot_top_level_entries(root)
+            pollution = detect_runtime_pollution(
+                before=pre_execution_top_level, after=post_top_level
+            )
+            pollution["existing_known_scaffold_entries"] = (
+                existing_known_scaffold_entries(root)
+            )
+        except Exception:
+            return
+
+        result["runtime_pollution"] = pollution
+        if pollution.get("known_scaffold_matches"):
+            self._log_entry(
+                "WARN",
+                "[OPENCLAW][RUNTIME_POLLUTION] New OpenClaw runtime scaffold "
+                f"files appeared in the project root this run: "
+                f"{pollution['known_scaffold_matches']}. Phase 22C-0 detects "
+                "and reports this; it does not delete anything.",
+                commit=True,
+            )
+        elif pollution.get("unclassified_new_entries"):
+            self._log_entry(
+                "INFO",
+                "[OPENCLAW][RUNTIME_POLLUTION] New top-level entries appeared "
+                f"in the project root this run: "
+                f"{pollution['unclassified_new_entries']}. May be legitimate "
+                "task output; recorded for investigation.",
+                commit=True,
+            )
 
     @staticmethod
     def _openclaw_invocation_metadata(
@@ -448,6 +588,9 @@ class OpenClawSessionService:
         invocation_kind: str,
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        expected_project_root: Optional[str] = None,
+        openclaw_version: Optional[str] = None,
+        git_containment_active: bool = False,
     ) -> Dict[str, Any]:
         """Return comparable OpenClaw subprocess metadata without logging prompt text."""
 
@@ -506,6 +649,14 @@ class OpenClawSessionService:
                 (prompt or "").encode("utf-8")
             ).hexdigest()[:12],
             "no_output_timeout_seconds": no_output_timeout_seconds,
+            # Phase 22C-0 diagnostics: make selected agent, resolved project
+            # root, OpenClaw version, and git containment status directly
+            # readable from run-start identity without reconstructing them
+            # from args_redacted.
+            "selected_agent": flags.get("--agent"),
+            "expected_project_root": expected_project_root,
+            "openclaw_version": openclaw_version,
+            "git_containment_active": git_containment_active,
         }
 
     @staticmethod
@@ -861,6 +1012,10 @@ class OpenClawSessionService:
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
         first_output_event = asyncio.Event()
+
+        expected_project_root = self._resolve_project_root_for_workspace_guard()
+        subprocess_env, git_guard_shim_dir = build_git_containment_env()
+
         diagnostics: Dict[str, Any] = {
             "timeout_seconds": timeout_seconds,
             "timeout_with_cleanup_seconds": timeout_seconds + 30,
@@ -880,17 +1035,24 @@ class OpenClawSessionService:
                 invocation_kind=invocation_kind,
                 isolate_workspace_context=isolate_workspace_context,
                 no_output_timeout_seconds=no_output_timeout_seconds,
+                expected_project_root=expected_project_root,
+                git_containment_active=git_guard_shim_dir is not None,
             ),
         }
 
-        subprocess_start_started_at = time.monotonic()
-        process = await asyncio.create_subprocess_exec(
-            *full_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=self.STREAM_READ_LIMIT,
-            cwd=cwd,
-        )
+        try:
+            subprocess_start_started_at = time.monotonic()
+            process = await asyncio.create_subprocess_exec(
+                *full_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=self.STREAM_READ_LIMIT,
+                cwd=cwd,
+                env=subprocess_env,
+            )
+        except BaseException:
+            cleanup_git_containment_shim(git_guard_shim_dir)
+            raise
         subprocess_started_at = time.monotonic()
         diagnostics["process_pid"] = process.pid
         diagnostics["subprocess_start_seconds"] = round(
@@ -1039,6 +1201,7 @@ class OpenClawSessionService:
                     "truncated": "truncated" in f"{stdout_text}\n{stderr_text}".lower(),
                 }
             )
+            cleanup_git_containment_shim(git_guard_shim_dir)
             self._log_entry(
                 "INFO",
                 "[OPENCLAW][REPAIR_DIAGNOSTICS] "
@@ -1114,6 +1277,39 @@ class OpenClawSessionService:
             "OpenClaw CLI not found. Install `openclaw`, add it to PATH, set "
             "`OPENCLAW_CLI_PATH`, or configure `OPENCLAW_CLI_ARGS` for a Node entrypoint."
         )
+
+    def _resolve_openclaw_cli_version(self) -> Optional[str]:
+        """Best-effort `openclaw --version` for run-start identity diagnostics.
+
+        Phase 22C-0 (RCA F5.3): the integration works by inference (config
+        scraping, stdout scraping) with no versioned contract; recording the
+        resolved CLI version at least makes format drift diagnosable after
+        the fact instead of invisible. Cached per resolved command for the
+        life of the process so this never adds per-task subprocess latency
+        beyond the first call (Orchestrator priority: fewer, cheaper calls on
+        the execution hot path).
+        """
+
+        try:
+            base_command = self._resolve_openclaw_command()
+        except Exception:
+            return None
+        cache_key = tuple(base_command)
+        if cache_key in _OPENCLAW_VERSION_CACHE:
+            return _OPENCLAW_VERSION_CACHE[cache_key]
+        try:
+            proc = subprocess.run(
+                [*base_command, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            output = (proc.stdout or proc.stderr or "").strip()
+            version = output.splitlines()[0][:200] if output else None
+        except Exception:
+            version = None
+        _OPENCLAW_VERSION_CACHE[cache_key] = version
+        return version
 
     def _resolve_execution_cwd(self) -> Optional[str]:
         """Resolve the best working directory for OpenClaw subprocess execution."""
@@ -1694,12 +1890,31 @@ class OpenClawSessionService:
                 f"orchestrator-task-{task_id_str}-fresh-{int(time.time() * 1000)}"
             )
 
+        git_guard_shim_dir = None
         try:
             openclaw_command = self._resolve_openclaw_command()
             execution_cwd = self._resolve_execution_cwd()
             full_cmd = self._build_openclaw_agent_command(
                 openclaw_command, cwd=execution_cwd
             )
+
+            # Phase 22C-0 containment setup: resolve the identity this run is
+            # accountable to, snapshot the project root for pollution
+            # detection, and install the git-mutation-blocking PATH shim.
+            # All best-effort / non-fatal -- a containment-setup problem must
+            # not itself block a task that would otherwise dispatch fine.
+            expected_project_root = (
+                self._resolve_project_root_for_workspace_guard() or execution_cwd
+            )
+            pre_execution_top_level: set = set()
+            if expected_project_root:
+                pre_execution_top_level = snapshot_top_level_entries(
+                    Path(expected_project_root)
+                )
+            execution_started_at_epoch = time.time()
+            subprocess_env, git_guard_shim_dir = build_git_containment_env()
+            openclaw_version = self._resolve_openclaw_cli_version()
+
             full_cmd.extend(
                 [
                     "--local",
@@ -1785,6 +2000,7 @@ class OpenClawSessionService:
                         stderr=asyncio.subprocess.PIPE,
                         limit=self.STREAM_READ_LIMIT,
                         cwd=execution_cwd,
+                        env=subprocess_env,
                     )
                     subprocess_started_at = time.monotonic()
                     process_pid = process.pid
@@ -2003,6 +2219,9 @@ class OpenClawSessionService:
                             invocation_kind=invocation_kind,
                             isolate_workspace_context=False,
                             no_output_timeout_seconds=None,
+                            expected_project_root=expected_project_root,
+                            openclaw_version=openclaw_version,
+                            git_containment_active=git_guard_shim_dir is not None,
                         ),
                     }
                     self._log_entry(
@@ -2028,14 +2247,20 @@ class OpenClawSessionService:
                 stderr=stderr_text,
             )
             result = self._parse_openclaw_response(completed)
+            result["openclaw_version"] = openclaw_version
+            result["selected_openclaw_agent"] = self._last_selected_openclaw_agent_id
+            self._record_runtime_pollution(
+                result,
+                expected_project_root=expected_project_root,
+                pre_execution_top_level=pre_execution_top_level,
+            )
             return self._apply_reported_workspace_guard(
                 result,
                 reported_workspace_dir=self._extract_reported_workspace_dir(
                     stdout_text, stderr_text
                 ),
-                expected_project_root=(
-                    self._resolve_project_root_for_workspace_guard() or execution_cwd
-                ),
+                expected_project_root=expected_project_root,
+                execution_started_at_epoch=execution_started_at_epoch,
             )
 
         except asyncio.TimeoutError:
@@ -2053,6 +2278,8 @@ class OpenClawSessionService:
         except Exception as e:
             self._log_entry("ERROR", f"Real mode execution failed: {str(e)}")
             raise
+        finally:
+            cleanup_git_containment_shim(git_guard_shim_dir)
 
     async def track_tool_execution(
         self, tool_name: str, params: Dict[str, Any], result: Any, success: bool
