@@ -133,6 +133,27 @@ class ChangesetService:
             and not TASK_REPORT_RE.match(path.name)
         )
 
+    def _resolve_snapshot_dir(
+        self,
+        *,
+        project_root: Path,
+        target_root: Path,
+        snapshot_key: str,
+    ) -> Path:
+        target_snapshot_dir = (
+            target_root / AUTO_SNAPSHOT_ROOT / snapshot_key
+        ).resolve()
+        if target_snapshot_dir.exists():
+            return target_snapshot_dir
+
+        project_snapshot_dir = (
+            project_root / AUTO_SNAPSHOT_ROOT / snapshot_key
+        ).resolve()
+        if target_root != project_root and project_snapshot_dir.exists():
+            return project_snapshot_dir
+
+        return target_snapshot_dir
+
     def persist_change_set_artifact(
         self,
         project: Project,
@@ -245,7 +266,11 @@ class ChangesetService:
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project).resolve()
         target_root = (target_dir or project_root).resolve()
-        snapshot_dir = (target_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        snapshot_dir = self._resolve_snapshot_dir(
+            project_root=project_root,
+            target_root=target_root,
+            snapshot_key=snapshot_key,
+        )
 
         before = self._tracked_workspace_file_map(
             snapshot_dir,
