@@ -476,6 +476,27 @@ class TaskService:
             commit=commit,
         )
 
+    def record_task_execution_change_set_unavailable(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        session_id: Optional[int],
+        task_execution_id: int,
+        snapshot_key: str,
+        reason: str,
+        commit: bool = True,
+    ) -> TaskExecutionChangeSet:
+        return self.changesets.record_task_execution_change_set_unavailable(
+            project,
+            task,
+            session_id=session_id,
+            task_execution_id=task_execution_id,
+            snapshot_key=snapshot_key,
+            reason=reason,
+            commit=commit,
+        )
+
     def get_task_execution_change_set(
         self,
         *,

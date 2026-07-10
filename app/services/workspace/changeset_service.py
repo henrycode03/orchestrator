@@ -535,6 +535,79 @@ class ChangesetService:
             self.db.commit()
         return change_set
 
+    def record_task_execution_change_set_unavailable(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        session_id: Optional[int],
+        task_execution_id: int,
+        snapshot_key: str,
+        reason: str,
+        commit: bool = True,
+    ) -> TaskExecutionChangeSet:
+        """Record that change-set capture was skipped rather than fall back
+        to diffing the live Project Workspace with no isolated Runtime
+        Workspace sandbox and no pre-run snapshot to compare against.
+
+        Never reads or copies anything from ``target_dir`` / the Project
+        Workspace -- this is the fail-closed counterpart to
+        ``persist_task_execution_change_set``.
+        """
+
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_execution_id == task_execution_id)
+            .first()
+        )
+        if record is None:
+            record = TaskExecutionChangeSet(task_execution_id=task_execution_id)
+            self.db.add(record)
+
+        record.project_id = project.id
+        record.task_id = task.id
+        record.session_id = session_id
+        record.base_snapshot_key = snapshot_key
+        record.snapshot_path = None
+        record.target_path = None
+        record.snapshot_exists = False
+        record.added_files = []
+        record.modified_files = []
+        record.deleted_files = []
+        record.warning_flags = []
+        record.status = reason
+        record.captured_at = datetime.now(UTC)
+        record.disposition = "unavailable"
+        record.disposition_reason = reason
+        record.disposition_at = datetime.now(UTC)
+
+        self.db.add(
+            LogEntry(
+                session_id=session_id,
+                task_id=task.id,
+                task_execution_id=task_execution_id,
+                level="WARNING",
+                message=TASK_CHANGE_SET_LOG_MESSAGE,
+                log_metadata=json.dumps(
+                    {
+                        "schema": "openclaw.task_execution_change_set.v1",
+                        "project_id": project.id,
+                        "task_id": task.id,
+                        "task_execution_id": task_execution_id,
+                        "snapshot_key": snapshot_key,
+                        "status": reason,
+                        "disposition": "unavailable",
+                        "added_files": [],
+                        "modified_files": [],
+                        "deleted_files": [],
+                    }
+                ),
+            )
+        )
+        if commit:
+            self.db.commit()
+        return record
+
     def get_task_execution_change_set(
         self,
         *,

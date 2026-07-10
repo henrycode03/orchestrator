@@ -249,6 +249,7 @@ class OrchestrationRunContext:
     guidance_backend: str = "all"
     guidance_model_name: str = "unknown"
     guidance_model_family: str = "all"
+    runtime_workspace_used: bool = False
 
     @property
     def policy_profile(self) -> PolicyProfile:

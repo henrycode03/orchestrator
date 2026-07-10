@@ -1639,6 +1639,7 @@ def execute_orchestration_task(
             guidance_backend=guidance_backend,
             guidance_model_name=guidance_model_name,
             guidance_model_family=guidance_model_family,
+            runtime_workspace_used=_runtime_sandbox is not None,
         )
 
         gate_error = _run_virtual_merge_gate(
@@ -2184,6 +2185,7 @@ def execute_orchestration_task(
                         workflow_stage=getattr(task, "workflow_stage", None),
                         task_execution_id=task_execution_id,
                         restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
+                        runtime_workspace_used=_runtime_sandbox is not None,
                     )
                     if session and task
                     else None
@@ -2205,17 +2207,44 @@ def execute_orchestration_task(
                 db.add(session)
             if project and task and task_execution_id and orchestration_state:
                 task_service_for_change_set = TaskService(db)
-                task_service_for_change_set.persist_task_execution_change_set(
-                    project,
-                    task,
-                    session_id=session_id,
-                    task_execution_id=task_execution_id,
-                    snapshot_key=_workspace_snapshot_key(task_id, task_execution_id),
-                    target_dir=Path(orchestration_state.project_dir),
-                    preserve_project_root_rules=runs_in_canonical_baseline,
-                    status=getattr(getattr(task, "status", None), "value", None),
-                    commit=False,
+                _change_set_snapshot_key = _workspace_snapshot_key(
+                    task_id, task_execution_id
                 )
+                # Phase 23D-8 (Finding 3): a Runtime Workspace sandbox was
+                # required for this dispatch (RUNTIME_WORKSPACE_ENABLED and a
+                # canonical-baseline run) but was never allocated -- e.g. the
+                # execution failed before `maybe_allocate_runtime_workspace`
+                # returned. `orchestration_state.project_dir` still points at
+                # the live Project Workspace in this case (Model A fallback
+                # in RuntimeExecutorContext), and no pre-run snapshot was ever
+                # captured there for this execution. Never diff/copy from the
+                # live Project Workspace in this state -- fail closed instead.
+                if (
+                    runs_in_canonical_baseline
+                    and settings.RUNTIME_WORKSPACE_ENABLED
+                    and _runtime_sandbox is None
+                ):
+                    task_service_for_change_set.record_task_execution_change_set_unavailable(
+                        project,
+                        task,
+                        session_id=session_id,
+                        task_execution_id=task_execution_id,
+                        snapshot_key=_change_set_snapshot_key,
+                        reason="runtime_not_allocated",
+                        commit=False,
+                    )
+                else:
+                    task_service_for_change_set.persist_task_execution_change_set(
+                        project,
+                        task,
+                        session_id=session_id,
+                        task_execution_id=task_execution_id,
+                        snapshot_key=_change_set_snapshot_key,
+                        target_dir=Path(orchestration_state.project_dir),
+                        preserve_project_root_rules=runs_in_canonical_baseline,
+                        status=getattr(getattr(task, "status", None), "value", None),
+                        commit=False,
+                    )
             _sync_task_execution_from_task_state(
                 db,
                 task_execution_id,

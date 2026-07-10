@@ -501,8 +501,18 @@ def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
 
 
 @pytest.mark.asyncio
-async def test_task_execute_endpoint_uses_runtime_factory(db_session, monkeypatch):
+async def test_task_execute_endpoint_uses_runtime_factory(
+    db_session, monkeypatch, tmp_path
+):
     from app.api.v1.endpoints.tasks import execute_task_with_runtime
+
+    project_root = tmp_path / "runtime-project"
+    project_root.mkdir()
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.tasks.get_effective_runtime_root",
+        lambda db: runtime_root,
+    )
 
     user = User(
         email="runtime-owner@example.com",
@@ -513,7 +523,7 @@ async def test_task_execute_endpoint_uses_runtime_factory(db_session, monkeypatc
     db_session.flush()
     project = Project(
         name="Runtime Project",
-        workspace_path="/tmp/runtime-project",
+        workspace_path=str(project_root),
         user_id=user.id,
     )
     db_session.add(project)

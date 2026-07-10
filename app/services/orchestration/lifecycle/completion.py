@@ -79,6 +79,27 @@ class TaskCompletionFinalizer:
             baseline_publish_result["promoted_workspace_archive_result"] = (
                 promoted_workspace_archive_result
             )
+        elif (
+            project
+            and task
+            and ctx.runs_in_canonical_baseline
+            and ctx.runtime_workspace_used
+        ):
+            # The task actually ran in a disposable Task Execution Sandbox
+            # (Runtime Workspace redirection): its output was captured into a
+            # durable, unapplied change-set artifact, not written into the
+            # canonical project root. Nothing has been applied, so this must
+            # not be labeled "promoted" -- only POST /tasks/{id}/accept may
+            # do that, after an operator reviews the captured change-set.
+            task.workspace_status = "ready"
+            existing_note = (getattr(task, "promotion_note", None) or "").strip()
+            review_note = (
+                "Runtime execution captured a change-set artifact; awaiting "
+                "operator review via POST /tasks/{id}/accept."
+            )
+            task.promotion_note = (
+                f"{existing_note}\n{review_note}" if existing_note else review_note
+            )
         elif project and task and ctx.runs_in_canonical_baseline:
             task.workspace_status = "promoted"
             task.promoted_at = getattr(task, "promoted_at", None) or completed_at
