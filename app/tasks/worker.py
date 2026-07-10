@@ -28,6 +28,9 @@ from app.services import (
 )
 from app.config import settings
 from app.services.agents.agent_runtime import BackendRole, resolve_backend_name_for_role
+from app.services.agents.subprocess_lifecycle import (
+    register_forced_termination_cleanup,
+)
 from app.services.agents.agent_backends import get_backend_descriptor
 from app.services.session.execution_policy import classify_failure
 from app.services.session.session_execution_service import (
@@ -273,6 +276,32 @@ def execute_orchestration_task(
     # one; only non-canonical task-subfolder dispatch leaves it None.
     _runtime_context: Optional[RuntimeExecutorContext] = None
     runtime_service = None
+
+    # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
+    # via the intervention/pause path's `revoke_session_celery_tasks
+    # (terminate=True)`), this closure -- reading the enclosing function's
+    # locals at signal-delivery time, not at registration time -- releases
+    # the ephemeral OpenClaw config binding and disposes the Task Execution
+    # Sandbox exactly as the normal-path `finally` below does, but from
+    # inside the SIGTERM handler itself, after the OpenClaw CLI child's
+    # process group has already been killed. `_unregister_forced_termination_
+    # cleanup` is called first thing in the normal `finally` so this never
+    # double-runs against a dispatch that already completed on its own.
+    def _forced_termination_cleanup() -> None:
+        if runtime_service is not None and hasattr(
+            runtime_service, "release_runtime_workspace_binding"
+        ):
+            runtime_service.release_runtime_workspace_binding()
+        if _runtime_sandbox is not None:
+            _dispose_runtime_workspace_safely(
+                _runtime_sandbox,
+                project_root=_runtime_sandbox_project_root,
+                logger_obj=logger,
+            )
+
+    _unregister_forced_termination_cleanup = register_forced_termination_cleanup(
+        _forced_termination_cleanup
+    )
 
     try:
         # Get session and task
@@ -2166,6 +2195,10 @@ def execute_orchestration_task(
         )
 
     finally:
+        # Phase 23D-3: this dispatch is completing on its own (not via a
+        # forced SIGTERM) -- unregister the forced-termination cleanup
+        # closure so it never fires after this point.
+        _unregister_forced_termination_cleanup()
         try:
             if planning_backend_override and session is not None:
                 session.escalation_backend_id = None

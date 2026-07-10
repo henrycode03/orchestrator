@@ -47,6 +47,11 @@ from app.services.model_adaptation import resolve_adaptation_profile
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.agents.subprocess_lifecycle import (
+    register_process_group,
+    unregister_process_group,
+    kill_process_group,
+)
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
@@ -1124,10 +1129,12 @@ class OpenClawSessionService:
                 limit=self.STREAM_READ_LIMIT,
                 cwd=cwd,
                 env=subprocess_env,
+                start_new_session=True,
             )
         except BaseException:
             cleanup_git_containment_shim(git_guard_shim_dir)
             raise
+        register_process_group(process.pid)
         subprocess_started_at = time.monotonic()
         diagnostics["process_pid"] = process.pid
         diagnostics["subprocess_start_seconds"] = round(
@@ -1190,10 +1197,7 @@ class OpenClawSessionService:
                         diagnostics["no_output_timeout_elapsed_seconds"] = round(
                             no_output_elapsed, 3
                         )
-                        try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
+                        kill_process_group(process.pid)
                         await process.wait()
                         diagnostics["return_code"] = process.returncode
                         stream_task.cancel()
@@ -1220,10 +1224,7 @@ class OpenClawSessionService:
             diagnostics["timeout_boundary"] = (
                 diagnostics.get("timeout_boundary") or "process_timeout"
             )
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+            kill_process_group(process.pid)
             await process.wait()
             diagnostics["return_code"] = process.returncode
             raise
@@ -1232,14 +1233,12 @@ class OpenClawSessionService:
             diagnostics["timeout_boundary"] = (
                 diagnostics.get("timeout_boundary") or "caller_cancelled"
             )
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+            kill_process_group(process.pid)
             await process.wait()
             diagnostics["return_code"] = process.returncode
             raise
         finally:
+            unregister_process_group(process.pid)
             stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
             stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
             duration_seconds = time.monotonic() - started_at
@@ -2087,7 +2086,9 @@ class OpenClawSessionService:
                         limit=self.STREAM_READ_LIMIT,
                         cwd=execution_cwd,
                         env=subprocess_env,
+                        start_new_session=True,
                     )
+                    register_process_group(process.pid)
                     subprocess_started_at = time.monotonic()
                     process_pid = process.pid
                     subprocess_start_seconds = (
@@ -2121,6 +2122,7 @@ class OpenClawSessionService:
                     return_code = await asyncio.wait_for(
                         process.wait(), timeout=timeout_seconds + 30
                     )
+                    unregister_process_group(process.pid)
                     stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
                     stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
                     if (
@@ -2171,7 +2173,7 @@ class OpenClawSessionService:
                 timeout_boundary = self._diagnostic_timeout_boundary(diagnostic_label)
                 try:
                     if process is not None:
-                        process.kill()
+                        kill_process_group(process.pid)
                         await process.wait()
                         return_code = process.returncode
                 except Exception as exc:
@@ -2223,7 +2225,7 @@ class OpenClawSessionService:
                 timeout_boundary = "caller_cancelled"
                 try:
                     if process is not None:
-                        process.kill()
+                        kill_process_group(process.pid)
                         await process.wait()
                         return_code = process.returncode
                 except Exception as exc:
@@ -2351,8 +2353,9 @@ class OpenClawSessionService:
 
         except asyncio.TimeoutError:
             try:
-                process.kill()
-                await process.wait()
+                if process is not None:
+                    kill_process_group(process.pid)
+                    await process.wait()
             except Exception as exc:
                 logger.debug(
                     "[OPENCLAW] Failed to terminate timed out process cleanly: %s",

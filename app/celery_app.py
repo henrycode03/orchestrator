@@ -17,6 +17,7 @@ except Exception:
     pass  # tzdata package unavailable; system files used as-is
 
 from celery import Celery
+from celery.signals import worker_process_init
 from .config import settings
 
 celery_app = Celery(
@@ -46,3 +47,12 @@ celery_app.conf.update(
 
 # Ensure tasks are registered when workers start with `-A app.celery_app worker`.
 celery_app.autodiscover_tasks(["app.tasks"])
+
+
+@worker_process_init.connect
+def _install_subprocess_lifecycle_sigterm_handler(**_kwargs) -> None:
+    """Phase 23D-3: ensure a forced SIGTERM to this worker process kills any
+    OpenClaw CLI child process group it spawned, instead of orphaning it."""
+    from app.services.agents.subprocess_lifecycle import install_sigterm_handler
+
+    install_sigterm_handler()
