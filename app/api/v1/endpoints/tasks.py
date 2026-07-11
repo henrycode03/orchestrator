@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -18,26 +18,17 @@ from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask, TaskExecution
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.dependencies import get_current_active_user
-from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.observability.log_utils import deduplicate_logs
 from app.services.project.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import (
     workspace_snapshot_key,
-    build_runtime_executor_context,
-    maybe_allocate_runtime_workspace,
-    maybe_bind_runtime_cwd_override,
-    dispose_runtime_workspace_safely,
-    snapshot_workspace_before_run,
 )
 from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.orchestration.state.persistence import append_orchestration_event
-from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
 from app.services.session.session_execution_service import (
-    mark_execution_done,
     mark_execution_failed,
     mark_execution_pending,
-    mark_execution_running,
 )
 from app.services.orchestration.state.session_state import (
     mark_session_running,
@@ -53,13 +44,11 @@ from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
     get_effective_workspace_review_policy,
-    get_effective_runtime_root,
 )
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.workspace.task_sandbox_allocator import TaskSandboxError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -87,6 +76,15 @@ class TaskRetryRequest(BaseModel):
     session_id: Optional[int] = None
     execution_scope: Optional[str] = None
     create_new_session: bool = False
+
+
+class DirectExecuteRequest(BaseModel):
+    """Compatibility input for the asynchronous canonical adapter."""
+
+    model_config = {"extra": "forbid"}
+
+    prompt: Optional[str] = None
+    session_id: Optional[int] = None
 
 
 class TaskChangeSetRejectRequest(BaseModel):
@@ -362,6 +360,7 @@ def _queue_task_retry(
     task: Task,
     retry_request: Optional[TaskRetryRequest] = None,
     timeout_seconds: int = DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
+    prompt_override: Optional[str] = None,
 ) -> dict:
     from app.models import Session as SessionModel
     from app.api.v1.endpoints.sessions import _ensure_unique_session_name
@@ -382,7 +381,7 @@ def _queue_task_retry(
             ),
         )
 
-    prompt = (task.description or task.title or "").strip()
+    prompt = (prompt_override or task.description or task.title or "").strip()
     if not prompt:
         raise HTTPException(
             status_code=400, detail="Task is missing a description or title to execute"
@@ -937,328 +936,43 @@ def get_project_tasks(
     return page_data
 
 
-@router.post("/tasks/{task_id}/execute")
-async def execute_task_with_runtime(
+@router.post("/tasks/{task_id}/execute", status_code=status.HTTP_202_ACCEPTED)
+def queue_task_with_canonical_execution(
     task_id: int,
-    request: Request,
+    payload: DirectExecuteRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """
-    Execute a task through the active runtime with real-time log streaming
-
-    Args:
-        task_id: Task ID to execute
-        request: HTTP request with prompt data
-        db: Database session
-
-    Returns:
-        Execution result with logs
-    """
+    """Queue the compatibility route through the Canonical Execution Loop."""
     task = _get_task_for_user(db, task_id, current_user)
-    session_task = None
-    task_execution = None
-    new_session = None
-    _runtime_sandbox = None
-
-    # Get prompt from request body or use task description
-    try:
-        prompt_data = await request.json()
-        prompt = prompt_data.get("prompt") if prompt_data else task.description
-        # Get timeout settings from request
-        timeout_seconds = prompt_data.get("timeout_seconds", 600)  # Default 10 minutes
-    except json.JSONDecodeError:
-        prompt = task.description
-        timeout_seconds = 600
-
-    try:
-        from app.services.workspace.overwrite_protection_service import (
-            OverwriteProtectionService,
-            OverwriteProtectionError,
+    if task.status == TaskStatus.RUNNING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Task already has an active canonical execution",
         )
 
-        protection = OverwriteProtectionService(db)
-
-        if not task.project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        overwrite_warning = ""
-        try:
-            overwrite_result = protection.check_and_warn(
-                project_id=task.project.id,
-                task_subfolder=_resolve_task_subfolder_name(task),
-                planned_files=[],
-                action="warn",
-            )
-            if not overwrite_result["safe_to_proceed"]:
-                warning_message = overwrite_result.get("warning_message") or ""
-                logger.warning(
-                    "Overwrite warning for task %s: %s",
-                    task.id,
-                    warning_message[:200],
-                )
-                if warning_message:
-                    overwrite_warning = (
-                        "\n\n### EXISTING WORKSPACE WARNING:\n" + warning_message
-                    )
-        except OverwriteProtectionError as exc:
-            logger.warning(
-                "Overwrite check failed for task %s (continuing): %s",
-                task.id,
-                str(exc)[:200],
-            )
-
-        from app.models import Session as SessionModel
-
-        new_session = SessionModel(
-            name=f"Task {task_id} Execution",
-            description=prompt[:500],
-            project_id=task.project_id if task.project else None,
-            status="pending",
-            is_active=False,
-            instance_id=f"orchestrator-task-{task_id}-{int(time.time())}",
-        )
-        db.add(new_session)
-        db.flush()
-
-        session_task = SessionTask(
-            session_id=new_session.id,
-            task_id=task.id,
-        )
-        db.add(session_task)
-        task_execution = create_task_execution(
-            db,
-            session_id=new_session.id,
-            task_id=task.id,
+    prompt = (payload.prompt or task.description or task.title or "").strip()
+    if not prompt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A prompt or task description/title is required for canonical execution",
         )
 
-        runtime = create_agent_runtime(db, new_session.id, task_id)
-        if hasattr(runtime, "task_execution_id"):
-            runtime.task_execution_id = task_execution.id
-
-        # Phase 23D-2: this direct-execution endpoint previously never built a
-        # RuntimeExecutorContext at all -- it ran OpenClaw against the real
-        # Project Workspace unconditionally, ignoring RUNTIME_WORKSPACE_ENABLED.
-        # Reuse the exact same allocate/bind/dispose primitives worker.py's
-        # canonical dispatch already uses, without changing this endpoint's
-        # synchronous request/response contract or its simpler (unplanned)
-        # execution model.
-        _runtime_sandbox = None
-        _runtime_context = None
-        _project_root = None
-        if task.project:
-            _project_root = TaskService(db).get_project_root(task.project)
-            _runtime_root = get_effective_runtime_root(db)
-            _execution_backend = get_effective_agent_backend(
-                settings.AGENT_BACKEND, db=db
-            )
-            _runtime_sandbox = maybe_allocate_runtime_workspace(
-                enabled=settings.RUNTIME_WORKSPACE_ENABLED,
-                project_id=task.project_id,
-                task_execution_id=task_execution.id,
-                canonical_baseline_dir=_project_root,
-                executor=_execution_backend,
-                runtime_root=_runtime_root,
-            )
-            _runtime_context = build_runtime_executor_context(
-                sandbox=_runtime_sandbox,
-                project_workspace=_project_root,
-                executor=_execution_backend,
-                project_id=task.project_id,
-                task_execution_id=task_execution.id,
-                runtime_root=_runtime_root,
-            )
-            maybe_bind_runtime_cwd_override(runtime, _runtime_context)
-            if hasattr(runtime, "bind_runtime_workspace"):
-                runtime.bind_runtime_workspace(_runtime_context)
-            # Phase 23D-14: capture the pre-run snapshot inside the sandbox
-            # (worker.py does this for every dispatch) so the post-run
-            # change-set diffs only what this execution actually changed,
-            # not the entire hydrated sandbox tree. Sandbox-only: the
-            # flag-off Model A path keeps its pre-23D-14 behavior.
-            if _runtime_sandbox is not None:
-                snapshot_workspace_before_run(
-                    TaskService(db),
-                    task.project,
-                    task.id,
-                    _runtime_context.runtime_workspace,
-                    task_execution_id=task_execution.id,
-                    preserve_project_root_rules=True,
-                )
-
-        try:
-            try:
-                await runtime.create_session(prompt)
-            except Exception:
-                db.rollback()
-                raise
-
-            mark_session_running(new_session, started_at=datetime.now(timezone.utc))
-            mark_execution_running(
-                task=task,
-                session_task_link=session_task,
-                task_execution=task_execution,
-                started_at=new_session.started_at,
-            )
-            db.commit()
-            db.refresh(new_session)
-
-            logger.info("Created session %s for task %s", new_session.id, task.id)
-
-            from app.services.orchestration.prompt_templates import PromptTemplates
-
-            prompt_text = PromptTemplates.build_task_prompt(
-                task_description=prompt + overwrite_warning,
-                project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
-            )
-            prompt_text = render_adapted_runtime_prompt(
-                db,
-                objective="Execute the requested task through the active runtime.",
-                execution_mode="direct_task_execution",
-                prompt_body=prompt_text,
-                instructions=[
-                    "Use the current workspace as the source of truth.",
-                    "Return a direct execution result for the requested task.",
-                ],
-                context={
-                    "Task ID": task.id,
-                    "Project ID": task.project_id,
-                },
-                expected_output="Execution result text or structured completion payload.",
-            )
-
-            actual_timeout = max(timeout_seconds, 600)
-
-            result = await runtime.execute_task(
-                prompt=prompt_text,
-                timeout_seconds=actual_timeout,
-            )
-
-            completed_at = datetime.now(timezone.utc)
-            if result["status"] == "completed":
-                mark_execution_done(
-                    task=task,
-                    session_task_link=session_task,
-                    task_execution=task_execution,
-                    completed_at=completed_at,
-                )
-                mark_session_stopped(new_session, stopped_at=completed_at)
-                if _runtime_sandbox is not None:
-                    # Phase 23D-14: the task ran in a disposable Runtime
-                    # Workspace sandbox; its output is captured into a
-                    # durable change-set artifact (see the `finally` below),
-                    # not applied to the Project Workspace. Mirror
-                    # finalize_success()'s "ready, awaiting review" branch
-                    # (Phase 23D-8): only POST /tasks/{id}/accept may promote.
-                    task.workspace_status = "ready"
-                    existing_note = (
-                        getattr(task, "promotion_note", None) or ""
-                    ).strip()
-                    review_note = (
-                        "Runtime execution captured a change-set artifact; "
-                        "awaiting operator review via POST /tasks/{id}/accept."
-                    )
-                    task.promotion_note = (
-                        f"{existing_note}\n{review_note}"
-                        if existing_note
-                        else review_note
-                    )
-            else:
-                mark_execution_failed(
-                    task=task,
-                    session_task_link=session_task,
-                    task_execution=task_execution,
-                    error_message=result.get("error", "Unknown error"),
-                    completed_at=completed_at,
-                )
-                mark_session_stopped(new_session, stopped_at=completed_at)
-
-            db.commit()
-            db.refresh(task)
-
-            result["task_execution_id"] = task_execution.id
-            return result
-        finally:
-            # Phase 23D-14: persist the change-set from the sandbox before
-            # it is disposed, mirroring worker.py's dispatch `finally`
-            # (Phase 23D-8) -- the sandbox is the only place the executed
-            # work exists, and disposal below is unconditional. Wrapped so
-            # a capture failure never masks the original outcome.
-            if _runtime_sandbox is not None and task_execution is not None:
-                try:
-                    TaskService(db).persist_task_execution_change_set(
-                        task.project,
-                        task,
-                        session_id=new_session.id if new_session else None,
-                        task_execution_id=task_execution.id,
-                        snapshot_key=workspace_snapshot_key(task.id, task_execution.id),
-                        target_dir=Path(_runtime_context.runtime_workspace),
-                        preserve_project_root_rules=True,
-                        status=getattr(getattr(task, "status", None), "value", None),
-                        commit=True,
-                    )
-                except Exception as capture_exc:
-                    logger.warning(
-                        "Failed to persist change-set for task %s "
-                        "(task_execution_id=%s): %s",
-                        task.id,
-                        task_execution.id,
-                        capture_exc,
-                    )
-            # Phase 23D-2: release the binding and dispose the sandbox
-            # unconditionally (success, failure, or exception), mirroring
-            # worker.py's own outermost finally for the canonical dispatch.
-            if hasattr(runtime, "release_runtime_workspace_binding"):
-                runtime.release_runtime_workspace_binding()
-            dispose_runtime_workspace_safely(
-                _runtime_sandbox,
-                project_root=_project_root,
-                logger_obj=logger,
-            )
-
-    except Exception as e:
-        error_msg = f"Task execution failed: {str(e)}"
-        import traceback
-
-        error_details = traceback.format_exc()
-        logger.exception(
-            "Error executing task %s: %s\n%s", task_id, error_msg, error_details
-        )
-
-        if task:
-            mark_execution_failed(
-                task=task,
-                session_task_link=session_task,
-                task_execution=task_execution,
-                error_message=error_msg,
-                completed_at=datetime.now(timezone.utc),
-            )
-            # Phase 23D-12: mirrors worker.py's dispatch `finally` block
-            # (Phase 23D-8/23D-10) -- a Runtime Workspace sandbox was
-            # required (RUNTIME_WORKSPACE_ENABLED) but never allocated for
-            # this task_execution (e.g. TaskSandboxError before
-            # `maybe_allocate_runtime_workspace` returned). Never fall
-            # through to a change-set read that could resolve a stale row
-            # for a reused task_id -- record the fail-closed
-            # runtime_not_allocated state explicitly, same as worker.py.
-            if (
-                isinstance(e, TaskSandboxError)
-                and settings.RUNTIME_WORKSPACE_ENABLED
-                and _runtime_sandbox is None
-                and task.project
-                and task_execution is not None
-            ):
-                TaskService(db).record_task_execution_change_set_unavailable(
-                    task.project,
-                    task,
-                    session_id=new_session.id if new_session else None,
-                    task_execution_id=task_execution.id,
-                    snapshot_key=workspace_snapshot_key(task.id, task_execution.id),
-                    reason="runtime_not_allocated",
-                    commit=True,
-                )
-            db.commit()
-        raise HTTPException(status_code=500, detail=error_msg)
+    queued = _queue_task_retry(
+        db,
+        task,
+        retry_request=TaskRetryRequest(session_id=payload.session_id),
+        prompt_override=prompt,
+    )
+    return {
+        "status": "queued",
+        "task_id": queued["task_id"],
+        "session_id": queued["session_id"],
+        "task_execution_id": queued["task_execution_id"],
+        "celery_task_id": queued["celery_task_id"],
+        "status_url": f"/api/v1/tasks/{task_id}",
+        "message": "Task queued for Canonical Execution Loop processing",
+    }
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
