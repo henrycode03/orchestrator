@@ -1834,6 +1834,71 @@ def test_runtime_sandboxed_completion_leaves_workspace_ready_not_promoted(
     assert ctx.task.id in needs_review_ids
 
 
+def test_runtime_sandboxed_auto_promote_recommendation_keeps_change_set_captured(
+    db_session, tmp_path, monkeypatch
+):
+    """A recommendation never records promotion without a real apply."""
+
+    ctx, execution, _project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    ctx.runs_in_canonical_baseline = True
+    ctx.runtime_workspace_used = True
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.get_effective_workspace_review_policy",
+        lambda default_policy, db=None: "auto_publish_all",
+    )
+    snapshot_key = workspace_snapshot_key(ctx.task_id, execution.id)
+    ctx.task_service.create_workspace_snapshot(
+        ctx.project,
+        workspace_dir,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=True,
+    )
+    (workspace_dir / "README.md").write_text("captured\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="mutation",
+            reasons=[],
+            details={"expected_core_files": ["README.md"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    db_session.refresh(ctx.task)
+    change_set = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_execution_id == execution.id)
+        .one()
+    )
+    assert ctx.task.workspace_status == "ready"
+    assert ctx.task.promoted_at is None
+    assert change_set.disposition == "captured"
+    assert change_set.review_decision["outcome"] == "auto_promote"
+
+    needs_review_ids = [
+        task_id
+        for (task_id,) in db_session.query(Task.id).filter(
+            Task.workspace_status == "ready"
+        )
+    ]
+    assert ctx.task.id in needs_review_ids
+
+
 def test_auto_publish_all_policy_publishes_nontrivial_change_set(
     db_session, tmp_path, monkeypatch
 ):

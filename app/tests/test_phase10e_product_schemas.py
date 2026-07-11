@@ -26,6 +26,18 @@ def test_product_run_state_marks_review_required_change_set():
     assert state == "needs_review"
 
 
+def test_product_run_state_does_not_accept_captured_canonical_run():
+    state = derive_product_run_state(
+        task_status="done",
+        workspace_status="ready",
+        review_decision={"outcome": "auto_promote"},
+        change_disposition="captured",
+        changed_count=2,
+    )
+
+    assert state == "needs_review"
+
+
 def test_product_run_state_marks_request_changes_as_rejected():
     state = derive_product_run_state(
         task_status="done",

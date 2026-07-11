@@ -1212,6 +1212,13 @@ class CompletionCoordinator:
             and ctx.task_execution_id
             and not should_hold_for_review
             and review_decision.get("outcome") == "auto_promote"
+            and (
+                (
+                    baseline_publish_result
+                    and not baseline_publish_result.get("auto_publish_skipped")
+                )
+                or (runs_in_canonical_baseline and not ctx.runtime_workspace_used)
+            )
             and hasattr(task_service, "mark_task_execution_change_set_disposition")
         ):
             disposition_record = (

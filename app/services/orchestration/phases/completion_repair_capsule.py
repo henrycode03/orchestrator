@@ -89,6 +89,7 @@ class CompletionRepairCapsule:
     last_step_summary: str
     workspace_path: str
     task_prompt_excerpt: str
+    verification_failure: str = ""
     schema_version: int = 1
     source_file_contents: dict[str, str] = field(default_factory=dict)
 
@@ -232,6 +233,7 @@ def build_completion_repair_capsule(
         if str(reason)
     ]
     details = getattr(completion_validation, "details", {}) or {}
+    verification_failure = str(details.get("verification_output_preview") or "")[:1200]
     candidates: list[str] = []
     candidates.extend(
         str(path) for path in details.get("expected_core_files", []) or []
@@ -250,6 +252,7 @@ def build_completion_repair_capsule(
         last_step_summary=_last_step_summary(orchestration_state),
         workspace_path=str(project_dir),
         task_prompt_excerpt=str(task_prompt or "")[:MAX_TASK_PROMPT_EXCERPT_CHARS],
+        verification_failure=verification_failure,
         source_file_contents=_read_bounded_source_contents(project_dir, relevant_files),
     )
 
@@ -266,6 +269,13 @@ def build_bounded_completion_repair_prompt(
     reasons = "\n".join(f"- {reason}" for reason in capsule.validation_reasons)
     if not reasons:
         reasons = "- Completion validation failed without detailed reasons."
+
+    verification_failure_section = ""
+    if capsule.verification_failure:
+        verification_failure_section = (
+            "\n\nReported verification failure (use this exact evidence):\n"
+            + capsule.verification_failure
+        )
 
     evidence_section = ""
     if evidence_capsule is not None:
@@ -303,7 +313,7 @@ Working directory:
 {workspace}
 
 Completion validation reasons:
-{reasons}
+{reasons}{verification_failure_section}
 
 Relevant existing files:
 {relevant_files}
@@ -314,37 +324,15 @@ Last execution step:
 Rules:
 1. Return exactly {{"repair_step": {{...}}}}. The repair_step object is the only executable object.
 2. Inside repair_step, set repair_type to "ops_fix" and step_number to {next_step_number}.
-3. description must be non-empty. ops must be a non-empty JSON array of structured file operations.
+3. description must be non-empty. "ops" must be a non-empty JSON array of structured file operations.
 4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative to workspace root), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
-5. verification must be one non-empty top-level shell command string. No shell metacharacters.
-6. Do not use a "commands" key. Use ops only.
-   The canonical producer envelope is the repair_step wrapper.
+5. "verification" must be one non-empty top-level shell command string. No shell metacharacters.
+6. Do not use a "commands" key. Use ops only. The repair_step wrapper is canonical.
 7. Prefer replace_in_file for targeted in-place edits; use write_file only to create or fully overwrite a file.
-8. Use relative paths only; no absolute paths, "..", or "~".
-9. Do not return prose, markdown, comments, a list, a second plan, or fenced code.
-10. Touch only files that appear in the relevant existing files list, unless ops explicitly create a new required file.
-11. expected_files must list every file path that ops write to.
-12. For replace_in_file, copy the "old" value character-for-character from CURRENT FILE CONTENT above — same whitespace, indentation, quotes, and line breaks. Do not reconstruct from memory or training data.
-13. If the exact text to replace is not shown in CURRENT FILE CONTENT, use write_file with the complete corrected file instead of replace_in_file. Do not invent or guess "old" text.
-14. Generate ops for every file that must change to make the failing tests pass. The repair may include multiple ops across multiple files. Do not restrict the repair to the file named in the error traceback if another file in CURRENT FILE CONTENT contains the missing or broken implementation.
-15. Use only methods, attributes, and function signatures listed in SOURCE API CONTRACT and CURRENT FILE CONTENT. Do not invent or assume the existence of attributes (such as .tasks) or methods not shown there.
-16. Do not call functions or methods with argument shapes different from their signatures in SOURCE API CONTRACT. If a signature shows (total: int, completed: int), call it with two integer arguments — not with a single object argument.
-17. If a function body in CURRENT FILE CONTENT raises NotImplementedError, generate an op to implement that body with the exact same signature. Do not route around an unimplemented stub by calling it with incorrect arguments or skipping its implementation.
-
-Output example:
-{{
-  "step_number": {next_step_number},
-  "repair_type": "ops_fix",
-  "description": "Fix format_summary signature to match pre-run contract",
-  "ops": [
-    {{
-      "op": "replace_in_file",
-      "path": "src/medium_cli/formatting.py",
-      "old": "def format_summary(*, total: int = 0, completed: int = 0) -> str:",
-      "new": "def format_summary(total: int, completed: int) -> str:"
-    }}
-  ],
-  "verification": "python -m pytest -q",
-  "expected_files": ["src/medium_cli/formatting.py"]
-}}
+8. Use relative paths only; no absolute paths, "..", or "~". Do not return prose, markdown, comments, lists, plans, or fenced code.
+9. Touch only relevant existing files, unless explicitly creating a required file. expected_files must list every file written.
+10. For replace_in_file, copy old character-for-character from CURRENT FILE CONTENT. If absent, use complete-file write_file. Do not invent or guess old text.
+11. Use only methods, attributes (including no invented attributes such as .tasks), and signatures in SOURCE API CONTRACT/CURRENT FILE CONTENT; match argument shapes. Implement any shown NotImplementedError with the same signature.
+12. Generate every required op, including files beyond the traceback when shown in context.
+13. directly address the reported expected/actual mismatch; do not make a cosmetic-only change.
 """

@@ -863,7 +863,7 @@ def test_change_set_accept_endpoint_records_operator_acceptance(
         title="Accept canonical change set",
         description="Review candidate",
         status=TaskStatus.DONE,
-        workspace_status="promoted",
+        workspace_status="ready",
         task_subfolder=None,
     )
     session = SessionModel(project_id=1, name="accept-session")
@@ -903,6 +903,23 @@ def test_change_set_accept_endpoint_records_operator_acceptance(
         snapshot_key=snapshot_key,
         target_dir=project_root,
     )
+    change_set = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_execution_id == execution.id)
+        .one()
+    )
+    change_set.review_decision = {
+        **(change_set.review_decision or {}),
+        "held_for_review": False,
+        "outcome": "auto_promote",
+    }
+    db_session.commit()
+
+    needs_review_response = authenticated_client.get(
+        "/api/v1/tasks?page=1&needs_review=true"
+    )
+    assert needs_review_response.status_code == 200
+    assert task.id in [item["id"] for item in needs_review_response.json()["items"]]
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/change-set/accept",

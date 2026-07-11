@@ -142,6 +142,23 @@ def test_prompt_uses_verification_field():
         assert '"verification"' in prompt
 
 
+def test_prompt_explicitly_preserves_exact_verification_mismatch():
+    capsule = CompletionRepairCapsule(
+        validation_reasons=["Completion verification failed"],
+        relevant_files=["src/formatting.py"],
+        last_step_summary="Step 2: wrote formatting.py - success. Files: src/formatting.py.",
+        workspace_path="/tmp/project",
+        task_prompt_excerpt="Implement normalize_label",
+        verification_failure="E       AssertionError: assert 'hello   world' == 'hello world'",
+    )
+
+    prompt = build_bounded_completion_repair_prompt(capsule, 3)
+
+    assert "Reported verification failure (use this exact evidence):" in prompt
+    assert "assert 'hello   world' == 'hello world'" in prompt
+    assert "directly address the reported expected/actual mismatch" in prompt
+
+
 # ---------------------------------------------------------------------------
 # _normalize_completion_repair_step — ops-fix input
 # ---------------------------------------------------------------------------
