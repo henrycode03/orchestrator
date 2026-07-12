@@ -1073,6 +1073,12 @@ class CompletionCoordinator:
                         "reason": "evaluator_needs_review",
                     },
                 )
+        if task_change_set and project and ctx.runtime_workspace_used:
+            task_service.retain_workspace_snapshot(
+                project,
+                source_root=Path(orchestration_state.project_dir),
+                snapshot_key=workspace_snapshot_key(task_id, ctx.task_execution_id),
+            )
         baseline_publish_result = None
         baseline_publish_validation = None
         if project and task.task_subfolder and not runs_in_canonical_baseline:

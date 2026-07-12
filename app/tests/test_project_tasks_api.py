@@ -1,6 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
-from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.models import (
+    Project,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskExecution,
+    TaskExecutionChangeSet,
+    TaskStatus,
+)
 from app.services.tasks.service import TaskService
 
 
@@ -217,6 +225,64 @@ def test_cancelled_null_position_tasks_do_not_block_later_manual_tasks(db_sessio
     assert (
         TaskService(db_session).get_next_pending_task(project.id).id == later_pending.id
     )
+
+
+def test_reviewable_ready_predecessor_blocks_automatic_dependent_dispatch(db_session):
+    project = Project(
+        name="Review Gate Order", workspace_path="/tmp/review_gate_order", user_id=1
+    )
+    db_session.add(project)
+    db_session.commit()
+    predecessor = Task(
+        project_id=project.id,
+        title="Reviewed predecessor",
+        description="Produces a captured change set",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        plan_position=1,
+    )
+    dependent = Task(
+        project_id=project.id,
+        title="Dependent task",
+        description="Must wait for review",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add_all([predecessor, dependent])
+    db_session.commit()
+    session = SessionModel(project_id=project.id, name="review-gate-session")
+    db_session.add(session)
+    db_session.flush()
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=predecessor.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.flush()
+    db_session.add(
+        TaskExecutionChangeSet(
+            project_id=project.id,
+            task_id=predecessor.id,
+            task_execution_id=execution.id,
+            base_snapshot_key="review-gate",
+            disposition="captured",
+        )
+    )
+    db_session.commit()
+
+    assert TaskService(db_session).get_next_pending_task(project.id) is None
+
+    change_set = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_id == predecessor.id)
+        .one()
+    )
+    change_set.disposition = "promoted"
+    predecessor.workspace_status = "promoted"
+    db_session.commit()
+    assert TaskService(db_session).get_next_pending_task(project.id).id == dependent.id
 
 
 def test_legacy_null_position_task_blocks_new_positioned_task(db_session):

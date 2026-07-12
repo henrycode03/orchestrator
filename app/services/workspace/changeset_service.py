@@ -345,6 +345,7 @@ class ChangesetService:
             "project_id": record.project_id,
             "task_id": record.task_id,
             "task_execution_id": record.task_execution_id,
+            "session_id": record.session_id,
             "snapshot_key": record.base_snapshot_key,
             "snapshot_path": record.snapshot_path,
             "snapshot_exists": bool(record.snapshot_exists),

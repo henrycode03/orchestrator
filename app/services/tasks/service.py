@@ -388,6 +388,31 @@ class TaskService:
             snapshot_root=snapshot_root,
         )
 
+    def retain_workspace_snapshot(
+        self, project: Project, *, source_root: Path, snapshot_key: str
+    ) -> dict:
+        return self.snapshots.retain_workspace_snapshot(
+            project, source_root=source_root, snapshot_key=snapshot_key
+        )
+
+    def delete_workspace_snapshot(self, project: Project, *, snapshot_key: str) -> dict:
+        result = self.snapshots.delete_workspace_snapshot(
+            project, snapshot_key=snapshot_key
+        )
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.base_snapshot_key == snapshot_key)
+            .first()
+        )
+        if record:
+            record.snapshot_exists = False
+            record.snapshot_path = result["snapshot_path"]
+            self.db.flush()
+        return result
+
+    def cleanup_orphaned_workspace_snapshots(self, project: Project) -> dict:
+        return self.snapshots.cleanup_orphaned_workspace_snapshots(project)
+
     def change_set_review_decision(
         self,
         change_set: Optional[dict[str, Any]],
@@ -601,6 +626,9 @@ class TaskService:
             preserve_project_root_rules=True,
             project_root=project_root,
         )
+        snapshot_cleanup = self.delete_workspace_snapshot(
+            project, snapshot_key=snapshot_key
+        )
         self.ensure_project_gitignore_guard(project)
         disposition_record = self.mark_task_execution_change_set_disposition(
             task_execution_id=task_execution_id,
@@ -642,6 +670,7 @@ class TaskService:
             "manifest_path": str(manifest_path),
             "copied_files": copied_files,
             "restore_result": restore_result,
+            "snapshot_cleanup": snapshot_cleanup,
             "workspace_status": task.workspace_status,
             "change_set": change_set,
             "change_set_disposition": (
@@ -1428,8 +1457,68 @@ class TaskService:
                     if prior.status not in [TaskStatus.FAILED, TaskStatus.CANCELLED]
                 ]
             if not blocking_prior_tasks:
+                blocking_prior_tasks = [
+                    prior
+                    for prior in self._ordered_prior_tasks(task)
+                    if self._has_unresolved_reviewable_change_set(prior)
+                ]
+            if not blocking_prior_tasks:
                 return task
         return None
+
+    def _ordered_prior_tasks(self, task: Task) -> list[Task]:
+        """Return ordered predecessors, including successful tasks under review."""
+        if not task or task.id is None:
+            return []
+        plan_scope_filter = (
+            Task.plan_id == task.plan_id if task.plan_id is not None else True
+        )
+        if task.plan_position is None:
+            return (
+                self.db.query(Task)
+                .filter(
+                    Task.project_id == task.project_id,
+                    plan_scope_filter,
+                    Task.plan_position.is_(None),
+                    Task.id < task.id,
+                )
+                .order_by(Task.created_at.asc().nullslast(), Task.id.asc())
+                .all()
+            )
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.project_id == task.project_id,
+                plan_scope_filter,
+                or_(
+                    and_(
+                        Task.plan_position.isnot(None),
+                        Task.plan_position < task.plan_position,
+                    ),
+                ),
+            )
+            .order_by(Task.plan_position.asc().nullslast(), Task.id.asc())
+            .all()
+        )
+
+    def _has_unresolved_reviewable_change_set(self, task: Task) -> bool:
+        """Review-gated predecessor state must block automatic continuation."""
+        if (
+            not task
+            or task.status != TaskStatus.DONE
+            or getattr(task, "workspace_status", None) != "ready"
+        ):
+            return False
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_id == task.id)
+            .order_by(
+                TaskExecutionChangeSet.created_at.desc(),
+                TaskExecutionChangeSet.id.desc(),
+            )
+            .first()
+        )
+        return bool(record and record.disposition == "captured")
 
     def get_blocking_prior_tasks(self, task: Task):
         """Return earlier ordered tasks that must complete before this one can run."""

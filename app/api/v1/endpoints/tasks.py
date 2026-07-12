@@ -177,6 +177,73 @@ def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
     return active_session.session_id if active_session else None
 
 
+def _resume_automatic_chain_after_promotion(
+    db: Session, task: Task, *, session_id: Optional[int]
+) -> None:
+    """Dispatch the next task only after physical promotion has succeeded."""
+    if not session_id:
+        return
+    from app.models import Session as SessionModel
+    from app.tasks.worker import execute_orchestration_task
+    from app.tasks.worker_support.context import _get_next_pending_project_task
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session or session.execution_mode != "automatic":
+        return
+    next_task = _get_next_pending_project_task(db, task.project_id)
+    if not next_task:
+        return
+    session_task = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session.id,
+            SessionTask.task_id == next_task.id,
+        )
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    if not session_task:
+        session_task = SessionTask(
+            session_id=session.id,
+            task_id=next_task.id,
+            status=TaskStatus.PENDING,
+        )
+        db.add(session_task)
+    next_execution = create_task_execution(
+        db,
+        session_id=session.id,
+        task_id=next_task.id,
+        status=TaskStatus.PENDING,
+    )
+    mark_session_running(session)
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            task_id=next_task.id,
+            task_execution_id=next_execution.id,
+            level="INFO",
+            message=f"[ORCHESTRATION] Auto-advancing after promotion to task {next_task.id}: {next_task.title}",
+            log_metadata=json.dumps(
+                {
+                    "auto_advance": True,
+                    "after_review_promotion": True,
+                    "task_execution_id": next_execution.id,
+                }
+            ),
+        )
+    )
+    db.commit()
+    execute_orchestration_task.delay(
+        session_id=session.id,
+        task_id=next_task.id,
+        prompt=next_task.description or next_task.title,
+        timeout_seconds=DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
+        expected_session_instance_id=session.instance_id,
+        task_execution_id=next_execution.id,
+    )
+
+
 def _operator_identifier(current_user) -> Optional[str]:
     if not current_user:
         return None
@@ -1161,6 +1228,9 @@ def accept_latest_task_change_set(
 ):
     """Record operator acceptance for a captured task execution change set."""
     task = _get_task_for_user(db, task_id, current_user)
+    project = db.query(Project).filter(Project.id == task.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
     payload = payload or TaskChangeSetAcceptRequest()
     task_execution_id = payload.task_execution_id
     if task_execution_id is None:
@@ -1215,6 +1285,14 @@ def accept_latest_task_change_set(
             detail="No change set recorded for task_execution_id",
         )
 
+    snapshot_key = str(
+        change_set.get("snapshot_key")
+        or workspace_snapshot_key(task_id, task_execution_id)
+    )
+    snapshot_cleanup = task_service.delete_workspace_snapshot(
+        project, snapshot_key=snapshot_key
+    )
+
     task.workspace_status = "promoted"
     task.promoted_at = task.promoted_at or datetime.now(timezone.utc)
     existing_note = (getattr(task, "promotion_note", None) or "").strip()
@@ -1235,6 +1313,7 @@ def accept_latest_task_change_set(
                 task_execution_id=task_execution_id
             )
         ),
+        "snapshot_cleanup": snapshot_cleanup,
     }
 
 
@@ -1429,6 +1508,14 @@ def accept_task_workspace(
             status_code=409, detail="Task has no workspace folder to accept"
         )
 
+    if accepted_change_set:
+        prior_metadata = accepted_change_set.get("disposition_metadata") or {}
+        if (
+            accepted_change_set.get("disposition") == "promoted"
+            and prior_metadata.get("files_copied") is not None
+        ):
+            return task
+
     # File deletion guard — require explicit PermissionRequest approval when the
     # changeset contains deleted files before allowing promotion to proceed.
     _changeset_for_guard = accepted_change_set or (
@@ -1547,11 +1634,22 @@ def accept_task_workspace(
                     task_execution_id=disposition_record.task_execution_id
                 )
             )
+        task_service.delete_workspace_snapshot(
+            project,
+            snapshot_key=str(
+                accepted_change_set.get("snapshot_key")
+                or workspace_snapshot_key(task_id, payload.task_execution_id)
+            ),
+        )
     promoted_workspace_archive_result = task_service.archive_promoted_task_workspace(
         project, task, reason="manual_promotion"
     )
     db.commit()
     db.refresh(task)
+    if accepted_change_set:
+        _resume_automatic_chain_after_promotion(
+            db, task, session_id=accepted_change_set.get("session_id")
+        )
     db.add(
         LogEntry(
             task_id=task.id,

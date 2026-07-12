@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import Project, Task
+from app.models import Project, Task, TaskExecutionChangeSet
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
 from app.services.workspace.permissions import (
     ensure_shared_path_to_root,
@@ -219,3 +219,69 @@ class WorkspaceSnapshotService:
             "target_path": str(target_dir),
             "files_restored": files_restored,
         }
+
+    def retain_workspace_snapshot(
+        self,
+        project: Project,
+        *,
+        source_root: Path,
+        snapshot_key: str,
+    ) -> dict[str, Any]:
+        """Persist only a review snapshot outside a disposable runtime workspace."""
+        project_root = self.get_project_root(project).resolve()
+        source_dir = (
+            Path(source_root).resolve() / AUTO_SNAPSHOT_ROOT / snapshot_key
+        ).resolve()
+        target_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        if source_dir == target_dir:
+            return {"retained": target_dir.exists(), "snapshot_path": str(target_dir)}
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        if not source_dir.exists():
+            return {
+                "retained": False,
+                "reason": "snapshot_missing",
+                "snapshot_path": str(target_dir),
+            }
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, target_dir)
+        ensure_shared_path_to_root(target_dir, project_root)
+        for path in target_dir.rglob("*"):
+            if path.is_file():
+                ensure_shared_permissions(path)
+        return {"retained": True, "snapshot_path": str(target_dir)}
+
+    def delete_workspace_snapshot(
+        self, project: Project, *, snapshot_key: str
+    ) -> dict[str, Any]:
+        snapshot_dir = (
+            self.get_project_root(project) / AUTO_SNAPSHOT_ROOT / snapshot_key
+        ).resolve()
+        existed = snapshot_dir.exists()
+        if existed:
+            shutil.rmtree(snapshot_dir)
+        return {"deleted": True, "existed": existed, "snapshot_path": str(snapshot_dir)}
+
+    def cleanup_orphaned_workspace_snapshots(self, project: Project) -> dict[str, Any]:
+        """Remove retained task snapshots with no unresolved captured change-set."""
+        root = (self.get_project_root(project) / AUTO_SNAPSHOT_ROOT).resolve()
+        if not root.exists():
+            return {"removed": [], "count": 0}
+        retained_keys = {
+            record.base_snapshot_key
+            for record in self.db.query(TaskExecutionChangeSet)
+            .filter(
+                TaskExecutionChangeSet.project_id == project.id,
+                TaskExecutionChangeSet.disposition == "captured",
+            )
+            .all()
+        }
+        removed = []
+        for snapshot_dir in root.iterdir():
+            if not snapshot_dir.is_dir() or not snapshot_dir.name.startswith("task-"):
+                continue
+            if snapshot_dir.name in retained_keys:
+                continue
+            shutil.rmtree(snapshot_dir)
+            removed.append(snapshot_dir.name)
+        return {"removed": removed, "count": len(removed)}
