@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import os
 import re
@@ -23,7 +24,17 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.agents.agent_runtime import (
+    BackendRole,
+    create_agent_runtime,
+    resolve_backend_name_for_role,
+)
+from app.services.agents.agent_backends import get_backend_descriptor
+from app.services.agents.backend_concurrency import (
+    backend_slot_owned_by,
+    make_redis_client,
+    release_backend_slot,
+)
 from app.services.workspace.checkpoint_service import CheckpointError, CheckpointService
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
@@ -60,6 +71,7 @@ logger = logging.getLogger(__name__)
 _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
 _STALE_RUNNING_SESSION_SWEEP_SECONDS = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS + 300
 _EXPLICIT_TASK_ID_RE = re.compile(r"\btask\s*#?(\d+)\b", re.IGNORECASE)
+_BACKEND_LEASE_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
@@ -80,6 +92,97 @@ def _execution_owner_is_alive(execution: TaskExecution) -> bool:
     except PermissionError:
         return True
     return True
+
+
+async def _await_backend_lease_release(
+    db: Session,
+    *,
+    session_id: int,
+) -> dict[str, Any]:
+    """Wait for the revoked worker to release its backend slot before stopping.
+
+    The worker remains the normal lease owner. The only direct release here is
+    stale-owner reclamation after the recorded worker has already exited.
+    """
+    execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+        )
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    backend_id = (
+        getattr(execution, "backend_id", None) if execution else None
+    ) or resolve_backend_name_for_role(db, BackendRole.EXECUTION)
+    if not backend_id:
+        return {"status": "not_owned", "backend_id": None}
+
+    descriptor = get_backend_descriptor(backend_id)
+    if descriptor.capabilities.max_parallel_sessions is None:
+        return {"status": "unlimited", "backend_id": backend_id}
+
+    try:
+        redis_client = make_redis_client()
+    except Exception:
+        if execution is None:
+            return {"status": "unverified_no_execution", "backend_id": backend_id}
+        raise
+    while True:
+        try:
+            owned = backend_slot_owned_by(redis_client, backend_id, session_id)
+        except Exception as exc:
+            logger.warning(
+                "[STOP] Could not verify backend lease release for session=%s "
+                "backend=%s: %s",
+                session_id,
+                backend_id,
+                exc,
+            )
+            if execution is None:
+                return {
+                    "status": "unverified_no_execution",
+                    "backend_id": backend_id,
+                }
+            raise
+
+        if not owned:
+            logger.info(
+                "[STOP] Backend lease released before terminal state session=%s "
+                "backend=%s task_execution_id=%s",
+                session_id,
+                backend_id,
+                execution.id if execution else None,
+            )
+            return {
+                "status": "released",
+                "backend_id": backend_id,
+                "task_execution_id": execution.id if execution else None,
+            }
+
+        if (
+            execution
+            and execution.worker_pid
+            and not _execution_owner_is_alive(execution)
+        ):
+            if not release_backend_slot(redis_client, backend_id, session_id):
+                raise RuntimeError(
+                    f"Failed to reclaim stale backend lease for session {session_id}"
+                )
+            logger.warning(
+                "[STOP] Reclaimed stale backend lease after worker exit session=%s "
+                "backend=%s task_execution_id=%s",
+                session_id,
+                backend_id,
+                execution.id,
+            )
+            return {
+                "status": "reclaimed_stale",
+                "backend_id": backend_id,
+                "task_execution_id": execution.id,
+            }
+
+        await asyncio.sleep(_BACKEND_LEASE_POLL_INTERVAL_SECONDS)
 
 
 def _reset_running_session_tasks(
@@ -1413,6 +1516,10 @@ async def stop_session_lifecycle(
             checkpoint_name = None
 
         revoked_ids = revoke_session_celery_tasks(db, session_id, terminate=True)
+        backend_lease = await _await_backend_lease_release(
+            db,
+            session_id=session_id,
+        )
         if not force:
             runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
             await runtime.stop_session()
@@ -1446,6 +1553,10 @@ async def stop_session_lifecycle(
             session=session,
             next_status=TaskStatus.PENDING,
         )
+        backend_lease = await _await_backend_lease_release(
+            db,
+            session_id=session_id,
+        )
         db.commit()
 
         db.add(
@@ -1461,6 +1572,7 @@ async def stop_session_lifecycle(
                         "initiated_by": initiated_by or "unknown",
                         "source": source or "unspecified",
                         "revoked_task_ids": revoked_ids,
+                        "backend_lease": backend_lease,
                         "checkpoint_name": checkpoint_name,
                         "reset_running_tasks": reset_count,
                         "reset_orphan_running_tasks": orphan_reset_count,

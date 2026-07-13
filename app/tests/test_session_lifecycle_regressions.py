@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
 from datetime import UTC, datetime
 
 import pytest
@@ -30,6 +32,7 @@ from app.services.session.session_lifecycle_service import (
     start_session_lifecycle,
     stop_session_lifecycle,
 )
+import app.services.session.session_lifecycle_service as session_lifecycle_service
 from app.services.session import session_runtime_service
 from app.services.session.session_inspection_service import (
     get_session_reconciliation_audit_payload,
@@ -1183,6 +1186,108 @@ def test_stop_session_cancels_active_task_execution_and_clears_running_task(
     assert link.status != TaskStatus.RUNNING
     assert execution.status == TaskStatus.CANCELLED
     assert execution.completed_at is not None
+
+
+@pytest.mark.parametrize(
+    ("execution_status", "backend_id", "owner_is_recorded"),
+    [
+        (TaskStatus.PENDING, None, False),
+        (TaskStatus.CANCELLED, "local_openclaw", True),
+    ],
+)
+def test_stop_waits_for_backend_lease_release_before_terminal_state_and_next_dispatch(
+    db_session, monkeypatch, execution_status, backend_id, owner_is_recorded
+):
+    """A stopped session cannot publish terminal state ahead of its slot cleanup."""
+    from app.services.agents.backend_concurrency import acquire_backend_slot
+
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=execution_status,
+        backend_id=backend_id,
+        worker_pid=os.getpid() if owner_is_recorded else None,
+        worker_hostname=socket.gethostname() if owner_is_recorded else None,
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+
+    class _LeaseRedis:
+        def __init__(self):
+            self.members = {str(session.id)}
+            self.release_calls = 0
+
+        def smembers(self, _key):
+            return set(self.members)
+
+        def sismember(self, _key, member):
+            return str(member) in self.members
+
+        def srem(self, _key, member):
+            self.release_calls += 1
+            self.members.discard(str(member))
+
+        def eval(self, _script, _key_count, _key, member, max_slots, _lease):
+            if len(self.members) >= int(max_slots) and str(member) not in self.members:
+                return 0
+            self.members.add(str(member))
+            return 1
+
+    redis = _LeaseRedis()
+
+    async def _worker_cleanup(_delay):
+        from app.services.agents.backend_concurrency import release_backend_slot
+
+        release_backend_slot(redis, "local_openclaw", session.id)
+
+    class _Runtime:
+        async def stop_session(self):
+            return None
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.make_redis_client",
+        lambda: redis,
+    )
+    monkeypatch.setattr(session_lifecycle_service.asyncio, "sleep", _worker_cleanup)
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *a, **kw: _Runtime(),
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.revoke_session_celery_tasks",
+        lambda *a, **kw: ["celery-task-id"],
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        type(
+            "FakeCS",
+            (),
+            {
+                "__init__": lambda self, db: None,
+                "load_checkpoint": lambda self, sid: (_ for _ in ()).throw(
+                    Exception("no checkpoint")
+                ),
+            },
+        ),
+    )
+
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id))
+
+    db_session.refresh(session)
+    db_session.refresh(execution)
+    assert result["status"] == "stopped"
+    assert execution.status == TaskStatus.CANCELLED
+    assert redis.release_calls == 1
+    assert acquire_backend_slot(redis, "local_openclaw", session_id=999, max_slots=1)
 
 
 def test_stop_session_cancels_pending_retry_execution_and_clears_running_task(

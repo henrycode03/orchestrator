@@ -77,6 +77,13 @@ def release_backend_slot(redis_client: Any, backend_id: str, session_id: int) ->
         return False
 
 
+def backend_slot_owned_by(redis_client: Any, backend_id: str, session_id: int) -> bool:
+    """Return whether Redis still records session_id as the slot owner."""
+    members = redis_client.smembers(_slot_key(backend_id))
+    owner = str(session_id)
+    return owner in members or owner.encode() in members
+
+
 def get_concurrency_snapshot(redis_client: Any, backend_id: str) -> dict:
     """Return active slot count and active session IDs for backend."""
     key = _slot_key(backend_id)

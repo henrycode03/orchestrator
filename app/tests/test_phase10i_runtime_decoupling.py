@@ -26,6 +26,7 @@ from app.services.session.execution_policy import (
 )
 from app.services.agents.backend_concurrency import (
     acquire_backend_slot,
+    backend_slot_owned_by,
     get_concurrency_snapshot,
     release_backend_slot,
 )
@@ -77,6 +78,14 @@ def test_forced_stop_release_failure_is_logged_with_execution_identity(caplog):
 
     assert "task_execution_id=7001" in caplog.text
     assert "session_id=101" in caplog.text
+
+
+def test_backend_slot_owned_by_handles_redis_bytes_members():
+    class BytesRedis:
+        def smembers(self, _key):
+            return {b"101"}
+
+    assert backend_slot_owned_by(BytesRedis(), "local_openclaw", 101)
 
 
 # ---------------------------------------------------------------------------
