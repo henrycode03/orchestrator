@@ -1266,6 +1266,27 @@ def accept_latest_task_change_set(
         )
 
     reason = (payload.note or "operator_accepted_change_set").strip()
+    try:
+        # Physical promotion is the success boundary. Do not persist review or
+        # task promotion state until the existing canonical copy has returned.
+        baseline_result = task_service.promote_change_set_into_baseline(
+            project, task, change_set
+        )
+    except ProjectMutationLockError as exc:
+        if _clear_terminal_task_mutation_lock(
+            db,
+            task=task,
+            lock_path=exc.lock_path,
+            task_execution_id=task_execution_id,
+        ):
+            baseline_result = task_service.promote_change_set_into_baseline(
+                project, task, change_set
+            )
+        else:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     disposition_record = task_service.mark_task_execution_change_set_disposition(
         task_execution_id=task_execution_id,
         disposition="promoted",
@@ -1276,6 +1297,10 @@ def accept_latest_task_change_set(
             task_execution_id=task_execution_id,
             change_set=change_set,
             operator=_operator_identifier(current_user),
+            extra={
+                "files_copied": baseline_result.get("files_copied"),
+                "baseline_path": baseline_result.get("baseline_path"),
+            },
         ),
         commit=False,
     )
@@ -1289,9 +1314,6 @@ def accept_latest_task_change_set(
         change_set.get("snapshot_key")
         or workspace_snapshot_key(task_id, task_execution_id)
     )
-    snapshot_cleanup = task_service.delete_workspace_snapshot(
-        project, snapshot_key=snapshot_key
-    )
 
     task.workspace_status = "promoted"
     task.promoted_at = task.promoted_at or datetime.now(timezone.utc)
@@ -1301,6 +1323,11 @@ def accept_latest_task_change_set(
         f"{existing_note}\n{accept_note}" if existing_note else accept_note
     )
     task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    snapshot_cleanup = task_service.delete_workspace_snapshot(
+        project, snapshot_key=snapshot_key
+    )
     db.commit()
     db.refresh(task)
     return {

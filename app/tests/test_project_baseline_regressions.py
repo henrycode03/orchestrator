@@ -905,6 +905,9 @@ def test_change_set_accept_endpoint_records_operator_acceptance(
         snapshot_key=snapshot_key,
         target_dir=project_root,
     )
+    snapshot_path = project_root / AUTO_SNAPSHOT_ROOT / snapshot_key
+    assert snapshot_path.exists()
+    (project_root / "README.md").unlink()
     change_set = (
         db_session.query(TaskExecutionChangeSet)
         .filter(TaskExecutionChangeSet.task_execution_id == execution.id)
@@ -932,15 +935,196 @@ def test_change_set_accept_endpoint_records_operator_acceptance(
     body = response.json()
     assert body["accepted"] is True
     assert body["workspace_status"] == "promoted"
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
     assert body["change_set_disposition"]["disposition"] == "promoted"
     assert body["change_set_disposition"]["disposition_reason"] == "looks good"
     metadata = body["change_set_disposition"]["disposition_metadata"]
     assert metadata["action"] == "accept"
     assert metadata["operator"] == "regression@example.com"
     assert metadata["task_execution_id"] == execution.id
+    assert metadata["files_copied"] == 1
+    assert body["snapshot_cleanup"]["existed"] is True
+    assert not snapshot_path.exists()
     db_session.refresh(task)
     assert task.workspace_status == "promoted"
     assert "Accepted task execution" in task.promotion_note
+
+
+def test_change_set_accept_failure_preserves_review_state_and_snapshot(
+    authenticated_client,
+    db_session,
+    monkeypatch,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-accept-failure"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="change-set-accept-failure",
+        workspace_path=str(project_root),
+    )
+    task = Task(
+        project_id=1,
+        title="Accept failure",
+        description="Promotion must fail closed",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+    )
+    session = SessionModel(project_id=1, name="accept-failure-session")
+    db_session.add(project)
+    db_session.flush()
+    task.project_id = project.id
+    session.project_id = project.id
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(project)
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    task_service = TaskService(db_session)
+    snapshot_key = workspace_snapshot_key(task.id, execution.id)
+    task_service.create_workspace_snapshot(
+        project,
+        project_root,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=True,
+    )
+    (project_root / "README.md").write_text("should not promote\n", encoding="utf-8")
+    task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+        target_dir=project_root,
+    )
+    (project_root / "README.md").unlink()
+    snapshot_path = project_root / AUTO_SNAPSHOT_ROOT / snapshot_key
+    assert snapshot_path.exists()
+
+    def fail_promotion(self, project, task, change_set):
+        raise FileNotFoundError("promotion artifact unavailable")
+
+    monkeypatch.setattr(TaskService, "promote_change_set_into_baseline", fail_promotion)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/change-set/accept",
+        json={"task_execution_id": execution.id, "note": "try failed promotion"},
+    )
+
+    assert response.status_code == 409
+    assert "promotion artifact unavailable" in response.json()["detail"]
+    db_session.expire_all()
+    db_session.refresh(task)
+    assert task.workspace_status == "ready"
+    disposition = TaskService(db_session).get_task_execution_change_set(
+        task_execution_id=execution.id
+    )
+    assert disposition["disposition"] == "captured"
+    assert disposition["snapshot_exists"] is True
+    assert snapshot_path.exists()
+    assert not (project_root / "README.md").exists()
+
+
+def test_review_and_manual_accept_share_one_physical_promotion_call_each(
+    authenticated_client,
+    db_session,
+    monkeypatch,
+    tmp_path: Path,
+):
+    def seed_case(name: str):
+        project_root = tmp_path / name
+        project_root.mkdir(parents=True)
+        project = Project(name=name, workspace_path=str(project_root))
+        task = Task(
+            project_id=1,
+            title=f"{name} task",
+            description="Equivalent promotion path",
+            status=TaskStatus.DONE,
+            workspace_status="ready",
+        )
+        session = SessionModel(project_id=1, name=f"{name}-session")
+        db_session.add(project)
+        db_session.flush()
+        task.project_id = project.id
+        session.project_id = project.id
+        db_session.add_all([task, session])
+        db_session.commit()
+        db_session.refresh(project)
+        db_session.refresh(task)
+        db_session.refresh(session)
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.DONE,
+        )
+        db_session.add(execution)
+        db_session.commit()
+        db_session.refresh(execution)
+        task_service = TaskService(db_session)
+        snapshot_key = workspace_snapshot_key(task.id, execution.id)
+        task_service.create_workspace_snapshot(
+            project,
+            project_root,
+            snapshot_key=snapshot_key,
+            preserve_project_root_rules=True,
+        )
+        (project_root / "README.md").write_text("equivalent\n", encoding="utf-8")
+        task_service.persist_task_execution_change_set(
+            project,
+            task,
+            session_id=session.id,
+            task_execution_id=execution.id,
+            snapshot_key=snapshot_key,
+            target_dir=project_root,
+        )
+        (project_root / "README.md").unlink()
+        return project_root, task, execution, snapshot_key
+
+    review_root, review_task, review_execution, review_snapshot = seed_case(
+        "review-accept-path"
+    )
+    manual_root, manual_task, manual_execution, manual_snapshot = seed_case(
+        "manual-accept-path"
+    )
+    physical_calls = []
+    original_promotion = TaskService.promote_change_set_into_baseline
+
+    def counted_promotion(self, project, task, change_set):
+        physical_calls.append(task.id)
+        return original_promotion(self, project, task, change_set)
+
+    monkeypatch.setattr(
+        TaskService, "promote_change_set_into_baseline", counted_promotion
+    )
+
+    review_response = authenticated_client.post(
+        f"/api/v1/tasks/{review_task.id}/change-set/accept",
+        json={"task_execution_id": review_execution.id, "note": "review accepted"},
+    )
+    manual_response = authenticated_client.post(
+        f"/api/v1/tasks/{manual_task.id}/accept",
+        json={"task_execution_id": manual_execution.id, "note": "manual accepted"},
+    )
+
+    assert review_response.status_code == 200
+    assert manual_response.status_code == 200
+    assert physical_calls == [review_task.id, manual_task.id]
+    assert (review_root / "README.md").read_text(encoding="utf-8") == "equivalent\n"
+    assert (manual_root / "README.md").read_text(encoding="utf-8") == "equivalent\n"
+    assert review_response.json()["workspace_status"] == "promoted"
+    assert manual_response.json()["workspace_status"] == "promoted"
+    assert not (review_root / AUTO_SNAPSHOT_ROOT / review_snapshot).exists()
+    assert not (manual_root / AUTO_SNAPSHOT_ROOT / manual_snapshot).exists()
 
 
 def test_change_set_reject_requires_explicit_task_execution_id(
