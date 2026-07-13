@@ -72,6 +72,20 @@ def _make_session(
     return session
 
 
+class _NoLeaseRedis:
+    """Minimal Redis seam for stop tests that do not exercise lease ownership."""
+
+    def smembers(self, _key):
+        return set()
+
+
+def _mock_backend_lease_probe(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.make_redis_client",
+        lambda: _NoLeaseRedis(),
+    )
+
+
 def _make_task(db, project, *, status=TaskStatus.PENDING):
     task = Task(
         project_id=project.id,
@@ -620,7 +634,8 @@ def test_force_stop_awaiting_input_session_without_task_links(db_session, monkey
     assert session.stopped_at is not None
 
 
-def test_explicit_stop_terminalizes_active_task_attempt(db_session):
+def test_explicit_stop_terminalizes_active_task_attempt(db_session, monkeypatch):
+    _mock_backend_lease_probe(monkeypatch)
     project = _make_project(db_session)
     session = _make_session(
         db_session,
@@ -1131,6 +1146,7 @@ def test_stop_session_saves_rich_checkpoint_when_latest_checkpoint_is_hollow(
 def test_stop_session_cancels_active_task_execution_and_clears_running_task(
     db_session, monkeypatch
 ):
+    _mock_backend_lease_probe(monkeypatch)
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="running", is_active=True)
     task = _make_task(db_session, project, status=TaskStatus.RUNNING)
@@ -1293,6 +1309,7 @@ def test_stop_waits_for_backend_lease_release_before_terminal_state_and_next_dis
 def test_stop_session_cancels_pending_retry_execution_and_clears_running_task(
     db_session, monkeypatch
 ):
+    _mock_backend_lease_probe(monkeypatch)
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="running", is_active=True)
     task = _make_task(db_session, project, status=TaskStatus.RUNNING)
