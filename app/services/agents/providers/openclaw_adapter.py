@@ -7,6 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.runtime_configuration import RuntimeConfiguration
 
 
 def create_runtime(
@@ -15,6 +16,7 @@ def create_runtime(
     task_id: Optional[int] = None,
     *,
     use_demo_mode: Optional[bool] = None,
+    runtime_configuration: RuntimeConfiguration | None = None,
 ) -> OpenClawSessionService:
     """Instantiate the OpenClaw-backed orchestration runtime."""
 
@@ -23,4 +25,5 @@ def create_runtime(
         session_id,
         task_id,
         use_demo_mode=use_demo_mode,
+        runtime_configuration=runtime_configuration,
     )

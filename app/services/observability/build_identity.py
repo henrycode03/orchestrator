@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +17,9 @@ from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
 )
+
+if TYPE_CHECKING:
+    from app.services.agents.runtime_configuration import RuntimeConfiguration
 
 UNKNOWN = "unknown"
 
@@ -167,12 +170,25 @@ def _migration_identity(db: Session) -> Dict[str, Any]:
     }
 
 
-def _lane_identity(db: Session) -> Dict[str, Any]:
+def _lane_identity(
+    db: Session,
+    planning_configuration: "RuntimeConfiguration | None" = None,
+) -> Dict[str, Any]:
     effective_backend = get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
     effective_model = get_effective_agent_model_family(settings.AGENT_MODEL, db=db)
+    planning_backend = (
+        planning_configuration.backend_name
+        if planning_configuration is not None
+        else settings.PLANNING_BACKEND or effective_backend
+    )
+    planner_model = (
+        planning_configuration.model_family
+        if planning_configuration is not None
+        else settings.PLANNER_MODEL or effective_model
+    )
     return {
         "active_backend_lanes": {
-            "planning": settings.PLANNING_BACKEND or effective_backend,
+            "planning": planning_backend,
             "execution": settings.EXECUTION_BACKEND or effective_backend,
             "debug_repair": (
                 settings.DEBUG_REPAIR_BACKEND
@@ -182,7 +198,7 @@ def _lane_identity(db: Session) -> Dict[str, Any]:
             "repair": settings.REPAIR_BACKEND or effective_backend,
         },
         "active_model_names": {
-            "planner": settings.PLANNER_MODEL or effective_model,
+            "planner": planner_model,
             "execution": settings.EXECUTION_MODEL or effective_model,
             "debug_repair": (
                 settings.DEBUG_REPAIR_MODEL
@@ -198,11 +214,12 @@ def build_identity_payload(
     db: Session,
     *,
     repo_sha_provider: Callable[[], Optional[str]] = _read_repo_git_sha,
+    planning_configuration: "RuntimeConfiguration | None" = None,
 ) -> Dict[str, Any]:
     """Return build/runtime identity without changing runtime behavior."""
     repo_sha = repo_sha_provider()
     build_sha = _env("ORCHESTRATOR_GIT_SHA", "GIT_SHA", "COMMIT_SHA")
-    lanes = _lane_identity(db)
+    lanes = _lane_identity(db, planning_configuration)
     migration = _migration_identity(db)
     active_backend_lanes = lanes["active_backend_lanes"]
     active_model_names = lanes["active_model_names"]

@@ -174,6 +174,7 @@ class Settings(BaseSettings):
     AGENT_MODEL: str = "local"
     PLANNER_MODEL: str = ""
     EXECUTION_MODEL: str = ""
+    PLANNING_ADAPTATION_PROFILE: Optional[str] = None
     PLANNING_REPAIR_ENABLED: bool = True
     CANDIDATE_RECOVERY_ENABLED: bool = False
     CANDIDATE_SLOT_MERGE_ENABLED: bool = False

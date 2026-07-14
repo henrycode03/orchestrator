@@ -5,6 +5,7 @@ from .profiles import (
     get_adaptation_profile,
     list_adaptation_profiles,
     render_prompt_for_profile,
+    require_adaptation_profile,
     resolve_adaptation_profile,
 )
 from .schemas import PromptEnvelope
@@ -15,5 +16,6 @@ __all__ = [
     "get_adaptation_profile",
     "list_adaptation_profiles",
     "render_prompt_for_profile",
+    "require_adaptation_profile",
     "resolve_adaptation_profile",
 ]

@@ -37,6 +37,19 @@ class AdaptationProfile:
 
 
 _ADAPTATION_PROFILES = {
+    "planning_default": AdaptationProfile(
+        name="planning_default",
+        display_name="Planning Default",
+        backend="*",
+        model_family="*",
+        prompt_format="rendered_text_sections",
+        renderer="render_openclaw_prompt",
+        prompt_dialect="provider_neutral_text",
+        tool_shape="provider_adapter",
+        context_window_policy="truncate_context",
+        preferred_retry_strategy="balanced",
+        description="Provider-neutral text rendering for planning runtimes.",
+    ),
     "openclaw_default": AdaptationProfile(
         name="openclaw_default",
         display_name="OpenClaw Default",
@@ -136,21 +149,34 @@ def get_adaptation_profile(name: Optional[str]) -> AdaptationProfile:
     )
 
 
+def require_adaptation_profile(name: str) -> AdaptationProfile:
+    """Return an exact registered profile instead of silently falling back."""
+
+    normalized = str(name or "").strip().lower()
+    profile = _ADAPTATION_PROFILES.get(normalized)
+    if profile is None:
+        raise ValueError(f"Unknown model adaptation profile '{name}'.")
+    return profile
+
+
 def resolve_adaptation_profile(
     *,
     backend: Optional[str],
     model_family: Optional[str],
     preferred_name: Optional[str] = None,
 ) -> AdaptationProfile:
+    normalized_backend = (backend or "local_openclaw").strip().lower()
+    normalized_family = (model_family or "").strip().lower()
     if preferred_name:
         profile = get_adaptation_profile(preferred_name)
-        if profile.backend == (backend or profile.backend) and (
-            not model_family or profile.model_family in (model_family, "gpt")
+        if profile.backend in {"*", normalized_backend} and (
+            not normalized_family
+            or profile.model_family == "*"
+            or normalized_family == profile.model_family
+            or normalized_family.startswith(profile.model_family)
         ):
             return profile
 
-    normalized_backend = (backend or "local_openclaw").strip().lower()
-    normalized_family = (model_family or "").strip().lower()
     for profile in _ADAPTATION_PROFILES.values():
         if profile.backend != normalized_backend:
             continue

@@ -23,6 +23,8 @@ from app.services.workspace.system_settings import (
     set_setting_value,
 )
 
+PLANNING_ADAPTATION_PROFILE_KEY = "orchestrator_planning_adaptation_profile"
+
 
 def test_create_agent_runtime_uses_configured_local_backend(db_session):
     runtime = create_agent_runtime(db_session, session_id=None)
@@ -87,6 +89,57 @@ def test_openai_chat_runtime_uses_planner_model_for_planning_role(
     assert isinstance(runtime, OpenAIChatCompletionsRuntime)
     assert runtime.backend_role == "planning"
     assert runtime.get_backend_metadata()["model_family"] == "local-planner"
+
+
+def test_secondary_planning_runtime_receives_role_model_and_profile(
+    db_session, monkeypatch
+):
+    from app.services.agents.providers.ollama_adapter import OllamaRuntime
+
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "planner-model")
+    set_setting_value(
+        db_session,
+        PLANNING_ADAPTATION_PROFILE_KEY,
+        "planning_default",
+    )
+
+    runtime = create_agent_runtime(
+        db_session, session_id=None, role=BackendRole.PLANNING
+    )
+    execution_runtime = create_agent_runtime(
+        db_session, session_id=None, role=BackendRole.EXECUTION
+    )
+
+    assert isinstance(runtime, OllamaRuntime)
+    assert runtime.backend_role == BackendRole.PLANNING.value
+    assert runtime.get_backend_metadata()["model_family"] == "planner-model"
+    assert runtime.get_backend_metadata()["adaptation_profile"] == "planning_default"
+    assert isinstance(execution_runtime, OpenClawSessionService)
+
+
+def test_planning_runtime_preserves_explicit_adapter_profile(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "gpt-5")
+    set_setting_value(
+        db_session,
+        PLANNING_ADAPTATION_PROFILE_KEY,
+        "openai_responses_structured",
+    )
+
+    runtime = create_agent_runtime(
+        db_session, session_id=None, role=BackendRole.PLANNING
+    )
+
+    assert isinstance(runtime, OpenAIResponsesRuntime)
+    assert runtime.get_backend_metadata()["model_family"] == "gpt-5"
+    assert (
+        runtime.get_backend_metadata()["adaptation_profile"]
+        == "openai_responses_structured"
+    )
 
 
 def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):

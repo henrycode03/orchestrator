@@ -22,7 +22,11 @@ from app.services.agents.interfaces import (
     RetryStrategy,
     UnsupportedCapabilityError,
 )
-from app.services.model_adaptation import resolve_adaptation_profile
+from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.model_adaptation import (
+    get_adaptation_profile,
+    resolve_adaptation_profile,
+)
 from app.services.workspace.system_settings import get_effective_agent_model_family
 
 
@@ -36,13 +40,22 @@ class OpenAIResponsesRuntime:
         task_id: Optional[int] = None,
         *,
         use_demo_mode: Optional[bool] = None,
+        runtime_configuration: RuntimeConfiguration | None = None,
     ) -> None:
         self.db = db
         self.session_id = session_id
         self.task_id = task_id
         self.use_demo_mode = use_demo_mode
-        self.backend_descriptor = get_backend_descriptor("openai_responses_api")
-        self.backend_role: Optional[str] = None
+        self.runtime_configuration = runtime_configuration
+        backend_name = (
+            runtime_configuration.backend_name
+            if runtime_configuration
+            else "openai_responses_api"
+        )
+        self.backend_descriptor = get_backend_descriptor(backend_name)
+        self.backend_role: Optional[str] = (
+            runtime_configuration.role if runtime_configuration else None
+        )
         self.response_session_key = (
             f"openai:session:{task_id or session_id or int(time.time())}"
         )
@@ -195,6 +208,8 @@ class OpenAIResponsesRuntime:
             }
 
     def _model_name(self) -> str:
+        if self.runtime_configuration and self.runtime_configuration.model_family:
+            return self.runtime_configuration.model_family
         role_model = ""
         if self.backend_role == "planning":
             role_model = settings.PLANNER_MODEL
@@ -235,10 +250,7 @@ class OpenAIResponsesRuntime:
 
     def get_backend_metadata(self) -> dict[str, Any]:
         model_family = self._model_name()
-        adaptation_profile = resolve_adaptation_profile(
-            backend=self.backend_descriptor.name,
-            model_family=model_family,
-        )
+        adaptation_profile = self._adaptation_profile(model_family)
         return {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
@@ -251,10 +263,7 @@ class OpenAIResponsesRuntime:
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         model_family = self._model_name()
-        profile = resolve_adaptation_profile(
-            backend=self.backend_descriptor.name,
-            model_family=model_family,
-        )
+        profile = self._adaptation_profile(model_family)
         return AgentInterfaceDescriptor(
             backend=self.backend_descriptor.name,
             model_family=model_family,
@@ -295,6 +304,14 @@ class OpenAIResponsesRuntime:
                     return True
         return False
 
+    def _adaptation_profile(self, model_family: str):
+        if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
+            return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        return resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
+        )
+
 
 def _extract_output_text(payload: dict[str, Any]) -> str:
     output_text = payload.get("output_text")
@@ -328,6 +345,7 @@ def create_runtime(
     task_id: Optional[int] = None,
     *,
     use_demo_mode: Optional[bool] = None,
+    runtime_configuration: RuntimeConfiguration | None = None,
 ) -> OpenAIResponsesRuntime:
     """Instantiate the OpenAI Responses backend runtime."""
 
@@ -336,4 +354,5 @@ def create_runtime(
         session_id,
         task_id,
         use_demo_mode=use_demo_mode,
+        runtime_configuration=runtime_configuration,
     )

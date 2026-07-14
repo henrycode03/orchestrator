@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from app.models import PlanningArtifact, PlanningSession, Project
+from app.services.agents.agent_runtime import BackendRole
 from app.services.planning.planning_session_service import PlanningSessionService
 from app.services.planning.planner_service import PlannerService
 
@@ -224,6 +225,7 @@ def test_planning_runtime_receives_project_context(db_session, monkeypatch):
     assert captured["project_id"] == 42
     assert captured["task_id"] is None
     assert captured["timeout_seconds"] == 7
+    assert captured["role"] is BackendRole.PLANNING
 
 
 def test_malformed_planning_synthesis_failure_writes_diagnostic_artifact(

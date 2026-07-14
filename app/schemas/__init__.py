@@ -421,6 +421,7 @@ class SystemSettingsUpdateRequest(BaseModel):
     agent_backend: Optional[str] = None
     agent_model_family: Optional[str] = None
     agent_adaptation_profile: Optional[str] = None
+    planning_adaptation_profile: Optional[str] = None
     orchestration_policy_profile: Optional[str] = None
     workspace_review_policy: Optional[str] = None
 
@@ -453,6 +454,7 @@ class SystemSettingsResponse(BaseModel):
     agent_backend: str
     agent_model_family: str
     agent_adaptation_profile: str
+    planning_adaptation_profile: str
     backend_capabilities: dict[str, Any]
     backend_health: dict[str, Any]
     supported_backends: list[dict[str, Any]] = []

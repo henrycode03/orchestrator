@@ -22,6 +22,10 @@ from app.services.agents.agent_backends import (
     get_backend_descriptor,
     list_supported_backends,
 )
+from app.services.agents.agent_runtime import (
+    UnsupportedRuntimeProfileError,
+    resolve_planning_runtime_configuration,
+)
 from app.services.model_adaptation import (
     get_adaptation_profile,
     list_adaptation_profiles,
@@ -35,6 +39,7 @@ from app.services.workspace.system_settings import (
     AGENT_BACKEND_KEY,
     AGENT_MODEL_FAMILY_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
+    PLANNING_ADAPTATION_PROFILE_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
     WORKSPACE_ROOT_KEY,
     get_effective_adaptation_profile,
@@ -44,6 +49,7 @@ from app.services.workspace.system_settings import (
     get_effective_policy_profile,
     get_effective_workspace_review_policy,
     get_effective_workspace_root,
+    get_setting_value,
     normalize_workspace_review_policy,
     set_setting_value,
 )
@@ -169,6 +175,7 @@ def get_app_settings(
         get_effective_adaptation_profile(db=db),
         backend_name=effective_backend_name,
     )
+    planning_configuration = resolve_planning_runtime_configuration(db)
     effective_policy_profile = get_effective_policy_profile(db=db)
     effective_workspace_review_policy = get_effective_workspace_review_policy(
         settings.WORKSPACE_REVIEW_POLICY, db=db
@@ -195,6 +202,7 @@ def get_app_settings(
             "agent_adaptation_profile": get_adaptation_profile(
                 effective_adaptation_profile
             ).name,
+            "planning_adaptation_profile": planning_configuration.adaptation_profile,
             "backend_capabilities": backend.capabilities.to_dict(),
             "backend_health": backend.health.to_dict(),
             "supported_backends": [
@@ -421,6 +429,33 @@ def update_system_settings(
             changes["agent_adaptation_profile"] = {
                 "from": previous_adaptation,
                 "to": profile.name,
+            }
+
+    if payload.planning_adaptation_profile is not None:
+        previous_planning_profile = get_setting_value(
+            db,
+            PLANNING_ADAPTATION_PROFILE_KEY,
+        )
+        try:
+            planning_configuration = resolve_planning_runtime_configuration(
+                db,
+                adaptation_profile_override=payload.planning_adaptation_profile,
+            )
+        except (UnsupportedRuntimeProfileError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        set_setting_value(
+            db,
+            PLANNING_ADAPTATION_PROFILE_KEY,
+            planning_configuration.adaptation_profile,
+            description="Operator-selected planning runtime adaptation profile",
+        )
+        if previous_planning_profile != planning_configuration.adaptation_profile:
+            changes["planning_adaptation_profile"] = {
+                "from": previous_planning_profile,
+                "to": planning_configuration.adaptation_profile,
             }
 
     if payload.orchestration_policy_profile is not None:

@@ -16,7 +16,18 @@ from app.services.agents.agent_backends import (
 )
 from app.services.agents.interfaces import AgentRuntime
 from app.services.agents.providers import get_runtime_factory
+from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.model_adaptation import (
+    get_adaptation_profile,
+    require_adaptation_profile,
+)
 from app.services.workspace.system_settings import get_effective_agent_backend
+from app.services.workspace.system_settings import (
+    PLANNING_ADAPTATION_PROFILE_KEY,
+    get_effective_adaptation_profile,
+    get_effective_agent_model_family,
+    get_setting_value_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +41,11 @@ class BackendRole(str, enum.Enum):
 
 
 _TEST_RUNTIME_BACKENDS = {"stub_success", "stub_capacity"}
+_PROFILE_OVERRIDE_UNSET = object()
+
+
+class UnsupportedRuntimeProfileError(ValueError):
+    """Raised when an explicit role profile is not supported by its backend."""
 
 
 def _test_runtime_backends_enabled() -> bool:
@@ -55,6 +71,73 @@ def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
     return get_effective_agent_backend(settings.AGENT_BACKEND, db=db).strip()
 
 
+def resolve_runtime_configuration(
+    db: Session,
+    role: BackendRole,
+    *,
+    backend_override: Optional[str] = None,
+    adaptation_profile_override: object = _PROFILE_OVERRIDE_UNSET,
+) -> RuntimeConfiguration:
+    """Resolve provider-neutral ownership for a role runtime invocation."""
+
+    backend_name = (
+        str(backend_override).strip()
+        if backend_override
+        else resolve_backend_name_for_role(db, role)
+    )
+    if role is not BackendRole.PLANNING:
+        return RuntimeConfiguration(role=role.value, backend_name=backend_name)
+
+    descriptor = require_backend_descriptor(backend_name)
+    model_family = (
+        str(settings.PLANNER_MODEL or "").strip()
+        or get_effective_agent_model_family(settings.AGENT_MODEL, db=db).strip()
+        or descriptor.default_model_family
+    )
+    if adaptation_profile_override is _PROFILE_OVERRIDE_UNSET:
+        explicit_profile = get_setting_value_runtime(
+            PLANNING_ADAPTATION_PROFILE_KEY,
+            settings.PLANNING_ADAPTATION_PROFILE,
+            db=db,
+        )
+    else:
+        explicit_profile = str(adaptation_profile_override or "").strip() or None
+
+    if explicit_profile:
+        profile = require_adaptation_profile(str(explicit_profile))
+        if (
+            profile.backend != "*"
+            and profile.name not in descriptor.config.adaptation_profiles
+        ):
+            raise UnsupportedRuntimeProfileError(
+                f"Adaptation profile '{profile.name}' is not supported by "
+                f"planning backend '{descriptor.name}'."
+            )
+    else:
+        profile = get_adaptation_profile(get_effective_adaptation_profile(db=db))
+
+    return RuntimeConfiguration(
+        role=role.value,
+        backend_name=descriptor.name,
+        model_family=model_family,
+        adaptation_profile=profile.name,
+    )
+
+
+def resolve_planning_runtime_configuration(
+    db: Session,
+    *,
+    adaptation_profile_override: object = _PROFILE_OVERRIDE_UNSET,
+) -> RuntimeConfiguration:
+    """Resolve the single configuration owner used by Planning Sessions."""
+
+    return resolve_runtime_configuration(
+        db,
+        BackendRole.PLANNING,
+        adaptation_profile_override=adaptation_profile_override,
+    )
+
+
 def create_agent_runtime(
     db: Session,
     session_id: Optional[int],
@@ -66,7 +149,15 @@ def create_agent_runtime(
 ) -> AgentRuntime:
     """Instantiate the configured backend runtime for a session/task pair."""
 
-    if backend_override:
+    runtime_configuration: RuntimeConfiguration | None = None
+    if role is BackendRole.PLANNING:
+        runtime_configuration = resolve_runtime_configuration(
+            db,
+            role,
+            backend_override=backend_override,
+        )
+        backend_name = runtime_configuration.backend_name
+    elif backend_override:
         backend_name = str(backend_override).strip()
     elif role is not None:
         backend_name = resolve_backend_name_for_role(db, role)
@@ -91,14 +182,14 @@ def create_agent_runtime(
     descriptor = require_backend_descriptor(backend_name)
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:
-        runtime = runtime_factory(
-            db,
-            session_id,
-            task_id,
-            use_demo_mode=use_demo_mode,
-        )
+        runtime_kwargs: dict[str, Any] = {"use_demo_mode": use_demo_mode}
+        if runtime_configuration is not None:
+            runtime_kwargs["runtime_configuration"] = runtime_configuration
+        runtime = runtime_factory(db, session_id, task_id, **runtime_kwargs)
         if role is not None and hasattr(runtime, "__dict__"):
             runtime.backend_role = role.value
+        if runtime_configuration is not None and hasattr(runtime, "__dict__"):
+            runtime.runtime_configuration = runtime_configuration
         return runtime
 
     raise UnsupportedAgentBackendError(
@@ -117,10 +208,11 @@ def invoke_runtime_prompt(
     source_brain: str = "local",
     timeout_seconds: int = 180,
     session_prefix: str = "planning",
+    role: Optional[BackendRole] = None,
 ) -> dict[str, Any]:
     """Execute a one-shot runtime prompt across local or remote backends."""
 
-    runtime = create_agent_runtime(db, session_id, task_id)
+    runtime = create_agent_runtime(db, session_id, task_id, role=role)
     if project_id is not None and hasattr(runtime, "project_id"):
         runtime.project_id = project_id
     if task_execution_id is not None and hasattr(runtime, "task_execution_id"):
@@ -151,8 +243,14 @@ def runtime_reports_context_overflow(
     *,
     session_id: Optional[int] = None,
     task_id: Optional[int] = None,
+    role: Optional[BackendRole] = None,
 ) -> bool:
     """Backend-neutral context overflow check for planning retries."""
 
-    runtime = create_agent_runtime(db, session_id=session_id, task_id=task_id)
+    runtime = create_agent_runtime(
+        db,
+        session_id=session_id,
+        task_id=task_id,
+        role=role,
+    )
     return runtime.reports_context_overflow(result)

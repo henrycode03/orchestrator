@@ -37,8 +37,11 @@ def _fingerprint(payload: dict[str, Any], reasoning_profile: str | None) -> str:
 
 def active_planning_identity(db: Session) -> dict[str, str | None]:
     """Snapshot the active planning lane without retaining configuration secrets."""
-    payload = build_identity_payload(db)
-    reasoning_profile = get_effective_adaptation_profile(db=db) or None
+    from app.services.agents.agent_runtime import resolve_planning_runtime_configuration
+
+    configuration = resolve_planning_runtime_configuration(db)
+    payload = build_identity_payload(db, planning_configuration=configuration)
+    reasoning_profile = configuration.adaptation_profile
     return {
         "planning_backend": payload["planning_backend"],
         "planner_model": payload["planner_model"],

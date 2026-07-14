@@ -18,6 +18,11 @@ from app.services.agents.interfaces import (
     RetryStrategy,
     UnsupportedCapabilityError,
 )
+from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.model_adaptation import (
+    get_adaptation_profile,
+    resolve_adaptation_profile,
+)
 
 
 _PLAN_SYSTEM = """You are a precise software development orchestrator.
@@ -85,13 +90,22 @@ class OpenAIChatCompletionsRuntime:
         task_id: Optional[int] = None,
         *,
         use_demo_mode: Optional[bool] = None,
+        runtime_configuration: RuntimeConfiguration | None = None,
     ) -> None:
         self.db = db
         self.session_id = session_id
         self.task_id = task_id
         self.use_demo_mode = use_demo_mode
-        self.backend_descriptor = get_backend_descriptor("openai_chat_completions")
-        self.backend_role: Optional[str] = None
+        self.runtime_configuration = runtime_configuration
+        backend_name = (
+            runtime_configuration.backend_name
+            if runtime_configuration
+            else "openai_chat_completions"
+        )
+        self.backend_descriptor = get_backend_descriptor(backend_name)
+        self.backend_role: Optional[str] = (
+            runtime_configuration.role if runtime_configuration else None
+        )
         self.response_session_key = (
             f"openai-chat:session:{task_id or session_id or int(time.time())}"
         )
@@ -110,6 +124,8 @@ class OpenAIChatCompletionsRuntime:
         ).strip()
 
     def _model_name(self) -> str:
+        if self.runtime_configuration and self.runtime_configuration.model_family:
+            return self.runtime_configuration.model_family
         if self.backend_role == "planning" and settings.PLANNER_MODEL:
             return settings.PLANNER_MODEL
         return (
@@ -244,29 +260,44 @@ class OpenAIChatCompletionsRuntime:
         }
 
     def get_backend_metadata(self) -> dict[str, Any]:
-        return {
+        model_family = self._model_name()
+        payload = {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
-            "model_family": self._model_name(),
+            "model_family": model_family,
             "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+        if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
+            payload["adaptation_profile"] = (
+                self.runtime_configuration.adaptation_profile
+            )
+        return payload
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
+        model_family = self._model_name()
+        profile = (
+            self._adaptation_profile(model_family)
+            if self.runtime_configuration
+            and self.runtime_configuration.adaptation_profile
+            else None
+        )
         return AgentInterfaceDescriptor(
             backend=self.backend_descriptor.name,
-            model_family=self._model_name(),
+            model_family=model_family,
             planning_prompt_template="assemble_planning_prompt",
             execution_prompt_template="assemble_execution_prompt",
-            prompt_dialect="openai_chat_completions",
+            prompt_dialect=(
+                profile.prompt_dialect if profile else "openai_chat_completions"
+            ),
             tool_capability_map={
                 "shell": False,
                 "filesystem": False,
                 "checkpoint_resume": False,
                 "streaming": False,
             },
-            tool_shape="none",
+            tool_shape=profile.tool_shape if profile else "none",
             preferred_retry_strategy=RetryStrategy(
                 planning="schema_first",
                 execution="single_retry_compact_prompt",
@@ -275,8 +306,18 @@ class OpenAIChatCompletionsRuntime:
             context_window_policy=ContextWindowPolicy(
                 max_input_tokens=self.backend_descriptor.capabilities.max_context_tokens,
                 overflow_strategy="truncate_and_retry",
-                compaction_strategy="truncate_context",
+                compaction_strategy=(
+                    profile.context_window_policy if profile else "truncate_context"
+                ),
             ),
+        )
+
+    def _adaptation_profile(self, model_family: str):
+        if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
+            return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        return resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
         )
 
     def get_interface_descriptor(self) -> AgentInterfaceDescriptor:

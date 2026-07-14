@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from app.config import settings
 from app.models import SystemSetting
 from app.models import PlanningMessage, PlanningSession
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.runtime_configuration import RuntimeConfiguration
 from app.services.planning.planning_session_service import PlanningSessionService
+from app.services.workspace.system_settings import (
+    ADAPTATION_PROFILE_KEY,
+    set_setting_value,
+)
+
+PLANNING_ADAPTATION_PROFILE_KEY = "orchestrator_planning_adaptation_profile"
 
 
 def test_context_overflow_detection_matches_embedded_agent_variant():
@@ -74,8 +82,13 @@ def test_synthesis_prompt_uses_active_adaptation_profile(monkeypatch):
     )()
 
     monkeypatch.setattr(
-        "app.services.planning.planning_session_service.get_effective_adaptation_profile",
-        lambda db=None: "openai_responses_default",
+        "app.services.planning.planning_session_service.resolve_planning_runtime_configuration",
+        lambda db: RuntimeConfiguration(
+            role="planning",
+            backend_name="planning-backend",
+            model_family="planning-model",
+            adaptation_profile="openai_responses_default",
+        ),
     )
 
     prompt = service._build_synthesis_prompt(session, project)
@@ -83,6 +96,30 @@ def test_synthesis_prompt_uses_active_adaptation_profile(monkeypatch):
     assert prompt.startswith('{"objective":"Create implementation-planning artifacts')
     assert '"execution_mode":"planning_synthesis"' in prompt
     assert '"context":{"Project":"Adapted Project"' in prompt
+
+
+def test_synthesis_prompt_uses_planning_role_profile(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "gpt-5")
+    set_setting_value(db_session, ADAPTATION_PROFILE_KEY, "openclaw_default")
+    set_setting_value(
+        db_session,
+        PLANNING_ADAPTATION_PROFILE_KEY,
+        "openai_responses_default",
+    )
+    service = PlanningSessionService(db_session)
+
+    prompt = service._render_adapted_prompt(
+        objective="Create a plan",
+        execution_mode="planning_synthesis",
+        instructions=["Return a structured plan."],
+        context={"Project": "Role-specific planning"},
+        expected_output="A plan",
+    )
+
+    assert prompt.startswith('{"objective":"Create a plan"')
+    assert '"execution_mode":"planning_synthesis"' in prompt
 
 
 def test_clarification_payload_parser_uses_model_decision():

@@ -154,6 +154,51 @@ def test_settings_reject_mismatched_backend_and_adaptation_profile(
     )
 
 
+def test_settings_persist_planning_profile_against_planning_backend(
+    authenticated_client, db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_responses_api")
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
+    set_setting_value(db_session, ADAPTATION_PROFILE_KEY, "openclaw_default")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={"planning_adaptation_profile": "openai_responses_default"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["system"]
+    assert payload["agent_backend"] == "local_openclaw"
+    assert payload["agent_adaptation_profile"] == "openclaw_default"
+    assert payload["planning_adaptation_profile"] == "openai_responses_default"
+    assert (
+        get_setting_value(db_session, "orchestrator_planning_adaptation_profile")
+        == "openai_responses_default"
+    )
+
+
+def test_settings_reject_profile_not_registered_for_planning_backend(
+    authenticated_client, db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "direct_ollama")
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={"planning_adaptation_profile": "openai_responses_default"},
+    )
+
+    assert response.status_code == 400
+    assert (
+        get_setting_value(db_session, "orchestrator_planning_adaptation_profile")
+        is None
+    )
+
+
 def test_direct_ollama_save_normalizes_stale_openclaw_adaptation_profile(
     authenticated_client, db_session
 ):

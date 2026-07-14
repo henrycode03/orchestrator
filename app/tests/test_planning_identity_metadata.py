@@ -21,11 +21,19 @@ from app.models import (
     TaskStatus,
 )
 from app.services.observability.planning_identity import (
+    _fingerprint,
     active_execution_identity,
     active_planning_identity,
 )
+from app.services.observability.build_identity import build_identity_payload
 from app.services.planning.planning_session_service import PlanningSessionService
 from app.services.tasks.execution import create_task_execution
+from app.services.workspace.system_settings import (
+    ADAPTATION_PROFILE_KEY,
+    set_setting_value,
+)
+
+PLANNING_ADAPTATION_PROFILE_KEY = "orchestrator_planning_adaptation_profile"
 
 
 def _project_with_task_and_session(db_session):
@@ -88,6 +96,49 @@ def test_planning_session_snapshots_active_planner_identity(db_session, monkeypa
     payload = PlanningSessionService(db_session).build_session_payload(planning_session)
     assert payload["planning_backend"] == expected["planning_backend"]
     assert payload["configuration_fingerprint"] == expected["configuration_fingerprint"]
+
+
+def test_a0_planning_identity_preserves_legacy_profile_and_fingerprint(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", None)
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "")
+    set_setting_value(db_session, ADAPTATION_PROFILE_KEY, "openclaw_default")
+    payload = build_identity_payload(db_session)
+
+    identity = active_planning_identity(db_session)
+
+    assert identity == {
+        "planning_backend": payload["planning_backend"],
+        "planner_model": payload["planner_model"],
+        "reasoning_profile": "openclaw_default",
+        "configuration_fingerprint": _fingerprint(payload, "openclaw_default"),
+    }
+
+
+def test_planning_identity_and_fingerprint_use_planning_profile(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "gpt-5")
+    set_setting_value(db_session, ADAPTATION_PROFILE_KEY, "openclaw_default")
+    set_setting_value(
+        db_session,
+        PLANNING_ADAPTATION_PROFILE_KEY,
+        "openai_responses_default",
+    )
+    payload = build_identity_payload(db_session)
+
+    identity = active_planning_identity(db_session)
+
+    assert identity["planning_backend"] == "openai_responses_api"
+    assert identity["planner_model"] == "gpt-5"
+    assert identity["reasoning_profile"] == "openai_responses_default"
+    assert identity["configuration_fingerprint"] == _fingerprint(
+        payload, "openai_responses_default"
+    )
 
 
 def test_task_execution_snapshots_lanes_and_ignores_later_config_changes(

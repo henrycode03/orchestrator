@@ -26,7 +26,9 @@ from app.models import (
 )
 from app.schemas import PlannerTaskCandidate
 from app.services.agents.agent_runtime import (
+    BackendRole,
     invoke_runtime_prompt,
+    resolve_planning_runtime_configuration,
     runtime_reports_context_overflow,
 )
 from app.services.agents.interfaces import AgentRuntimeError
@@ -36,7 +38,6 @@ from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 from app.services.orchestration.prompt_optimization import optimize_prompt
 from app.services.observability.planning_identity import active_planning_identity
-from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 logger = logging.getLogger(__name__)
 
@@ -743,6 +744,7 @@ class PlanningSessionService:
                     timeout_seconds or self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS
                 ),
                 session_prefix="planning",
+                role=BackendRole.PLANNING,
             )
         except AgentRuntimeError as exc:
             raise RuntimeError(str(exc))
@@ -761,7 +763,11 @@ class PlanningSessionService:
             timeout_seconds=timeout_seconds,
             project_id=project_id,
         )
-        if not runtime_reports_context_overflow(self.db, result):
+        if not runtime_reports_context_overflow(
+            self.db,
+            result,
+            role=BackendRole.PLANNING,
+        ):
             return result
 
         compact_prompt = self._build_compact_synthesis_prompt(prompt)
@@ -1095,7 +1101,7 @@ class PlanningSessionService:
         context: dict[str, Any],
         expected_output: str,
     ) -> str:
-        profile_name = get_effective_adaptation_profile(db=self.db)
+        configuration = resolve_planning_runtime_configuration(self.db)
         envelope = PromptEnvelope(
             objective=objective,
             execution_mode=execution_mode,
@@ -1103,7 +1109,7 @@ class PlanningSessionService:
             context=context,
             expected_output=expected_output,
         )
-        return render_prompt_for_profile(profile_name, envelope)
+        return render_prompt_for_profile(configuration.adaptation_profile, envelope)
 
     def _parse_clarification_payload(
         self,

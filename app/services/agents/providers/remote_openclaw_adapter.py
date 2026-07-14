@@ -7,6 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.services.agents.agent_backends import UnsupportedAgentBackendError
+from app.services.agents.runtime_configuration import RuntimeConfiguration
 
 
 def create_runtime(
@@ -15,6 +16,7 @@ def create_runtime(
     task_id: Optional[int] = None,
     *,
     use_demo_mode: Optional[bool] = None,
+    runtime_configuration: RuntimeConfiguration | None = None,
 ):
     """Reject remote gateway runtime creation until a concrete adapter exists."""
 

@@ -17,6 +17,11 @@ from app.services.agents.interfaces import (
     ContextWindowPolicy,
     RetryStrategy,
 )
+from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.model_adaptation import (
+    get_adaptation_profile,
+    resolve_adaptation_profile,
+)
 from app.services.workspace.system_settings import (
     AGENT_MODEL_FAMILY_KEY,
     get_setting_value_runtime,
@@ -102,12 +107,22 @@ class OllamaRuntime:
         task_id: Optional[int] = None,
         *,
         use_demo_mode: Optional[bool] = None,
+        runtime_configuration: RuntimeConfiguration | None = None,
     ) -> None:
         self.db = db
         self.session_id = session_id
         self.task_id = task_id
         self.task_execution_id: Optional[int] = None
-        self.backend_descriptor = get_backend_descriptor("direct_ollama")
+        self.runtime_configuration = runtime_configuration
+        self.backend_role: Optional[str] = (
+            runtime_configuration.role if runtime_configuration else None
+        )
+        backend_name = (
+            runtime_configuration.backend_name
+            if runtime_configuration
+            else "direct_ollama"
+        )
+        self.backend_descriptor = get_backend_descriptor(backend_name)
 
         self._base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip(
             "/"
@@ -115,7 +130,9 @@ class OllamaRuntime:
         persisted_model = get_setting_value_runtime(
             AGENT_MODEL_FAMILY_KEY, None, db=self.db
         )
-        if (
+        if runtime_configuration and runtime_configuration.model_family:
+            selected_model = runtime_configuration.model_family
+        elif (
             persisted_model
             and str(settings.AGENT_BACKEND or "").strip() == "direct_ollama"
         ):
@@ -265,7 +282,7 @@ class OllamaRuntime:
         }
 
     def get_backend_metadata(self) -> dict[str, Any]:
-        return {
+        payload = {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
@@ -273,21 +290,32 @@ class OllamaRuntime:
             "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+        if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
+            payload["adaptation_profile"] = (
+                self.runtime_configuration.adaptation_profile
+            )
+        return payload
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
+        profile = (
+            self._adaptation_profile()
+            if self.runtime_configuration
+            and self.runtime_configuration.adaptation_profile
+            else None
+        )
         return AgentInterfaceDescriptor(
             backend=self.backend_descriptor.name,
             model_family=self._model,
             planning_prompt_template="assemble_planning_prompt",
             execution_prompt_template="assemble_execution_prompt",
-            prompt_dialect="ollama_chat",
+            prompt_dialect=profile.prompt_dialect if profile else "ollama_chat",
             tool_capability_map={
                 "shell": False,
                 "filesystem": False,
                 "checkpoint_resume": False,
                 "streaming": False,
             },
-            tool_shape="none",
+            tool_shape=profile.tool_shape if profile else "none",
             preferred_retry_strategy=RetryStrategy(
                 planning="schema_first",
                 execution="single_retry_compact_prompt",
@@ -296,8 +324,18 @@ class OllamaRuntime:
             context_window_policy=ContextWindowPolicy(
                 max_input_tokens=self._num_ctx,
                 overflow_strategy="truncate_and_retry",
-                compaction_strategy="truncate_context",
+                compaction_strategy=(
+                    profile.context_window_policy if profile else "truncate_context"
+                ),
             ),
+        )
+
+    def _adaptation_profile(self):
+        if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
+            return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        return resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=self._model,
         )
 
     def reports_context_overflow(self, result: Optional[dict[str, Any]]) -> bool:
@@ -313,5 +351,12 @@ def create_runtime(
     task_id: Optional[int] = None,
     *,
     use_demo_mode: Optional[bool] = None,
+    runtime_configuration: RuntimeConfiguration | None = None,
 ) -> OllamaRuntime:
-    return OllamaRuntime(db, session_id, task_id, use_demo_mode=use_demo_mode)
+    return OllamaRuntime(
+        db,
+        session_id,
+        task_id,
+        use_demo_mode=use_demo_mode,
+        runtime_configuration=runtime_configuration,
+    )

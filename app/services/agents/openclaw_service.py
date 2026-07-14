@@ -45,7 +45,11 @@ from app.services.agents.interfaces import (
 from app.services.agents.runtime_adapters.openclaw_adapter import (
     normalize_openclaw_execution_result,
 )
-from app.services.model_adaptation import resolve_adaptation_profile
+from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.model_adaptation import (
+    get_adaptation_profile,
+    resolve_adaptation_profile,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -226,6 +230,7 @@ class OpenClawSessionService:
         task_id: Optional[int] = None,
         use_demo_mode: Optional[bool] = None,
         task_execution_id: Optional[int] = None,
+        runtime_configuration: RuntimeConfiguration | None = None,
     ):
         self.db = db
         self.session_id = session_id
@@ -254,14 +259,22 @@ class OpenClawSessionService:
         # never the operator's real ~/.openclaw/openclaw.json.
         self._openclaw_config_path_override: Optional[Path] = None
         self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
-        self.backend_role: Optional[str] = None
+        self.runtime_configuration = runtime_configuration
+        self.backend_role: Optional[str] = (
+            runtime_configuration.role if runtime_configuration else None
+        )
         self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
         self._last_selected_openclaw_agent_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
+        backend_name = (
+            runtime_configuration.backend_name
+            if runtime_configuration
+            else get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
+        )
         self.backend_descriptor: BackendDescriptor = get_backend_descriptor(
-            get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
+            backend_name
         )
         # Initialize checkpoint service
         from app.services.workspace.checkpoint_service import CheckpointService
@@ -272,10 +285,7 @@ class OpenClawSessionService:
         """Return normalized backend metadata for logs, APIs, and orchestration."""
 
         model_family = self._model_family_for_role()
-        adaptation_profile = resolve_adaptation_profile(
-            backend=self.backend_descriptor.name,
-            model_family=model_family,
-        )
+        adaptation_profile = self._adaptation_profile_for_role(model_family)
         return {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
@@ -287,6 +297,8 @@ class OpenClawSessionService:
         }
 
     def _model_family_for_role(self) -> str:
+        if self.runtime_configuration and self.runtime_configuration.model_family:
+            return self.runtime_configuration.model_family
         role_model = ""
         if self.backend_role == "planning":
             role_model = settings.PLANNER_MODEL
@@ -296,6 +308,14 @@ class OpenClawSessionService:
             role_model = settings.EXECUTION_MODEL or settings.OLLAMA_AGENT_MODEL
         return str(role_model or "").strip() or get_effective_agent_model_family(
             settings.AGENT_MODEL, db=self.db
+        )
+
+    def _adaptation_profile_for_role(self, model_family: str):
+        if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
+            return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        return resolve_adaptation_profile(
+            backend=self.backend_descriptor.name,
+            model_family=model_family,
         )
 
     def normalize_execution_result(
@@ -316,10 +336,7 @@ class OpenClawSessionService:
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         model_family = self._model_family_for_role()
-        profile = resolve_adaptation_profile(
-            backend=self.backend_descriptor.name,
-            model_family=model_family,
-        )
+        profile = self._adaptation_profile_for_role(model_family)
         return AgentInterfaceDescriptor(
             backend=self.backend_descriptor.name,
             model_family=model_family,
