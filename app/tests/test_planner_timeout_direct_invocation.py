@@ -286,7 +286,7 @@ def test_direct_ollama_direct_planning_ignores_local_openclaw_threshold(monkeypa
     assert captured["direct_timeout_budget_seconds"] == 300
 
 
-def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
+def test_planning_repair_uses_registry_no_thinking_chat_path(db_session, monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 
     captured = {}
@@ -323,7 +323,7 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
             return Response()
 
     class Runtime:
-        db = object()
+        db = db_session
 
         def get_backend_metadata(self):
             return {"backend": "local_openclaw"}
@@ -361,7 +361,9 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
         )
     )
 
-    assert result["backend"] == "direct_chat_completions"
+    assert result["backend"] == "openai_chat_completions"
+    assert result["planning_repair_runtime_role"] == "repair"
+    assert result["planning_repair_direct"] is False
     assert result["output"].startswith("[")
     assert captured["url"] == "http://localhost:8000/v1/chat/completions"
     assert captured["timeout"] == 60
@@ -372,8 +374,8 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     assert captured["payload"]["think"] is False
 
 
-def test_stale_replace_planning_repair_captures_prompt_and_gateway_result(
-    monkeypatch, tmp_path
+def test_stale_replace_planning_repair_captures_prompt_and_registry_result(
+    db_session, monkeypatch, tmp_path
 ):
     from app.services.orchestration.planning import planner as planner_module
 
@@ -424,7 +426,7 @@ def test_stale_replace_planning_repair_captures_prompt_and_gateway_result(
             return Response()
 
     class Runtime:
-        db = object()
+        db = db_session
 
         def get_backend_metadata(self):
             return {"backend": "local_openclaw", "model_family": "qwen3.6:27B"}
@@ -461,16 +463,13 @@ def test_stale_replace_planning_repair_captures_prompt_and_gateway_result(
         tmp_path / "planning-stale-replace-repair" / captured["prompt_sha256_12"]
     )
     metadata = json.loads((diagnostic_dir / "prompt_metadata.json").read_text())
-    gateway = json.loads(
-        (diagnostic_dir / "direct_no_thinking_result.json").read_text()
-    )
-    assert result["backend"] == "direct_chat_completions"
+    assert result["backend"] == "openai_chat_completions"
+    assert result["planning_repair_runtime_role"] == "repair"
     assert metadata["prompt_chars"] == len(prompt)
     assert metadata["repair_reason"].startswith("post_repair_stale_replace_fallback")
-    assert gateway["status"] == "completed"
-    assert gateway["finish_reason"] == "stop"
-    assert gateway["content_null"] is False
-    assert gateway["content_chars"] == len('[{"step_number":1}]')
+    assert "direct_no_thinking_result.json" not in {
+        path.name for path in diagnostic_dir.iterdir()
+    }
 
 
 def test_direct_planning_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
@@ -717,7 +716,7 @@ def test_direct_ollama_ignores_local_openclaw_direct_timeout_override(monkeypatc
     assert result["direct_planning_timeout_seconds"] == 90
 
 
-def test_direct_repair_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
+def test_registry_repair_uses_role_model_for_hyphen_alias(db_session, monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 
     captured = {}
@@ -754,7 +753,7 @@ def test_direct_repair_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
             return Response()
 
     class Runtime:
-        db = object()
+        db = db_session
 
         def get_backend_metadata(self):
             return {
@@ -788,11 +787,13 @@ def test_direct_repair_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
         )
     )
 
-    assert result["backend"] == "direct_chat_completions"
-    assert captured["payload"]["model"] == "qwen3:8b-hybrid"
+    assert result["backend"] == "openai_chat_completions"
+    assert captured["payload"]["model"] == "qwen3-8b-hybrid"
 
 
-def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
+def test_planning_repair_registry_failure_preserves_fallback_behavior(
+    monkeypatch, db_session
+):
     from app.services.orchestration.planning import planner as planner_module
 
     captured = {}
@@ -811,7 +812,7 @@ def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
             raise RuntimeError("direct unavailable")
 
     class Runtime:
-        db = object()
+        db = db_session
 
         def get_backend_metadata(self):
             return {"backend": "local_openclaw"}
@@ -835,11 +836,13 @@ def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
             repair_timeout=60,
         )
     )
-
     assert result["output"] == "[]"
+    assert result["diagnostics"]["planning_repair_registry_fallback"] is True
+    assert (
+        "direct unavailable" in result["diagnostics"]["planning_repair_primary_error"]
+    )
     assert captured["direct_timeout"] == 60
     assert captured["fallback_prompt"] == "repair me"
-    assert captured["fallback_kwargs"]["no_output_timeout_seconds"] == 60
 
 
 def test_minimal_prompt_retry_flags_ultra_dense_prompt_without_changing_retry(

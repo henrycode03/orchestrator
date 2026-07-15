@@ -18,6 +18,7 @@ from app.services.agents.interfaces import (
     RetryStrategy,
     UnsupportedCapabilityError,
 )
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.agents.runtime_configuration import RuntimeConfiguration
 from app.services.model_adaptation import (
     get_adaptation_profile,
@@ -123,6 +124,38 @@ class OpenAIChatCompletionsRuntime:
             settings.OPENAI_CHAT_COMPLETIONS_API_KEY or settings.OPENAI_API_KEY or ""
         ).strip()
 
+    def _invocation_base_url(self, options: RuntimeInvocationOptions | None) -> str:
+        if options is not None and self.backend_role in {
+            "repair",
+            "debug_repair",
+            "completion_repair",
+        }:
+            if self.backend_role == "debug_repair":
+                legacy_url = (
+                    settings.DEBUG_REPAIR_BASE_URL or settings.PLANNING_REPAIR_BASE_URL
+                )
+            else:
+                legacy_url = settings.PLANNING_REPAIR_BASE_URL
+            if legacy_url:
+                return legacy_url.rstrip("/")
+        return self._base_url
+
+    def _invocation_api_key(self, options: RuntimeInvocationOptions | None) -> str:
+        if options is not None and self.backend_role in {
+            "repair",
+            "debug_repair",
+            "completion_repair",
+        }:
+            if self.backend_role == "debug_repair":
+                legacy_key = (
+                    settings.DEBUG_REPAIR_API_KEY or settings.PLANNING_REPAIR_API_KEY
+                )
+            else:
+                legacy_key = settings.PLANNING_REPAIR_API_KEY
+            if legacy_key:
+                return legacy_key.strip()
+        return self._api_key()
+
     def _model_name(self) -> str:
         if self.runtime_configuration and self.runtime_configuration.model_family:
             return self.runtime_configuration.model_family
@@ -142,47 +175,109 @@ class OpenAIChatCompletionsRuntime:
         system: str,
         user: str,
         timeout_seconds: int,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> str:
         headers = {"Content-Type": "application/json"}
-        api_key = self._api_key()
+        api_key = self._invocation_api_key(invocation_options)
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        payload = {
-            "model": self._model_name(),
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(settings.OPENAI_CHAT_COMPLETIONS_TEMPERATURE),
-            "stream": False,
-        }
-        if settings.OPENAI_CHAT_COMPLETIONS_TOP_P is not None:
-            payload["top_p"] = float(settings.OPENAI_CHAT_COMPLETIONS_TOP_P)
-        if settings.OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY is not None:
-            payload["repeat_penalty"] = float(
-                settings.OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY
-            )
+        exact_contract = invocation_options is not None
+        if exact_contract:
+            messages = [{"role": "user", "content": user}]
+            if invocation_options.system_prompt is not None:
+                messages.insert(
+                    0, {"role": "system", "content": invocation_options.system_prompt}
+                )
+            payload = {
+                "model": self._model_name(),
+                "messages": messages,
+                "temperature": float(
+                    invocation_options.temperature
+                    if invocation_options.temperature is not None
+                    else settings.OPENAI_CHAT_COMPLETIONS_TEMPERATURE
+                ),
+                "stream": bool(invocation_options.stream or False),
+            }
+            if invocation_options.max_output_tokens is not None:
+                payload["max_tokens"] = invocation_options.max_output_tokens
+            if invocation_options.reasoning_enabled is False:
+                payload.update(
+                    {
+                        "think": False,
+                        "enable_thinking": False,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    }
+                )
+            payload.update(dict(invocation_options.extra_provider_options or {}))
+            if "chat_template_kwargs" in (
+                invocation_options.extra_provider_options or {}
+            ):
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": False,
+                    **dict(
+                        invocation_options.extra_provider_options[
+                            "chat_template_kwargs"
+                        ]
+                    ),
+                }
+        else:
+            payload = {
+                "model": self._model_name(),
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": float(settings.OPENAI_CHAT_COMPLETIONS_TEMPERATURE),
+                "stream": False,
+            }
+            if settings.OPENAI_CHAT_COMPLETIONS_TOP_P is not None:
+                payload["top_p"] = float(settings.OPENAI_CHAT_COMPLETIONS_TOP_P)
+            if settings.OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY is not None:
+                payload["repeat_penalty"] = float(
+                    settings.OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY
+                )
+
+        effective_timeout = int(
+            invocation_options.timeout_seconds
+            if invocation_options is not None
+            and invocation_options.timeout_seconds is not None
+            else timeout_seconds
+        )
 
         try:
-            async with httpx.AsyncClient(timeout=timeout_seconds + 30) as client:
+            transport_timeout = (
+                effective_timeout if exact_contract else effective_timeout + 30
+            )
+            async with httpx.AsyncClient(timeout=transport_timeout) as client:
                 response = await client.post(
-                    f"{self._base_url}/chat/completions",
+                    f"{self._invocation_base_url(invocation_options)}/chat/completions",
                     headers=headers,
                     json=payload,
                 )
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise AgentRuntimeError(
-                f"OpenAI-compatible chat request timed out after {timeout_seconds}s."
-            ) from exc
+            error = AgentRuntimeError(
+                f"OpenAI-compatible chat request timed out after {effective_timeout}s."
+            )
+            error.runtime_diagnostics = {
+                "timed_out": True,
+                "timeout_boundary": "runtime_invocation",
+                "timeout_seconds": effective_timeout,
+            }
+            raise error from exc
         except httpx.HTTPError as exc:
-            raise AgentRuntimeError(
-                f"OpenAI-compatible chat request failed: {exc}"
-            ) from exc
+            error = AgentRuntimeError(f"OpenAI-compatible chat request failed: {exc}")
+            error.runtime_diagnostics = {
+                "timed_out": False,
+                "timeout_boundary": "runtime_invocation",
+                "timeout_seconds": effective_timeout,
+            }
+            raise error from exc
 
         body = response.json()
-        return _strip_thinking(_extract_chat_completion_content(body))
+        content = _extract_chat_completion_content(body)
+        return content if exact_contract else _strip_thinking(content)
 
     async def create_session(
         self, task_description: str, context: Optional[dict[str, Any]] = None
@@ -219,6 +314,7 @@ class OpenAIChatCompletionsRuntime:
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> dict[str, Any]:
         del source_brain
         del isolate_workspace_context
@@ -228,12 +324,19 @@ class OpenAIChatCompletionsRuntime:
             system=system,
             user=prompt,
             timeout_seconds=timeout_seconds,
+            invocation_options=invocation_options,
         )
         return {
             "status": "completed",
             "output": output,
             "backend": self.backend_descriptor.name,
             "model_family": self._model_name(),
+            "role": self.backend_role,
+            "runtime_configuration": (
+                self.runtime_configuration.to_dict()
+                if self.runtime_configuration is not None
+                else None
+            ),
         }
 
     async def pause_session(self) -> None:

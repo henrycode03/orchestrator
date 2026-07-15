@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Protocol
 
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
+
 
 class AgentRuntimeError(Exception):
     """Backend-neutral runtime failure raised by provider adapters."""
@@ -139,6 +141,7 @@ class AgentRuntime(Protocol):
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        invocation_options: Optional[RuntimeInvocationOptions] = None,
     ) -> dict[str, Any]: ...
 
     def get_backend_metadata(self) -> dict[str, Any]: ...

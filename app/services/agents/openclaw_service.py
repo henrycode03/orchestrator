@@ -30,7 +30,6 @@ from types import SimpleNamespace
 from typing import Optional, Dict, Any, List, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-import httpx
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, Task, LogEntry, Project
 from app.config import settings
@@ -41,11 +40,13 @@ from app.services.agents.interfaces import (
     ContextWindowPolicy,
     RuntimeBackendResult,
     RetryStrategy,
+    UnsupportedCapabilityError,
 )
 from app.services.agents.runtime_adapters.openclaw_adapter import (
     normalize_openclaw_execution_result,
 )
 from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
@@ -81,7 +82,6 @@ from app.services.orchestration.validation.workspace_guard import (
 from app.runtime_naming import (
     BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
     canonical_diagnostic_label,
-    diagnostic_label_alias_details,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
@@ -861,70 +861,9 @@ class OpenClawSessionService:
     def _should_use_structured_debug_repair_direct_chat(
         self, diagnostic_label: Optional[str]
     ) -> bool:
-        """Route bounded debug repair through direct chat when configured.
+        """Compatibility probe retained as a permanently disabled boundary."""
 
-        The diagnostic label remains the historical Phase 7F marker for existing
-        reports. New configuration and metadata use the architecture name.
-        """
-
-        if not self._is_bounded_debug_repair_diagnostic_label(diagnostic_label):
-            return False
-        if not settings.DEBUG_REPAIR_DIRECT_ENABLED:
-            return False
-        return self.backend_descriptor.name == "local_openclaw"
-
-    @staticmethod
-    def _debug_repair_direct_config() -> Dict[str, str]:
-        """Resolve direct debug repair settings with planning-repair fallbacks."""
-
-        return {
-            "backend": (
-                settings.DEBUG_REPAIR_BACKEND or settings.REPAIR_BACKEND or ""
-            ).strip(),
-            "base_url": (
-                settings.DEBUG_REPAIR_BASE_URL
-                or settings.PLANNING_REPAIR_BASE_URL
-                or ""
-            ).rstrip("/"),
-            "model": (settings.DEBUG_REPAIR_MODEL or settings.PLANNING_REPAIR_MODEL),
-            "api_key": settings.DEBUG_REPAIR_API_KEY
-            or settings.PLANNING_REPAIR_API_KEY,
-        }
-
-    @staticmethod
-    def _debug_repair_disable_thinking() -> bool:
-        return bool(settings.DEBUG_REPAIR_DISABLE_THINKING)
-
-    @staticmethod
-    def _debug_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
-        """Build the direct structured-repair payload."""
-
-        payload: Dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "max_tokens": 2048,
-            "stream": False,
-        }
-        if OpenClawSessionService._debug_repair_disable_thinking():
-            payload["think"] = False
-            payload["enable_thinking"] = False
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
-        return payload
-
-    @staticmethod
-    def _debug_repair_responses_payload(prompt: str, model: str) -> Dict[str, Any]:
-        """Build an OpenAI Responses API payload for direct debug repair."""
-
-        return {
-            "model": model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                }
-            ],
-        }
+        return False
 
     @staticmethod
     def _extract_responses_output_text(body: Any) -> str:
@@ -979,144 +918,6 @@ class OpenClawSessionService:
                 if isinstance(item, dict) and isinstance(item.get("text"), str)
             )
         return ""
-
-    async def _execute_structured_debug_repair_direct_call(
-        self,
-        prompt: str,
-        *,
-        timeout_seconds: int,
-        diagnostic_metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        config = self._debug_repair_direct_config()
-        base_url = config["base_url"]
-        model = config["model"]
-        if not base_url or not model:
-            raise OpenClawSessionError(
-                "Debug repair direct call is enabled but base URL or model is not configured"
-            )
-
-        uses_responses_api = config["backend"] == "openai_responses_api"
-        if uses_responses_api:
-            payload = self._debug_repair_responses_payload(prompt, model)
-            url = f"{base_url}/responses"
-            timeout_boundary = "debug_repair_responses_api"
-            backend_id = "debug_repair_openai_responses_api"
-        else:
-            payload = self._debug_repair_direct_payload(prompt, model)
-            url = f"{base_url}/chat/completions"
-            timeout_boundary = "debug_repair_direct_chat"
-            backend_id = "debug_repair_direct_chat_completions"
-
-        headers = {"Content-Type": "application/json"}
-        api_key = config["api_key"].strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        started_at = time.monotonic()
-        self._log_entry(
-            "INFO",
-            "[DEBUG_REPAIR_DIRECT] attempting direct structured repair "
-            f"model={model} timeout={timeout_seconds}s prompt_chars={len(prompt or '')}",
-            metadata=json.dumps(
-                {
-                    **diagnostic_label_alias_details(
-                        BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL
-                    ),
-                    "architecture_lane": "debug_repair",
-                    "invocation_kind": "debug_repair",
-                    "timeout_boundary": timeout_boundary,
-                    "prompt_chars": len(prompt or ""),
-                    "prompt_sha256_12": hashlib.sha256(
-                        (prompt or "").encode("utf-8")
-                    ).hexdigest()[:12],
-                    "backend": backend_id,
-                    "responses_api": uses_responses_api,
-                    "disable_thinking": self._debug_repair_disable_thinking(),
-                    **(diagnostic_metadata or {}),
-                }
-            ),
-        )
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            body = response.json()
-        except Exception as exc:
-            duration_seconds = time.monotonic() - started_at
-            error = OpenClawSessionError(
-                f"Debug repair direct call failed: {type(exc).__name__}: {str(exc)[:200]}"
-            )
-            error.runtime_diagnostics = {
-                **diagnostic_label_alias_details(BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL),
-                "architecture_lane": "debug_repair",
-                "invocation_kind": "debug_repair",
-                "timeout_boundary": timeout_boundary,
-                "backend": backend_id,
-                "responses_api": uses_responses_api,
-                "direct_chat_completions": not uses_responses_api,
-                "disable_thinking": self._debug_repair_disable_thinking(),
-                "duration_seconds": round(duration_seconds, 3),
-                "timed_out": isinstance(
-                    exc, (httpx.TimeoutException, asyncio.TimeoutError)
-                ),
-            }
-            raise error
-
-        if uses_responses_api:
-            output = self._extract_responses_output_text(body)
-        else:
-            output = self._extract_chat_completion_content(body)
-        duration_seconds = time.monotonic() - started_at
-        choices = body.get("choices") if isinstance(body, dict) else None
-        first_choice = choices[0] if isinstance(choices, list) and choices else {}
-        message = first_choice.get("message") if isinstance(first_choice, dict) else {}
-        reasoning = message.get("reasoning") if isinstance(message, dict) else None
-        finish_reason = (
-            first_choice.get("finish_reason")
-            if isinstance(first_choice, dict)
-            else None
-        )
-
-        diagnostics = {
-            **diagnostic_label_alias_details(BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL),
-            "architecture_lane": "debug_repair",
-            "invocation_kind": "debug_repair",
-            "timeout_boundary": timeout_boundary,
-            "backend": backend_id,
-            "responses_api": uses_responses_api,
-            "direct_chat_completions": not uses_responses_api,
-            "disable_thinking": self._debug_repair_disable_thinking(),
-            "duration_seconds": round(duration_seconds, 3),
-            "timeout_seconds": timeout_seconds,
-            "finish_reason": finish_reason,
-            "content_chars": len(output or ""),
-            "reasoning_chars": len(reasoning) if isinstance(reasoning, str) else 0,
-            "usage": body.get("usage") if isinstance(body, dict) else None,
-        }
-        self._log_entry(
-            "INFO",
-            "[DEBUG_REPAIR_DIRECT] completed direct structured repair "
-            f"duration={duration_seconds:.1f}s output_chars={len(output or '')} "
-            f"reasoning_chars={diagnostics['reasoning_chars']}",
-            metadata=json.dumps(diagnostics),
-        )
-
-        if not output.strip():
-            error = OpenClawSessionError(
-                "Debug repair direct call returned empty content"
-            )
-            error.runtime_diagnostics = diagnostics
-            raise error
-
-        return {
-            "status": "completed",
-            "output": output,
-            "logs": [],
-            "backend": backend_id,
-            "model_family": model,
-            "diagnostics": diagnostics,
-        }
 
     async def _run_cli_prompt_with_diagnostics(
         self,
@@ -1757,18 +1558,6 @@ class OpenClawSessionService:
                     result = await self._execute_demo_mode(optimized_prompt)
                     # Demo mode always completes successfully (by design)
                     result["status"] = "completed"
-                elif self._should_use_structured_debug_repair_direct_chat(
-                    diagnostic_label
-                ):
-                    result = await self._execute_structured_debug_repair_direct_call(
-                        optimized_prompt,
-                        timeout_seconds=timeout_seconds,
-                        diagnostic_metadata={
-                            **(diagnostic_metadata or {}),
-                            "original_prompt_size": len(prompt or ""),
-                            "optimized_prompt_size": len(optimized_prompt or ""),
-                        },
-                    )
                 else:
                     # REAL MODE: Execute task via OpenClaw HTTP API
                     diagnostics_kwargs: Dict[str, Any] = {}
@@ -2603,8 +2392,13 @@ class OpenClawSessionService:
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> Dict[str, Any]:
         """Run a one-shot prompt using the CLI request path."""
+        if invocation_options is not None:
+            raise UnsupportedCapabilityError(
+                "The OpenClaw adapter cannot represent provider-specific invocation options."
+            )
         planning_temp_dir = None
         previous_cwd_override = self.execution_cwd_override
         try:

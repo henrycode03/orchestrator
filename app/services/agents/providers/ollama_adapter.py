@@ -18,6 +18,7 @@ from app.services.agents.interfaces import (
     RetryStrategy,
 )
 from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
@@ -166,51 +167,144 @@ class OllamaRuntime:
         timeout: Optional[int] = None,
         *,
         planning: bool = False,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> str:
-        url = f"{self._base_url}/v1/chat/completions"
-        user_content = user + _no_think_suffix()
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-            "temperature": 0.1,
-            "think": False,  # Disable Ollama's internal "thinking" phase
-            "options": {
-                "num_ctx": self._num_ctx,
-            },
-        }
-        effective_timeout = self._effective_timeout(timeout, planning=planning)
+        exact_contract = invocation_options is not None
+        base_url = self._base_url
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if exact_contract and self.backend_role in {
+            "repair",
+            "debug_repair",
+            "completion_repair",
+        }:
+            if self.backend_role == "debug_repair":
+                base_url = (
+                    settings.DEBUG_REPAIR_BASE_URL
+                    or settings.PLANNING_REPAIR_BASE_URL
+                    or base_url
+                ).rstrip("/")
+                api_key = (
+                    settings.DEBUG_REPAIR_API_KEY
+                    or settings.PLANNING_REPAIR_API_KEY
+                    or ""
+                ).strip()
+            else:
+                base_url = (settings.PLANNING_REPAIR_BASE_URL or base_url).rstrip("/")
+                api_key = (settings.PLANNING_REPAIR_API_KEY or "").strip()
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+        if base_url.endswith("/v1"):
+            url = f"{base_url}/chat/completions"
+        else:
+            url = f"{base_url}/v1/chat/completions"
+
+        if exact_contract:
+            messages = [{"role": "user", "content": user}]
+            if invocation_options.system_prompt is not None:
+                messages.insert(
+                    0, {"role": "system", "content": invocation_options.system_prompt}
+                )
+            payload = {
+                "model": self._model,
+                "messages": messages,
+                "stream": bool(invocation_options.stream or False),
+                "temperature": float(
+                    invocation_options.temperature
+                    if invocation_options.temperature is not None
+                    else 0.0
+                ),
+            }
+            if invocation_options.max_output_tokens is not None:
+                payload["max_tokens"] = invocation_options.max_output_tokens
+            if invocation_options.reasoning_enabled is False:
+                payload.update(
+                    {
+                        "think": False,
+                        "enable_thinking": False,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    }
+                )
+            payload.update(dict(invocation_options.extra_provider_options or {}))
+            if "chat_template_kwargs" in (
+                invocation_options.extra_provider_options or {}
+            ):
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": False,
+                    **dict(
+                        invocation_options.extra_provider_options[
+                            "chat_template_kwargs"
+                        ]
+                    ),
+                }
+        else:
+            user_content = user + _no_think_suffix()
+            payload = {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
+                "stream": False,
+                "temperature": 0.1,
+                "think": False,  # Disable Ollama's internal "thinking" phase
+                "options": {
+                    "num_ctx": self._num_ctx,
+                },
+            }
+        effective_timeout = (
+            int(invocation_options.timeout_seconds)
+            if invocation_options is not None
+            and invocation_options.timeout_seconds is not None
+            else self._effective_timeout(timeout, planning=planning)
+        )
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
-                resp = await client.post(url, json=payload)
+                resp = await client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 content = _extract_ollama_chat_content(resp.json())
-                return _strip_thinking(content)
+                return content if exact_contract else _strip_thinking(content)
         except httpx.TimeoutException as exc:
             logger.error(
                 "[OLLAMA] Timeout after %.0fs calling %s", effective_timeout, url
             )
-            raise AgentRuntimeError(
-                f"Ollama timed out after {effective_timeout}s"
-            ) from exc
+            error = AgentRuntimeError(f"Ollama timed out after {effective_timeout}s")
+            error.runtime_diagnostics = {
+                "timed_out": True,
+                "timeout_boundary": "runtime_invocation",
+                "timeout_seconds": effective_timeout,
+            }
+            raise error from exc
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "[OLLAMA] HTTP %s: %s",
                 exc.response.status_code,
                 exc.response.text[:400],
             )
-            raise AgentRuntimeError(f"Ollama HTTP {exc.response.status_code}") from exc
+            error = AgentRuntimeError(f"Ollama HTTP {exc.response.status_code}")
+            error.runtime_diagnostics = {
+                "timed_out": False,
+                "timeout_boundary": "runtime_invocation",
+                "timeout_seconds": effective_timeout,
+            }
+            raise error from exc
         except httpx.ConnectError as exc:
             logger.error("[OLLAMA] Cannot connect to %s", self._base_url)
-            raise AgentRuntimeError(
-                f"Cannot connect to Ollama at {self._base_url}"
-            ) from exc
+            error = AgentRuntimeError(f"Cannot connect to Ollama at {self._base_url}")
+            error.runtime_diagnostics = {
+                "timed_out": False,
+                "timeout_boundary": "runtime_invocation",
+                "timeout_seconds": effective_timeout,
+            }
+            raise error from exc
         except Exception as exc:
             logger.error("[OLLAMA] Unexpected error: %s", exc)
-            raise AgentRuntimeError(str(exc)) from exc
+            error = AgentRuntimeError(str(exc))
+            error.runtime_diagnostics = {
+                "timed_out": False,
+                "timeout_boundary": "runtime_invocation",
+                "timeout_seconds": effective_timeout,
+            }
+            raise error from exc
 
     # ── AgentRuntime Protocol ───────────────────────────────────────────────
 
@@ -249,6 +343,7 @@ class OllamaRuntime:
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> dict[str, Any]:
         system = _PLAN_SYSTEM if session_prefix == "planning" else _GENERIC_SYSTEM
         output = await self._chat(
@@ -256,12 +351,19 @@ class OllamaRuntime:
             user=prompt,
             timeout=timeout_seconds,
             planning=session_prefix == "planning",
+            invocation_options=invocation_options,
         )
         return {
             "status": "completed",
             "output": output,
             "backend": self.backend_descriptor.name,
             "model_family": self._model,
+            "role": self.backend_role,
+            "runtime_configuration": (
+                self.runtime_configuration.to_dict()
+                if self.runtime_configuration is not None
+                else None
+            ),
         }
 
     async def pause_session(self) -> None:

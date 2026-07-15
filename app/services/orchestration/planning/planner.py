@@ -29,6 +29,7 @@ from ..policy import (
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
 from app.config import settings
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.orchestration.operations.file_ops_contract import (
     operation_has_file_op_path,
 )
@@ -387,8 +388,6 @@ class PlannerService:
         timeout_budget_seconds: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         import time as _time
-
-        import httpx
 
         base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
         model = cls._direct_no_thinking_model(runtime_service)
@@ -1392,22 +1391,80 @@ class PlannerService:
         lock_diagnostics_out: Optional[Dict[str, Any]] = None,
         diagnostic_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        direct_result = await PlannerService._invoke_direct_no_thinking_repair(
-            runtime_service,
-            repair_prompt,
-            repair_timeout,
-            diagnostic_context=diagnostic_context,
-        )
-        if direct_result is not None:
-            return direct_result
+        from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
 
-        invoke_prompt = getattr(runtime_service, "invoke_prompt", None)
-        if callable(invoke_prompt):
-            async with PlannerService._openclaw_planning_lock_async() as lock_diagnostics:
-                if lock_diagnostics_out is not None:
-                    lock_diagnostics_out.update(lock_diagnostics)
-                try:
-                    result = await invoke_prompt(
+        db = getattr(runtime_service, "db", None)
+        invocation_options = RuntimeInvocationOptions(
+            timeout_seconds=float(repair_timeout),
+            no_output_timeout_seconds=float(
+                PlannerService._effective_planning_repair_no_output_timeout(
+                    repair_timeout
+                )
+            ),
+            max_output_tokens=2048,
+            temperature=0.0,
+            reasoning_enabled=(not settings.PLANNING_REPAIR_DISABLE_THINKING),
+            stream=False,
+        )
+
+        repair_runtime = None
+        if db is not None:
+            repair_runtime = create_agent_runtime(
+                db,
+                getattr(runtime_service, "session_id", None),
+                getattr(runtime_service, "task_id", None),
+                role=BackendRole.REPAIR,
+            )
+            for attribute in (
+                "project_id",
+                "task_execution_id",
+                "execution_cwd_override",
+            ):
+                if hasattr(runtime_service, attribute) and hasattr(
+                    repair_runtime, attribute
+                ):
+                    setattr(
+                        repair_runtime,
+                        attribute,
+                        getattr(runtime_service, attribute),
+                    )
+
+        async def _invoke_registry_fallback(primary_error: Exception | None = None):
+            """Preserve the pre-Stage-C repair fallback behind a role runtime."""
+
+            fallback_runtime = runtime_service
+            if getattr(runtime_service, "runtime_configuration", None) is not None:
+                metadata = runtime_service.get_backend_metadata()
+                fallback_backend = str(metadata.get("backend") or "").strip()
+                if not fallback_backend:
+                    if primary_error is not None:
+                        raise primary_error
+                    return {}
+                fallback_runtime = create_agent_runtime(
+                    db,
+                    getattr(runtime_service, "session_id", None),
+                    getattr(runtime_service, "task_id", None),
+                    role=BackendRole.REPAIR,
+                    backend_override=fallback_backend,
+                )
+                for attribute in (
+                    "project_id",
+                    "task_execution_id",
+                    "execution_cwd_override",
+                ):
+                    if hasattr(runtime_service, attribute) and hasattr(
+                        fallback_runtime, attribute
+                    ):
+                        setattr(
+                            fallback_runtime,
+                            attribute,
+                            getattr(runtime_service, attribute),
+                        )
+
+            try:
+                invoke_prompt = getattr(fallback_runtime, "invoke_prompt", None)
+                if callable(invoke_prompt):
+                    fallback_result = await invoke_prompt(
                         repair_prompt,
                         timeout_seconds=repair_timeout,
                         source_brain="local",
@@ -1417,21 +1474,116 @@ class PlannerService:
                             repair_timeout
                         ),
                     )
-                except Exception as exc:
-                    PlannerService._attach_planning_lock_exception_diagnostics(
-                        exc, lock_diagnostics
+                else:
+                    execute_task = getattr(fallback_runtime, "execute_task", None)
+                    if not callable(execute_task):
+                        raise RuntimeError(
+                            "Planning repair fallback runtime has no invocation method"
+                        )
+                    fallback_result = await execute_task(
+                        repair_prompt,
+                        timeout_seconds=repair_timeout,
                     )
-                    raise
-                return PlannerService._attach_planning_lock_diagnostics(
-                    result, lock_diagnostics
-                )
+            except Exception as fallback_error:
+                if primary_error is not None:
+                    diagnostics = getattr(fallback_error, "runtime_diagnostics", None)
+                    if not isinstance(diagnostics, dict):
+                        diagnostics = {}
+                    diagnostics["planning_repair_primary_error"] = (
+                        f"{type(primary_error).__name__}: {str(primary_error)[:500]}"
+                    )
+                    fallback_error.runtime_diagnostics = diagnostics  # type: ignore[attr-defined]
+                raise
 
-        return await PlannerService._execute_task_with_planning_lock(
-            runtime_service,
-            repair_prompt,
-            timeout_seconds=repair_timeout,
-            reuse_task_session=False,
-        )
+            fallback_result = dict(fallback_result or {})
+            diagnostics = fallback_result.get("diagnostics")
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+            diagnostics["planning_repair_registry_fallback"] = True
+            if primary_error is not None:
+                diagnostics["planning_repair_primary_error"] = (
+                    f"{type(primary_error).__name__}: {str(primary_error)[:500]}"
+                )
+            fallback_result["diagnostics"] = diagnostics
+            return fallback_result
+
+        async with PlannerService._openclaw_planning_lock_async() as lock_diagnostics:
+            if lock_diagnostics_out is not None:
+                lock_diagnostics_out.update(lock_diagnostics)
+            try:
+                if repair_runtime is not None:
+                    result = await repair_runtime.invoke_prompt(
+                        repair_prompt,
+                        timeout_seconds=repair_timeout,
+                        source_brain="local",
+                        session_prefix="planning-repair",
+                        isolate_workspace_context=False,
+                        no_output_timeout_seconds=PlannerService._effective_planning_repair_no_output_timeout(
+                            repair_timeout
+                        ),
+                        invocation_options=invocation_options,
+                    )
+                else:
+                    # A few A0 unit seams provide only the pre-Stage-A runtime
+                    # interface. Keep those seams abstract and provider-free;
+                    # every production planner runtime is database-backed and
+                    # therefore takes the role-owned branch above.
+                    legacy_invoke_prompt = getattr(
+                        runtime_service, "invoke_prompt", None
+                    )
+                    if callable(legacy_invoke_prompt):
+                        result = await legacy_invoke_prompt(
+                            repair_prompt,
+                            timeout_seconds=repair_timeout,
+                            source_brain="local",
+                            session_prefix="planning-repair",
+                            isolate_workspace_context=False,
+                            no_output_timeout_seconds=PlannerService._effective_planning_repair_no_output_timeout(
+                                repair_timeout
+                            ),
+                            invocation_options=invocation_options,
+                        )
+                    else:
+                        legacy_execute_task = getattr(
+                            runtime_service, "execute_task", None
+                        )
+                        if not callable(legacy_execute_task):
+                            raise RuntimeError(
+                                "Planning repair requires a database-backed "
+                                "BackendRole.REPAIR runtime"
+                            )
+                        result = await legacy_execute_task(
+                            repair_prompt,
+                            timeout_seconds=repair_timeout,
+                            invocation_options=invocation_options,
+                        )
+            except Exception as exc:
+                PlannerService._attach_planning_lock_exception_diagnostics(
+                    exc, lock_diagnostics
+                )
+                if repair_runtime is None:
+                    raise
+                result = await _invoke_registry_fallback(exc)
+
+            result = dict(result or {})
+            if (
+                repair_runtime is not None
+                and not str(result.get("output") or "").strip()
+            ):
+                result = await _invoke_registry_fallback()
+            if repair_runtime is not None:
+                result.setdefault("status", "completed")
+                result["planning_repair_runtime_role"] = BackendRole.REPAIR.value
+                result["planning_repair_direct"] = False
+                result["planning_repair_prompt_chars"] = len(repair_prompt or "")
+                result["planning_repair_timeout_seconds"] = repair_timeout
+                if diagnostic_context:
+                    result.setdefault(
+                        "planning_repair_diagnostic_context", diagnostic_context
+                    )
+            return PlannerService._attach_planning_lock_diagnostics(
+                result, lock_diagnostics
+            )
 
     @staticmethod
     def _effective_planning_repair_timeout(timeout_seconds: int) -> float:
@@ -1463,36 +1615,6 @@ class PlannerService:
         )
 
     @staticmethod
-    def _should_try_direct_no_thinking_repair(runtime_service: Any) -> bool:
-        if not settings.PLANNING_REPAIR_ENABLED:
-            _logger.info("[REPAIR_DIRECT] skip: " "PLANNING_REPAIR_ENABLED=false")
-            return False
-        if not settings.PLANNING_REPAIR_BASE_URL.strip():
-            _logger.info("[REPAIR_DIRECT] skip: base_url empty")
-            return False
-        if not settings.PLANNING_REPAIR_MODEL.strip():
-            _logger.info("[REPAIR_DIRECT] skip: model empty")
-            return False
-        backend_metadata = {}
-        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
-        if callable(get_backend_metadata):
-            try:
-                backend_metadata = get_backend_metadata() or {}
-            except Exception:
-                backend_metadata = {}
-        backend_name = str(backend_metadata.get("backend") or "").strip()
-        if backend_name not in {"local_openclaw", "direct_ollama"}:
-            _logger.info(
-                "[REPAIR_DIRECT] skip: backend_name=%r (not direct-capable)",
-                backend_name,
-            )
-            return False
-        has_db = hasattr(runtime_service, "db")
-        if not has_db:
-            _logger.info("[REPAIR_DIRECT] skip: runtime_service has no db attr")
-        return has_db
-
-    @staticmethod
     def _direct_no_thinking_model(runtime_service: Any) -> str:
         configured_model = (settings.PLANNING_REPAIR_MODEL or "").strip()
         backend_metadata: Dict[str, Any] = {}
@@ -1515,225 +1637,6 @@ class PlannerService:
         ):
             return runtime_model
         return configured_model
-
-    @staticmethod
-    async def _invoke_direct_no_thinking_repair(
-        runtime_service: Any,
-        repair_prompt: str,
-        repair_timeout: int,
-        diagnostic_context: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        if not PlannerService._should_try_direct_no_thinking_repair(runtime_service):
-            return None
-
-        base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
-        model = PlannerService._direct_no_thinking_model(runtime_service)
-        payload: Dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": repair_prompt}],
-            "temperature": 0,
-            "max_tokens": 2048,
-            "stream": False,
-        }
-        if settings.PLANNING_REPAIR_DISABLE_THINKING:
-            payload["think"] = False
-            payload["enable_thinking"] = False
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
-
-        headers = {"Content-Type": "application/json"}
-        api_key = settings.PLANNING_REPAIR_API_KEY.strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        started_at = time.monotonic()
-        started_wall = datetime.now(UTC)
-        direct_timeout = max(1, repair_timeout)
-        prompt_hash = str((diagnostic_context or {}).get("prompt_sha256_12") or "")
-        stale_replace_diagnostic = bool(
-            (diagnostic_context or {}).get("stale_replace_repair_diagnostic")
-            and prompt_hash
-        )
-        _logger.info(
-            "[REPAIR_DIRECT] attempting direct no-thinking repair "
-            "url=%s model=%s timeout=%ds",
-            f"{base_url}/chat/completions",
-            model,
-            direct_timeout,
-        )
-
-        async def _do_request() -> tuple[str, Dict[str, Any]]:
-            async with httpx.AsyncClient(timeout=direct_timeout) as client:
-                response = await client.post(
-                    f"{base_url}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-            response.raise_for_status()
-            body = response.json()
-            return PlannerService._extract_chat_completion_content(body), body
-
-        try:
-            output, response_body = await asyncio.wait_for(
-                _do_request(), timeout=float(direct_timeout)
-            )
-        except asyncio.TimeoutError:
-            duration_seconds = time.monotonic() - started_at
-            if stale_replace_diagnostic:
-                PlannerService._write_stale_replace_repair_gateway_diagnostic(
-                    prompt_hash,
-                    "direct_no_thinking_result.json",
-                    {
-                        "kind": "planning_stale_replace_direct_no_thinking_result",
-                        "status": "timeout",
-                        "prompt_sha256_12": prompt_hash,
-                        "prompt_chars": len(repair_prompt or ""),
-                        "request_started_at": started_wall.isoformat(),
-                        "request_finished_at": datetime.now(UTC).isoformat(),
-                        "duration_seconds": round(duration_seconds, 3),
-                        "timeout_seconds": direct_timeout,
-                        "model": model,
-                        "base_url": base_url,
-                        "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
-                        "content_chars": 0,
-                        "content_null": True,
-                        "finish_reason": None,
-                        "gateway_error": "asyncio_timeout",
-                        **(diagnostic_context or {}),
-                    },
-                )
-            _logger.warning(
-                "[REPAIR_DIRECT] wall-clock timeout after %ds; falling back to runtime",
-                direct_timeout,
-            )
-            return None
-        except Exception as exc:
-            duration_seconds = time.monotonic() - started_at
-            if stale_replace_diagnostic:
-                PlannerService._write_stale_replace_repair_gateway_diagnostic(
-                    prompt_hash,
-                    "direct_no_thinking_result.json",
-                    {
-                        "kind": "planning_stale_replace_direct_no_thinking_result",
-                        "status": "error",
-                        "prompt_sha256_12": prompt_hash,
-                        "prompt_chars": len(repair_prompt or ""),
-                        "request_started_at": started_wall.isoformat(),
-                        "request_finished_at": datetime.now(UTC).isoformat(),
-                        "duration_seconds": round(duration_seconds, 3),
-                        "timeout_seconds": direct_timeout,
-                        "model": model,
-                        "base_url": base_url,
-                        "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
-                        "content_chars": 0,
-                        "content_null": True,
-                        "finish_reason": None,
-                        "gateway_error": f"{type(exc).__name__}: {str(exc)[:500]}",
-                        **(diagnostic_context or {}),
-                    },
-                )
-            _logger.warning(
-                "[REPAIR_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",
-                time.monotonic() - started_at,
-                type(exc).__name__,
-                str(exc)[:200],
-            )
-            return None
-
-        choices = (
-            response_body.get("choices") if isinstance(response_body, dict) else None
-        )
-        first_choice = choices[0] if isinstance(choices, list) and choices else {}
-        message = first_choice.get("message") if isinstance(first_choice, dict) else {}
-        content_value = message.get("content") if isinstance(message, dict) else None
-        finish_reason = (
-            first_choice.get("finish_reason")
-            if isinstance(first_choice, dict)
-            else None
-        )
-
-        if not output.strip():
-            duration_seconds = time.monotonic() - started_at
-            if stale_replace_diagnostic:
-                PlannerService._write_stale_replace_repair_gateway_diagnostic(
-                    prompt_hash,
-                    "direct_no_thinking_result.json",
-                    {
-                        "kind": "planning_stale_replace_direct_no_thinking_result",
-                        "status": "empty_content",
-                        "prompt_sha256_12": prompt_hash,
-                        "prompt_chars": len(repair_prompt or ""),
-                        "request_started_at": started_wall.isoformat(),
-                        "request_finished_at": datetime.now(UTC).isoformat(),
-                        "duration_seconds": round(duration_seconds, 3),
-                        "timeout_seconds": direct_timeout,
-                        "model": model,
-                        "base_url": base_url,
-                        "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
-                        "content_chars": 0,
-                        "content_null": content_value is None,
-                        "finish_reason": finish_reason,
-                        "usage": (
-                            response_body.get("usage")
-                            if isinstance(response_body, dict)
-                            else None
-                        ),
-                        "gateway_error": None,
-                        **(diagnostic_context or {}),
-                    },
-                )
-            _logger.warning(
-                "[REPAIR_DIRECT] empty output from direct call; "
-                "falling back to runtime"
-            )
-            return None
-
-        duration_seconds = time.monotonic() - started_at
-        if stale_replace_diagnostic:
-            PlannerService._write_stale_replace_repair_gateway_diagnostic(
-                prompt_hash,
-                "direct_no_thinking_result.json",
-                {
-                    "kind": "planning_stale_replace_direct_no_thinking_result",
-                    "status": "completed",
-                    "prompt_sha256_12": prompt_hash,
-                    "prompt_chars": len(repair_prompt or ""),
-                    "request_started_at": started_wall.isoformat(),
-                    "request_finished_at": datetime.now(UTC).isoformat(),
-                    "duration_seconds": round(duration_seconds, 3),
-                    "timeout_seconds": direct_timeout,
-                    "model": model,
-                    "base_url": base_url,
-                    "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
-                    "content_chars": len(output),
-                    "content_null": content_value is None,
-                    "finish_reason": finish_reason,
-                    "usage": (
-                        response_body.get("usage")
-                        if isinstance(response_body, dict)
-                        else None
-                    ),
-                    "gateway_error": None,
-                    **(diagnostic_context or {}),
-                },
-            )
-        _logger.info(
-            "[REPAIR_DIRECT] success planning_repair_direct=True "
-            "backend=direct_chat_completions duration=%.1fs output_chars=%s",
-            duration_seconds,
-            len(output),
-        )
-        return {
-            "status": "completed",
-            "output": output,
-            "backend": "direct_chat_completions",
-            "model_family": model,
-            "diagnostics": {
-                "planning_repair_direct": True,
-                "disable_thinking": (settings.PLANNING_REPAIR_DISABLE_THINKING),
-                "duration_seconds": round(duration_seconds, 3),
-                "timeout_seconds": direct_timeout,
-            },
-        }
 
     @staticmethod
     def _extract_chat_completion_content(body: Any) -> str:

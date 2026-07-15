@@ -13,6 +13,7 @@ from app.services.agents.interfaces import (
     RuntimeBackendResult,
 )
 from app.services.agents.runtime_configuration import RoleRuntimeConfiguration
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 
 
 class StubRuntime:
@@ -89,6 +90,7 @@ class StubRuntime:
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> dict[str, Any]:
         return await self.execute_task(prompt, timeout_seconds=timeout_seconds)
 

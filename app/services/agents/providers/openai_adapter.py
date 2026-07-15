@@ -23,6 +23,7 @@ from app.services.agents.interfaces import (
     UnsupportedCapabilityError,
 )
 from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
@@ -93,6 +94,7 @@ class OpenAIResponsesRuntime:
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        invocation_options: RuntimeInvocationOptions | None = None,
     ) -> dict[str, Any]:
         del isolate_workspace_context
         del no_output_timeout_seconds
@@ -103,6 +105,26 @@ class OpenAIResponsesRuntime:
             )
 
         base_url = settings.OPENAI_BASE_URL.rstrip("/")
+        api_key = (settings.OPENAI_API_KEY or "").strip()
+        if invocation_options is not None and self.backend_role in {
+            "repair",
+            "debug_repair",
+            "completion_repair",
+        }:
+            if self.backend_role == "debug_repair":
+                base_url = (
+                    settings.DEBUG_REPAIR_BASE_URL
+                    or settings.PLANNING_REPAIR_BASE_URL
+                    or base_url
+                ).rstrip("/")
+                api_key = (
+                    settings.DEBUG_REPAIR_API_KEY
+                    or settings.PLANNING_REPAIR_API_KEY
+                    or api_key
+                ).strip()
+            else:
+                base_url = (settings.PLANNING_REPAIR_BASE_URL or base_url).rstrip("/")
+                api_key = (settings.PLANNING_REPAIR_API_KEY or api_key).strip()
         model_name = self._model_name()
 
         payload = {
@@ -114,6 +136,18 @@ class OpenAIResponsesRuntime:
                 }
             ],
         }
+        if invocation_options is not None:
+            if any(
+                value is not None
+                for value in (
+                    invocation_options.max_output_tokens,
+                    invocation_options.temperature,
+                    invocation_options.reasoning_enabled,
+                )
+            ):
+                raise UnsupportedCapabilityError(
+                    "OpenAI Responses repair invocation does not support the requested chat controls."
+                )
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -134,7 +168,18 @@ class OpenAIResponsesRuntime:
             model=model_name,
         ) as observation:
             try:
-                async with httpx.AsyncClient(timeout=timeout_seconds + 30) as client:
+                effective_timeout = int(
+                    invocation_options.timeout_seconds
+                    if invocation_options is not None
+                    and invocation_options.timeout_seconds is not None
+                    else timeout_seconds
+                )
+                transport_timeout = (
+                    effective_timeout
+                    if invocation_options is not None
+                    else effective_timeout + 30
+                )
+                async with httpx.AsyncClient(timeout=transport_timeout) as client:
                     response = await client.post(
                         f"{base_url}/responses",
                         headers=headers,
@@ -144,11 +189,11 @@ class OpenAIResponsesRuntime:
                 update_langfuse_observation(
                     observation,
                     level="ERROR",
-                    status_message=f"timed out after {timeout_seconds}s",
+                    status_message=f"timed out after {effective_timeout}s",
                     output={"status": "failed", "reason": "timeout"},
                 )
                 raise AgentRuntimeError(
-                    f"OpenAI Responses request timed out after {timeout_seconds}s."
+                    f"OpenAI Responses request timed out after {effective_timeout}s."
                 ) from exc
             except httpx.HTTPError as exc:
                 update_langfuse_observation(
@@ -205,6 +250,12 @@ class OpenAIResponsesRuntime:
                 "backend": self.backend_descriptor.name,
                 "model_family": model_name,
                 "usage": usage,
+                "role": self.backend_role,
+                "runtime_configuration": (
+                    self.runtime_configuration.to_dict()
+                    if self.runtime_configuration is not None
+                    else None
+                ),
             }
 
     def _model_name(self) -> str:

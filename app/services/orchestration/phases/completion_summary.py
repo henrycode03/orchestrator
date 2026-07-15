@@ -8,9 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from app.config import settings
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.orchestration.policy import SUMMARY_TIMEOUT_SECONDS
 from app.services.orchestration.types import OrchestrationRunContext
 
@@ -81,44 +79,32 @@ def build_workspace_evidence_block(
     return "\n".join(lines)
 
 
-async def _call_planning_lane(prompt: str) -> str:
-    """Direct HTTP chat completion to the planning lane.
+async def _call_planning_lane(prompt: str, *, db: Any = None) -> str:
+    """Invoke the completion-summary repair lane through the role registry."""
 
-    Uses settings.PLANNING_REPAIR_BASE_URL / MODEL — the same endpoint the
-    planning lane uses — so this works regardless of deployment configuration.
-    """
-    base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
-    model = (settings.PLANNING_REPAIR_MODEL or "").strip() or "qwen-local"
-    api_key = (settings.PLANNING_REPAIR_API_KEY or "").strip()
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,
-        "max_tokens": 512,
-        "stream": False,
-        "think": False,
-        "enable_thinking": False,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    async with httpx.AsyncClient(timeout=float(SUMMARY_TIMEOUT_SECONDS)) as client:
-        resp = await client.post(
-            f"{base_url}/chat/completions", json=payload, headers=headers
+    if db is None:
+        raise RuntimeError(
+            "Completion summary requires a database-backed repair runtime"
         )
-    resp.raise_for_status()
-    body = resp.json()
-    choices = body.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    content = message.get("content") or ""
-    if isinstance(content, list):
-        content = "".join(
-            item.get("text", "") for item in content if isinstance(item, dict)
-        )
-    return str(content).strip()
+    from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
+
+    runtime = create_agent_runtime(
+        db, session_id=None, task_id=None, role=BackendRole.REPAIR
+    )
+    result = await runtime.invoke_prompt(
+        prompt,
+        timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+        source_brain="local",
+        session_prefix="completion-summary",
+        invocation_options=RuntimeInvocationOptions(
+            timeout_seconds=float(SUMMARY_TIMEOUT_SECONDS),
+            max_output_tokens=512,
+            temperature=0.0,
+            reasoning_enabled=False,
+            stream=False,
+        ),
+    )
+    return str(result.get("output") or "").strip()
 
 
 def _deterministic_task_summary(orchestration_state: Any) -> str:
@@ -166,7 +152,7 @@ def _generate_task_summary_with_fallback(
     try:
         output = asyncio.run(
             asyncio.wait_for(
-                _call_planning_lane(summary_prompt),
+                _call_planning_lane(summary_prompt, db=ctx.db),
                 timeout=float(SUMMARY_TIMEOUT_SECONDS),
             )
         )

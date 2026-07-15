@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from app.config import settings
 from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
@@ -48,6 +49,7 @@ from app.services.orchestration.diagnostics.signature_guard import (
     signature_violation_event_details,
 )
 from app.services.orchestration.execution import ExecutorService
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.orchestration.execution.path_guard import (
     detect_advisory_nested_scaffold,
 )
@@ -75,6 +77,7 @@ from app.services.orchestration.execution.step_support import (
     repair_step_commands_with_self_correction,
     step_needs_command_repair,
 )
+from app.services.orchestration.prompt_optimization import optimize_prompt
 from app.services.orchestration.policy import (
     DEBUG_TIMEOUT_SECONDS,
     MAX_STEP_ATTEMPTS,
@@ -1893,6 +1896,7 @@ def execute_step_loop(
             pass
 
         debug_runtime_kwargs: dict[str, Any] = {}
+        debug_repair_runtime = None
         if is_bounded_debug_repair_mode(debug_prompt_mode):
             debug_runtime_kwargs = {
                 "diagnostic_label": BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
@@ -1923,14 +1927,89 @@ def execute_step_loop(
                 },
             }
 
-        try:
-            debug_result = _run_coroutine(
-                runtime_service.execute_task(
-                    debug_prompt,
-                    timeout_seconds=DEBUG_TIMEOUT_SECONDS,
-                    **debug_runtime_kwargs,
+            if getattr(runtime_service, "runtime_configuration", None) is not None:
+                from app.services.agents.agent_runtime import (
+                    BackendRole,
+                    create_agent_runtime,
+                )
+
+                debug_repair_runtime = create_agent_runtime(
+                    ctx.db,
+                    ctx.session_id,
+                    ctx.task_id,
+                    role=BackendRole.DEBUG_REPAIR,
+                )
+                for attribute in ("project_id", "task_execution_id"):
+                    if hasattr(runtime_service, attribute) and hasattr(
+                        debug_repair_runtime, attribute
+                    ):
+                        setattr(
+                            debug_repair_runtime,
+                            attribute,
+                            getattr(runtime_service, attribute),
+                        )
+
+        def _invoke_debug_repair(prompt_text: str) -> dict[str, Any]:
+            if debug_repair_runtime is None:
+                return _run_coroutine(
+                    runtime_service.execute_task(
+                        prompt_text,
+                        timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                        **debug_runtime_kwargs,
+                    )
+                )
+            optimized_prompt = optimize_prompt(prompt_text, max_tokens=25000)
+            options = RuntimeInvocationOptions(
+                timeout_seconds=float(DEBUG_TIMEOUT_SECONDS),
+                max_output_tokens=2048,
+                temperature=0.0,
+                reasoning_enabled=(not settings.DEBUG_REPAIR_DISABLE_THINKING),
+                stream=False,
+            )
+            return _run_coroutine(
+                _invoke_role_owned_debug_repair(
+                    debug_repair_runtime,
+                    optimized_prompt,
+                    options,
                 )
             )
+
+        async def _invoke_role_owned_debug_repair(runtime, prompt_text, options):
+            diagnostic_metadata = dict(
+                debug_runtime_kwargs.get("diagnostic_metadata") or {}
+            )
+            diagnostic_metadata.update(
+                {
+                    "architecture_lane": "debug_repair",
+                    "invocation_kind": "debug_repair",
+                    "timeout_boundary": "debug_repair_runtime",
+                }
+            )
+            try:
+                result = await runtime.invoke_prompt(
+                    prompt_text,
+                    timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                    source_brain="local",
+                    session_prefix="debug-repair",
+                    no_output_timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                    invocation_options=options,
+                )
+            except Exception as exc:
+                existing = getattr(exc, "runtime_diagnostics", None)
+                diagnostics = dict(existing) if isinstance(existing, dict) else {}
+                diagnostics.update(diagnostic_metadata)
+                exc.runtime_diagnostics = diagnostics  # type: ignore[attr-defined]
+                raise
+            result = dict(result or {})
+            diagnostics = result.get("diagnostics")
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+            diagnostics.update(diagnostic_metadata)
+            result["diagnostics"] = diagnostics
+            return result
+
+        try:
+            debug_result = _invoke_debug_repair(debug_prompt)
         except Exception as debug_error:
             _mark_bounded_debug_repair_timeout_if_applicable(
                 debug_error,
@@ -1972,11 +2051,7 @@ def execute_step_loop(
                     knowledge_context=debug_knowledge_ctx,
                 ),
             )
-            debug_result = _run_coroutine(
-                runtime_service.execute_task(
-                    compact_debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
-                )
-            )
+            debug_result = _invoke_debug_repair(compact_debug_prompt)
 
         # Remove debug artifacts the agent may have written to disk.
         for _artifact in ("debug_report.json", "analysis.json", "debug_analysis.json"):
@@ -2005,12 +2080,7 @@ def execute_step_loop(
                         expected_shape="array or object",
                     )
                     try:
-                        compliance_result = _run_coroutine(
-                            runtime_service.execute_task(
-                                compliance_prompt,
-                                timeout_seconds=DEBUG_TIMEOUT_SECONDS,
-                            )
-                        )
+                        compliance_result = _invoke_debug_repair(compliance_prompt)
                         compliance_output = extract_structured_text(
                             compliance_result.get("output", "{}")
                         )

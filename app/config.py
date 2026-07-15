@@ -167,7 +167,10 @@ class Settings(BaseSettings):
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     DEBUG_REPAIR_BACKEND: Optional[str] = None
-    REPAIR_BACKEND: Optional[str] = None
+    # The historical repair lanes are OpenAI-compatible chat endpoints. An
+    # explicit environment value still owns the backend choice; this default
+    # only makes the existing repair connection representable by the registry.
+    REPAIR_BACKEND: Optional[str] = "openai_chat_completions"
     COMPLETION_REPAIR_BACKEND: Optional[str] = None
     LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS: int = 1
     ENABLE_TEST_RUNTIME_BACKENDS: bool = False
