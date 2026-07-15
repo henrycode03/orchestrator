@@ -204,6 +204,7 @@ export const settingsAPI = {
     rotate_mobile_api_key?: boolean;
     agent_backend?: string;
     agent_model_family?: string;
+    planning_model_family?: string;
     agent_adaptation_profile?: string;
     orchestration_policy_profile?: string;
     workspace_review_policy?: string;

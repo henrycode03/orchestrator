@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
+import time
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -32,6 +35,7 @@ from app.services.workspace.system_settings import (
     REPAIR_ADAPTATION_PROFILE_KEY,
     get_effective_adaptation_profile,
     get_effective_agent_model_family,
+    get_effective_planning_model_family,
     get_setting_value_runtime,
 )
 
@@ -95,8 +99,13 @@ def _effective_global_model_family(db: Session, backend_name: str) -> str:
 def _role_model_family(db: Session, role: BackendRole, backend_name: str) -> str:
     """Resolve role model ownership using the current compatibility order."""
 
+    global_model_family = _effective_global_model_family(db, backend_name)
     role_models = {
-        BackendRole.PLANNING: getattr(settings, "PLANNER_MODEL", ""),
+        BackendRole.PLANNING: get_effective_planning_model_family(
+            getattr(settings, "PLANNER_MODEL", ""),
+            global_model_family,
+            db=db,
+        ),
         # OLLAMA_AGENT_MODEL is the existing local-provider fallback used by
         # canonical OpenClaw execution and worker selection details.
         BackendRole.EXECUTION: getattr(settings, "EXECUTION_MODEL", "")
@@ -107,9 +116,7 @@ def _role_model_family(db: Session, role: BackendRole, backend_name: str) -> str
         BackendRole.COMPLETION_REPAIR: getattr(settings, "COMPLETION_REPAIR_MODEL", "")
         or getattr(settings, "PLANNING_REPAIR_MODEL", ""),
     }
-    return str(role_models[role] or "").strip() or _effective_global_model_family(
-        db, backend_name
-    )
+    return str(role_models[role] or "").strip() or global_model_family
 
 
 def _configured_profile_name(db: Session, key: str, setting_name: str) -> Optional[str]:
@@ -367,41 +374,159 @@ def invoke_runtime_prompt(
     project_id: Optional[int] = None,
     source_brain: str = "local",
     timeout_seconds: int = 180,
+    no_output_timeout_seconds: Optional[int] = None,
     session_prefix: str = "planning",
     role: Optional[BackendRole] = None,
     backend_override: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute a one-shot runtime prompt across local or remote backends."""
 
-    runtime = create_agent_runtime(
-        db,
-        session_id,
-        task_id,
-        role=role,
-        backend_override=backend_override,
-    )
+    started_at = time.monotonic()
+    role_name = role.value if isinstance(role, BackendRole) else str(role or "legacy")
+    try:
+        runtime = create_agent_runtime(
+            db,
+            session_id,
+            task_id,
+            role=role,
+            backend_override=backend_override,
+        )
+    except Exception as exc:
+        diagnostics = {
+            "diagnostic_category": "configuration_failure",
+            "role": role_name,
+            "session_prefix": session_prefix,
+            "timeout_seconds": timeout_seconds,
+            "no_output_timeout_seconds": no_output_timeout_seconds,
+            "error_type": type(exc).__name__,
+            "error": _safe_runtime_error(str(exc)),
+        }
+        logger.error(
+            "[RUNTIME][%s_DIAGNOSTICS] %s",
+            role_name.upper(),
+            json.dumps(diagnostics, sort_keys=True),
+        )
+        setattr(exc, "runtime_diagnostics", diagnostics)
+        raise
+
     if project_id is not None and hasattr(runtime, "project_id"):
         runtime.project_id = project_id
     if task_execution_id is not None and hasattr(runtime, "task_execution_id"):
         runtime.task_execution_id = task_execution_id
+    configuration = getattr(runtime, "runtime_configuration", None)
+    descriptor = getattr(runtime, "backend_descriptor", None)
+    diagnostics_context = {
+        "role": role_name,
+        "backend": getattr(configuration, "backend_name", None)
+        or getattr(descriptor, "name", None),
+        "model_family": getattr(configuration, "model_family", None),
+        "adaptation_profile": getattr(configuration, "adaptation_profile", None),
+        "session_prefix": session_prefix,
+        "timeout_seconds": timeout_seconds,
+        "no_output_timeout_seconds": no_output_timeout_seconds,
+    }
+    logger.info(
+        "[RUNTIME][%s_DIAGNOSTICS] %s",
+        role_name.upper(),
+        json.dumps(
+            {"diagnostic_category": "inference_started", **diagnostics_context},
+            sort_keys=True,
+        ),
+    )
+    invoke_kwargs = {
+        "timeout_seconds": timeout_seconds,
+        "source_brain": source_brain,
+        "session_prefix": session_prefix,
+    }
+    if no_output_timeout_seconds is not None:
+        invoke_kwargs["no_output_timeout_seconds"] = no_output_timeout_seconds
     try:
-        return asyncio.run(
-            runtime.invoke_prompt(
-                prompt,
-                timeout_seconds=timeout_seconds,
-                source_brain=source_brain,
-                session_prefix=session_prefix,
-            )
+        result = asyncio.run(runtime.invoke_prompt(prompt, **invoke_kwargs))
+        result = dict(result or {})
+        runtime_diagnostics = dict(result.get("runtime_diagnostics") or {})
+        runtime_diagnostics.update(diagnostics_context)
+        runtime_diagnostics["duration_seconds"] = round(
+            time.monotonic() - started_at, 3
         )
-    except Exception:
+        runtime_diagnostics["diagnostic_category"] = _diagnostic_category(
+            runtime_diagnostics,
+            result=result,
+        )
+        if role_name == BackendRole.PLANNING.value:
+            result["runtime_diagnostics"] = runtime_diagnostics
+        logger.info(
+            "[RUNTIME][%s_DIAGNOSTICS] %s",
+            role_name.upper(),
+            json.dumps(runtime_diagnostics, sort_keys=True),
+        )
+        return result
+    except Exception as exc:
+        runtime_diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
+        runtime_diagnostics.update(diagnostics_context)
+        runtime_diagnostics["duration_seconds"] = round(
+            time.monotonic() - started_at, 3
+        )
+        runtime_diagnostics["diagnostic_category"] = _diagnostic_category(
+            runtime_diagnostics,
+            error=exc,
+        )
+        runtime_diagnostics.setdefault("error_type", type(exc).__name__)
+        runtime_diagnostics.setdefault("error", _safe_runtime_error(str(exc)))
+        setattr(exc, "runtime_diagnostics", runtime_diagnostics)
         logger.exception(
-            "Runtime prompt invocation failed for session_id=%s task_id=%s "
-            "task_execution_id=%s",
-            session_id,
-            task_id,
-            task_execution_id,
+            "[RUNTIME][%s_DIAGNOSTICS] %s",
+            role_name.upper(),
+            json.dumps(runtime_diagnostics, sort_keys=True),
+            extra={
+                "session_id": session_id,
+                "task_id": task_id,
+                "task_execution_id": task_execution_id,
+            },
         )
         raise
+
+
+def _safe_runtime_error(message: str) -> str:
+    """Bound and redact provider errors before putting them in diagnostics."""
+
+    value = str(message or "")[:500]
+    value = re.sub(
+        r"(?i)(api[_-]?key|access[_-]?token|secret|password|bearer)\s*[:=]?\s*"
+        r"[^\s,;}]+",
+        r"\1=<redacted>",
+        value,
+    )
+    return value
+
+
+def _diagnostic_category(
+    diagnostics: dict[str, Any],
+    *,
+    result: Optional[dict[str, Any]] = None,
+    error: Optional[Exception] = None,
+) -> str:
+    """Classify a planning/runtime observation without changing control flow."""
+
+    if diagnostics.get("no_output_timeout") is True:
+        return "silent_inference"
+    if diagnostics.get("timed_out") is True:
+        return "timeout"
+    if error is not None:
+        if type(error).__name__ in {
+            "UnsupportedAgentBackendError",
+            "UnsupportedRuntimeProfileError",
+            "OpenClawAgentSelectionError",
+        }:
+            return "configuration_failure"
+        if "not configured" in str(error).lower():
+            return "configuration_failure"
+        return "provider_failure"
+    if (result or {}).get("status") == "failed":
+        return "provider_failure"
+    first_output = diagnostics.get("first_output_after_seconds")
+    if isinstance(first_output, (int, float)) and first_output >= 5:
+        return "slow_inference"
+    return "provider_success"
 
 
 def runtime_reports_context_overflow(

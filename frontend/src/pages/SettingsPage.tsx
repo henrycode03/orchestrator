@@ -25,6 +25,7 @@ export default function SettingsPage() {
   const [mobileApiKey, setMobileApiKey] = useState("");
   const [agentBackend, setAgentBackend] = useState("");
   const [agentModelFamily, setAgentModelFamily] = useState("");
+  const [planningModelFamily, setPlanningModelFamily] = useState("");
   const [adaptationProfile, setAdaptationProfile] = useState("");
   const [policyProfile, setPolicyProfile] = useState("");
   const [workspaceReviewPolicy, setWorkspaceReviewPolicy] =
@@ -46,6 +47,7 @@ export default function SettingsPage() {
       setWorkspaceRoot(data.system.workspace_root || "");
       setAgentBackend(data.system.agent_backend || "");
       setAgentModelFamily(data.system.agent_model_family || "");
+      setPlanningModelFamily(data.system.planning_model_family || "");
       setAdaptationProfile(data.system.agent_adaptation_profile || "");
       setPolicyProfile(data.system.orchestration_policy_profile || "");
       setWorkspaceReviewPolicy(
@@ -69,6 +71,7 @@ export default function SettingsPage() {
     setWorkspaceRoot(data.system.workspace_root || "");
     setAgentBackend(data.system.agent_backend || "");
     setAgentModelFamily(data.system.agent_model_family || "");
+    setPlanningModelFamily(data.system.planning_model_family || "");
     setAdaptationProfile(data.system.agent_adaptation_profile || "");
     setPolicyProfile(data.system.orchestration_policy_profile || "");
     setWorkspaceReviewPolicy(
@@ -115,6 +118,7 @@ export default function SettingsPage() {
         rotate_mobile_api_key: rotateMobileKey,
         agent_backend: agentBackend || undefined,
         agent_model_family: agentModelFamily.trim() || undefined,
+        planning_model_family: planningModelFamily.trim(),
         agent_adaptation_profile: validAdaptationProfile || undefined,
         orchestration_policy_profile: policyProfile || undefined,
         workspace_review_policy: workspaceReviewPolicy || undefined,
@@ -298,6 +302,21 @@ export default function SettingsPage() {
                 {settings.system.mobile_base_url}
               </div>
             </div>
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-2">
+              Planning Model Family
+            </label>
+            <input
+              value={planningModelFamily}
+              onChange={(e) => setPlanningModelFamily(e.target.value)}
+              placeholder="Uses the global model when blank"
+              className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
+            />
+            <p className="mt-2 text-xs text-slate-400">
+              Persistent planning-only model. The PLANNER_MODEL environment
+              override takes precedence when configured.
+            </p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <div>

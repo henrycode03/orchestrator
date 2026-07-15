@@ -16,6 +16,7 @@ from app.db_migrations import MIGRATIONS
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
+    get_effective_planning_model_family,
 )
 
 if TYPE_CHECKING:
@@ -184,7 +185,11 @@ def _lane_identity(
     planner_model = (
         planning_configuration.model_family
         if planning_configuration is not None
-        else settings.PLANNER_MODEL or effective_model
+        else get_effective_planning_model_family(
+            settings.PLANNER_MODEL,
+            effective_model,
+            db=db,
+        )
     )
     return {
         "active_backend_lanes": {

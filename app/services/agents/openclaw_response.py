@@ -43,6 +43,7 @@ def stream_diagnostics_summary(diagnostics: Dict[str, Any]) -> str:
             f"timeout={diagnostics.get('timeout_seconds')}s",
             f"timed_out={diagnostics.get('timed_out')}",
             f"cancelled={diagnostics.get('cancelled')}",
+            f"diagnostic_category={diagnostics.get('diagnostic_category')}",
             f"return_code={diagnostics.get('return_code')}",
             f"process_pid={diagnostics.get('process_pid')}",
             "subprocess_started_after="

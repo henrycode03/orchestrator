@@ -37,6 +37,7 @@ from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 from app.services.orchestration.prompt_optimization import optimize_prompt
+from app.services.orchestration.policy import PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
 from app.services.observability.planning_identity import active_planning_identity
 
 logger = logging.getLogger(__name__)
@@ -732,6 +733,9 @@ class PlanningSessionService:
         project_id: int | None = None,
     ) -> dict[str, Any]:
         """Execute planning synthesis through the active backend runtime."""
+        effective_timeout = int(
+            timeout_seconds or self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS
+        )
         try:
             return invoke_runtime_prompt(
                 self.db,
@@ -740,8 +744,10 @@ class PlanningSessionService:
                 project_id=project_id,
                 task_id=None,
                 source_brain=source_brain,
-                timeout_seconds=(
-                    timeout_seconds or self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS
+                timeout_seconds=effective_timeout,
+                no_output_timeout_seconds=max(
+                    1,
+                    min(effective_timeout, PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS),
                 ),
                 session_prefix="planning",
                 role=BackendRole.PLANNING,

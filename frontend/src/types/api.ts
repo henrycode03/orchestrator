@@ -715,6 +715,7 @@ export interface AppSettings {
     openclaw_gateway_url: string;
     agent_backend: string;
     agent_model_family: string;
+    planning_model_family: string;
     agent_adaptation_profile: string;
     backend_capabilities: Record<string, boolean | number | string | null>;
     backend_health: {

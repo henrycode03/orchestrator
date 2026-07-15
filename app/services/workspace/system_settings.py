@@ -26,6 +26,7 @@ AGENT_BACKEND_KEY = "orchestrator_agent_backend"
 AGENT_MODEL_FAMILY_KEY = "orchestrator_agent_model_family"
 ADAPTATION_PROFILE_KEY = "orchestrator_adaptation_profile"
 PLANNING_ADAPTATION_PROFILE_KEY = "orchestrator_planning_adaptation_profile"
+PLANNING_MODEL_FAMILY_KEY = "orchestrator_planning_model_family"
 EXECUTION_ADAPTATION_PROFILE_KEY = "orchestrator_execution_adaptation_profile"
 REPAIR_ADAPTATION_PROFILE_KEY = "orchestrator_repair_adaptation_profile"
 DEBUG_REPAIR_ADAPTATION_PROFILE_KEY = "orchestrator_debug_repair_adaptation_profile"
@@ -196,6 +197,31 @@ def get_effective_agent_model_family(
     return (
         get_setting_value_runtime(AGENT_MODEL_FAMILY_KEY, env_model_family, db=db)
         or env_model_family
+    )
+
+
+def get_effective_planning_model_family(
+    env_model_family: str,
+    fallback_model_family: str,
+    db: Optional[Session] = None,
+) -> str:
+    """Resolve the planning model with the environment override first.
+
+    ``PLANNER_MODEL`` remains the highest-precedence compatibility override.
+    The planning-scoped system setting is consulted only when that environment
+    value is blank, then falls back to the existing global model setting.
+    """
+
+    environment_model = str(env_model_family or "").strip()
+    if environment_model:
+        return environment_model
+    return (
+        get_setting_value_runtime(
+            PLANNING_MODEL_FAMILY_KEY,
+            str(fallback_model_family or "").strip(),
+            db=db,
+        )
+        or str(fallback_model_family or "").strip()
     )
 
 

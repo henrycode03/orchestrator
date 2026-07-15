@@ -192,9 +192,15 @@ class OpenAIResponsesRuntime:
                     status_message=f"timed out after {effective_timeout}s",
                     output={"status": "failed", "reason": "timeout"},
                 )
-                raise AgentRuntimeError(
+                error = AgentRuntimeError(
                     f"OpenAI Responses request timed out after {effective_timeout}s."
-                ) from exc
+                )
+                error.runtime_diagnostics = {
+                    "timed_out": True,
+                    "timeout_boundary": "runtime_invocation",
+                    "timeout_seconds": effective_timeout,
+                }
+                raise error from exc
             except httpx.HTTPError as exc:
                 update_langfuse_observation(
                     observation,
@@ -202,9 +208,12 @@ class OpenAIResponsesRuntime:
                     status_message=str(exc)[:500],
                     output={"status": "failed", "reason": "http_error"},
                 )
-                raise AgentRuntimeError(
-                    f"OpenAI Responses request failed: {exc}"
-                ) from exc
+                error = AgentRuntimeError(f"OpenAI Responses request failed: {exc}")
+                error.runtime_diagnostics = {
+                    "timed_out": False,
+                    "timeout_boundary": "runtime_invocation",
+                }
+                raise error from exc
 
             body = response.json()
             if response.status_code >= 400:
@@ -220,7 +229,13 @@ class OpenAIResponsesRuntime:
                     status_message=message[:500],
                     output={"status": "failed", "http_status": response.status_code},
                 )
-                raise AgentRuntimeError(message)
+                error = AgentRuntimeError(message)
+                error.runtime_diagnostics = {
+                    "timed_out": False,
+                    "timeout_boundary": "provider_response",
+                    "http_status": response.status_code,
+                }
+                raise error
 
             output_text = _extract_output_text(body)
             usage = body.get("usage") if isinstance(body, dict) else None

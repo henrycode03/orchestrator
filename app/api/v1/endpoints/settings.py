@@ -40,6 +40,7 @@ from app.services.workspace.system_settings import (
     AGENT_MODEL_FAMILY_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
     PLANNING_ADAPTATION_PROFILE_KEY,
+    PLANNING_MODEL_FAMILY_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
     WORKSPACE_ROOT_KEY,
     get_effective_adaptation_profile,
@@ -202,6 +203,7 @@ def get_app_settings(
             "agent_adaptation_profile": get_adaptation_profile(
                 effective_adaptation_profile
             ).name,
+            "planning_model_family": planning_configuration.model_family,
             "planning_adaptation_profile": planning_configuration.adaptation_profile,
             "backend_capabilities": backend.capabilities.to_dict(),
             "backend_health": backend.health.to_dict(),
@@ -456,6 +458,24 @@ def update_system_settings(
             changes["planning_adaptation_profile"] = {
                 "from": previous_planning_profile,
                 "to": planning_configuration.adaptation_profile,
+            }
+
+    if payload.planning_model_family is not None:
+        previous_planning_model = get_setting_value(
+            db,
+            PLANNING_MODEL_FAMILY_KEY,
+        )
+        requested_planning_model = payload.planning_model_family.strip() or None
+        set_setting_value(
+            db,
+            PLANNING_MODEL_FAMILY_KEY,
+            requested_planning_model,
+            description="Operator-selected planning runtime model family",
+        )
+        if previous_planning_model != requested_planning_model:
+            changes["planning_model_family"] = {
+                "from": previous_planning_model,
+                "to": requested_planning_model,
             }
 
     if payload.orchestration_policy_profile is not None:

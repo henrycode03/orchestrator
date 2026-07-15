@@ -942,6 +942,7 @@ class OpenClawSessionService:
         last_output_at: Optional[float] = None
         previous_output_at: Optional[float] = None
         max_silent_gap: Optional[float] = None
+        first_output_logged = False
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
         first_output_event = asyncio.Event()
@@ -1003,7 +1004,8 @@ class OpenClawSessionService:
         )
 
         async def collect_stream(stream, chunks: List[str], stream_name: str) -> None:
-            nonlocal first_output_at, last_output_at, previous_output_at, max_silent_gap
+            nonlocal first_output_at, last_output_at, previous_output_at
+            nonlocal max_silent_gap, first_output_logged
             while True:
                 line = await stream.readline()
                 if not line:
@@ -1013,6 +1015,30 @@ class OpenClawSessionService:
                 if first_output_at is None:
                     first_output_at = now
                     first_output_event.set()
+                    if not first_output_logged:
+                        first_output_logged = True
+                        first_output_elapsed = round(now - started_at, 3)
+                        self._log_entry(
+                            "INFO",
+                            (
+                                f"[OPENCLAW][{invocation_kind.upper()}_DIAGNOSTICS] "
+                                "inference stream output observed"
+                            ),
+                            metadata=json.dumps(
+                                {
+                                    "diagnostic_category": (
+                                        "slow_inference"
+                                        if first_output_elapsed >= 5
+                                        else "inference_progress"
+                                    ),
+                                    "first_output_after_seconds": first_output_elapsed,
+                                    "invocation_kind": invocation_kind,
+                                    "timeout_seconds": timeout_seconds,
+                                    "no_output_timeout_seconds": no_output_timeout_seconds,
+                                }
+                            ),
+                            commit=True,
+                        )
                 if previous_output_at is not None:
                     gap = now - previous_output_at
                     max_silent_gap = (
@@ -1066,6 +1092,7 @@ class OpenClawSessionService:
                         diagnostics["no_output_timeout"] = True
                         diagnostics["timed_out"] = True
                         diagnostics["cancelled"] = True
+                        diagnostics["diagnostic_category"] = "silent_inference"
                         diagnostics["timeout_boundary"] = "repair_no_output"
                         diagnostics["no_output_timeout_elapsed_seconds"] = round(
                             no_output_elapsed, 3
@@ -1121,6 +1148,7 @@ class OpenClawSessionService:
                 diagnostics["return_code"] = 0
         except asyncio.TimeoutError:
             diagnostics["timed_out"] = True
+            diagnostics["diagnostic_category"] = "timeout"
             diagnostics["timeout_boundary"] = (
                 diagnostics.get("timeout_boundary") or "process_timeout"
             )
@@ -1175,6 +1203,20 @@ class OpenClawSessionService:
                     "truncated": "truncated" in f"{stdout_text}\n{stderr_text}".lower(),
                 }
             )
+            if diagnostics.get("diagnostic_category") is None:
+                if diagnostics.get("no_output_timeout"):
+                    diagnostics["diagnostic_category"] = "silent_inference"
+                elif diagnostics.get("timed_out"):
+                    diagnostics["diagnostic_category"] = "timeout"
+                elif diagnostics.get("return_code") not in {None, 0}:
+                    diagnostics["diagnostic_category"] = "provider_failure"
+                elif (
+                    diagnostics.get("first_output_after_seconds") is not None
+                    and diagnostics["first_output_after_seconds"] >= 5
+                ):
+                    diagnostics["diagnostic_category"] = "slow_inference"
+                else:
+                    diagnostics["diagnostic_category"] = "provider_success"
             cleanup_git_containment_shim(git_guard_shim_dir)
             self._log_entry(
                 "INFO",
