@@ -68,18 +68,37 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
     service._openclaw_config_path_override = None
     service._log_entry = lambda *args, **kwargs: None
 
-    observed: list[tuple[str, str]] = []
+    observed: list[tuple[str, str, str, str]] = []
+    seen_store_paths: set[str] = set()
 
     async def fake_run(full_cmd, **kwargs):
+        # Model OpenClaw 2026.4.10 session semantics (Phase 26E-8):
+        # `session.mainKey` is normalized to "main" at config load, so an
+        # explicit-agent run reuses the persistent `agent:<id>:main` store
+        # entry and its pinned transcript unless the invocation binds a
+        # fresh `session.store`. The response `meta.agentMeta.sessionId`
+        # reports the transcript header id that actually served the run --
+        # it echoes `--session-id` only for a genuinely new session file.
         invocation_id = full_cmd[full_cmd.index("--session-id") + 1]
         bound_config = json.loads(
             service._openclaw_config_path_override.read_text(encoding="utf-8")
         )
-        observed.append((invocation_id, bound_config["session"]["mainKey"]))
+        session_config = bound_config.get("session") or {}
+        store_path = str(session_config.get("store") or "")
+        fresh_store = bool(store_path) and store_path not in seen_store_paths
+        if store_path:
+            seen_store_paths.add(store_path)
+        response_session_id = (
+            invocation_id if fresh_store else "orchestrator-task-2-1783533647"
+        )
+        binding_dir = str(service._openclaw_config_path_override.parent)
+        observed.append(
+            (invocation_id, session_config.get("mainKey", ""), store_path, binding_dir)
+        )
         payload = json.dumps(
             {
                 "payloads": [{"text": "same result"}],
-                "meta": {"agentMeta": {"sessionId": invocation_id}},
+                "meta": {"agentMeta": {"sessionId": response_session_id}},
             }
         )
         return subprocess.CompletedProcess(full_cmd, 0, payload, ""), {}
@@ -95,3 +114,11 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
     assert observed[0][0] == observed[0][1]
     assert observed[1][0] == observed[1][1]
     assert observed[0][1] != observed[1][1]
+    # Phase 26E-8: each planning invocation must bind a fresh, ephemeral
+    # session store -- the only boundary OpenClaw 2026.4.10 honors for
+    # history isolation under an explicit agent.
+    first_store, second_store = observed[0][2], observed[1][2]
+    assert first_store and second_store
+    assert first_store != second_store
+    assert first_store.startswith(observed[0][3])
+    assert second_store.startswith(observed[1][3])

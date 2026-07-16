@@ -414,7 +414,21 @@ class OpenClawSessionService:
         return full_cmd
 
     def _bind_planning_session_main_key(self, runtime_session_key: str) -> None:
-        """Make OpenClaw's agent-main history key unique for this invocation."""
+        """Isolate this planning invocation's OpenClaw conversation history.
+
+        Phase 26E-8: OpenClaw 2026.4.10 normalizes ``session.mainKey`` to
+        ``"main"`` at config load (``applySessionDefaults``), so the unique
+        main-key binding alone cannot isolate history -- an explicit-agent
+        run still resolves ``agent:<id>:main`` in the persistent session
+        store and reuses the transcript file pinned there. Binding
+        ``session.store`` to a fresh per-invocation path inside the
+        ephemeral binding directory is the boundary OpenClaw honors: the
+        empty store has no entry, so the run creates a new transcript named
+        by ``--session-id`` and the response ``meta.agentMeta.sessionId``
+        (the transcript header id) equals the generated invocation ID. The
+        unique ``mainKey`` binding is kept for forward compatibility with
+        OpenClaw versions that honor it.
+        """
 
         config_path = getattr(self, "_openclaw_config_path_override", None)
         if config_path is None:
@@ -422,6 +436,10 @@ class OpenClawSessionService:
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
         session_config = config.setdefault("session", {})
         session_config["mainKey"] = runtime_session_key
+        session_config["store"] = str(
+            Path(config_path).parent
+            / f"planning-session-store-{runtime_session_key}.json"
+        )
         Path(config_path).write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     def _openclaw_config_path(self) -> Path:
