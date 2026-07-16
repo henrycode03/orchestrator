@@ -152,7 +152,7 @@ def test_task_execution_snapshots_lanes_and_ignores_later_config_changes(
     db_session.commit()
 
     monkeypatch.setattr(settings, "PLANNING_BACKEND", "changed-planning-backend")
-    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "changed-execution-backend")
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "direct_ollama")
     monkeypatch.setattr(settings, "PLANNER_MODEL", "changed-planner-model")
     monkeypatch.setattr(settings, "EXECUTION_MODEL", "changed-executor-model")
     changed = active_execution_identity(db_session)

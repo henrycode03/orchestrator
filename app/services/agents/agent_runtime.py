@@ -100,16 +100,16 @@ def _role_model_family(db: Session, role: BackendRole, backend_name: str) -> str
     """Resolve role model ownership using the current compatibility order."""
 
     global_model_family = _effective_global_model_family(db, backend_name)
+    execution_model = str(getattr(settings, "EXECUTION_MODEL", "") or "").strip()
+    if not execution_model and backend_name == "direct_ollama":
+        execution_model = str(getattr(settings, "OLLAMA_AGENT_MODEL", "") or "").strip()
     role_models = {
         BackendRole.PLANNING: get_effective_planning_model_family(
             getattr(settings, "PLANNER_MODEL", ""),
             global_model_family,
             db=db,
         ),
-        # OLLAMA_AGENT_MODEL is the existing local-provider fallback used by
-        # canonical OpenClaw execution and worker selection details.
-        BackendRole.EXECUTION: getattr(settings, "EXECUTION_MODEL", "")
-        or getattr(settings, "OLLAMA_AGENT_MODEL", ""),
+        BackendRole.EXECUTION: execution_model,
         BackendRole.REPAIR: getattr(settings, "PLANNING_REPAIR_MODEL", ""),
         BackendRole.DEBUG_REPAIR: getattr(settings, "DEBUG_REPAIR_MODEL", "")
         or getattr(settings, "PLANNING_REPAIR_MODEL", ""),
@@ -197,6 +197,14 @@ def _resolve_profile(
     if role is BackendRole.PLANNING:
         global_profile_name = get_effective_adaptation_profile(db=db)
         return require_adaptation_profile(global_profile_name).name
+
+    if role is BackendRole.EXECUTION and descriptor.name == "local_openclaw":
+        global_profile_name = get_effective_adaptation_profile(db=db)
+        if _profile_matches_backend(global_profile_name, descriptor):
+            return require_adaptation_profile(global_profile_name).name
+        for profile_name in descriptor.config.adaptation_profiles:
+            if _profile_matches_backend(profile_name, descriptor):
+                return require_adaptation_profile(profile_name).name
 
     # Non-planning adapters historically selected a registry-compatible
     # profile from backend/model, ignoring the global profile setting. Keep

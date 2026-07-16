@@ -20,6 +20,7 @@ def create_task_execution(
     started_at: datetime | None = None,
 ) -> TaskExecution:
     identity = active_execution_identity(db)
+    identity.pop("execution_adaptation_profile", None)
     planning_session = _originating_planning_session(db, task_id)
     if planning_session is not None:
         identity.update(

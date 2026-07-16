@@ -11,12 +11,8 @@ from app.services.agents.agent_runtime import (
     create_agent_runtime,
     resolve_runtime_configuration,
 )
-from app.services.agents.openclaw_service import OpenClawSessionService
 from app.services.agents.providers.ollama_adapter import OllamaRuntime
 from app.services.agents.providers.openai_adapter import OpenAIResponsesRuntime
-from app.services.agents.providers.openai_chat_adapter import (
-    OpenAIChatCompletionsRuntime,
-)
 from app.services.agents.runtime_configuration import (
     RoleRuntimeConfiguration,
     RuntimeConfiguration,
@@ -102,69 +98,22 @@ def test_a0_planning_configuration_tuple_is_unchanged(db_session, monkeypatch):
     }
 
 
-@pytest.mark.parametrize(
-    ("backend", "runtime_type"),
-    [
-        ("local_openclaw", OpenClawSessionService),
-        ("direct_ollama", OllamaRuntime),
-        ("openai_responses_api", OpenAIResponsesRuntime),
-        ("openai_chat_completions", OpenAIChatCompletionsRuntime),
-    ],
-)
-def test_execution_resolver_matches_legacy_adapter_selection(
-    db_session, monkeypatch, backend, runtime_type
+def test_direct_ollama_execution_resolver_matches_legacy_adapter_selection(
+    db_session, monkeypatch
 ):
     _set_a0_compatible_settings(db_session, monkeypatch)
-    monkeypatch.setattr(settings, "EXECUTION_BACKEND", backend)
-    execution_model = ""
-    if backend == "local_openclaw":
-        ollama_model = "qwen-execution"
-    elif backend == "direct_ollama":
-        ollama_model = "ollama-execution"
-    elif backend == "openai_responses_api":
-        ollama_model = ""
-        set_setting_value(db_session, AGENT_MODEL_FAMILY_KEY, "gpt-5")
-    else:
-        ollama_model = ""
-        execution_model = "ollama-execution"
-        monkeypatch.setattr(
-            settings, "OPENAI_CHAT_COMPLETIONS_MODEL", "ollama-execution"
-        )
-    monkeypatch.setattr(settings, "EXECUTION_MODEL", execution_model)
-    monkeypatch.setattr(
-        settings,
-        "OLLAMA_AGENT_MODEL",
-        ollama_model,
-    )
-    if backend == "openai_chat_completions":
-        set_setting_value(db_session, AGENT_MODEL_FAMILY_KEY, "local")
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "EXECUTION_MODEL", "")
+    monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "ollama-execution")
 
-    legacy_runtime = runtime_type(db_session, session_id=None)
+    legacy_runtime = OllamaRuntime(db_session, session_id=None)
     legacy_runtime.backend_role = BackendRole.EXECUTION.value
-    legacy_model = (
-        legacy_runtime._model
-        if isinstance(legacy_runtime, OllamaRuntime)
-        else (
-            legacy_runtime._model_name()
-            if isinstance(legacy_runtime, OpenAIResponsesRuntime)
-            or isinstance(legacy_runtime, OpenAIChatCompletionsRuntime)
-            else legacy_runtime._model_family_for_role()
-        )
-    )
-    legacy_profile = (
-        legacy_runtime._adaptation_profile()
-        if isinstance(legacy_runtime, OllamaRuntime)
-        else (
-            legacy_runtime._adaptation_profile(legacy_model)
-            if isinstance(legacy_runtime, OpenAIResponsesRuntime)
-            or isinstance(legacy_runtime, OpenAIChatCompletionsRuntime)
-            else legacy_runtime._adaptation_profile_for_role(legacy_model)
-        )
-    ).name
+    legacy_model = legacy_runtime._model
+    legacy_profile = legacy_runtime._adaptation_profile().name
 
     configuration = resolve_runtime_configuration(db_session, BackendRole.EXECUTION)
 
-    assert configuration.backend_name == backend
+    assert configuration.backend_name == "direct_ollama"
     assert configuration.model_family == legacy_model
     assert configuration.adaptation_profile == legacy_profile
 

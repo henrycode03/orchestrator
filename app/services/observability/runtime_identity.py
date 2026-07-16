@@ -111,14 +111,17 @@ def _global_fallbacks(db: Any) -> dict[str, Any]:
         effective_model = settings.AGENT_MODEL
         planning_profile = None
         planner_model = settings.PLANNER_MODEL or effective_model
+    execution_backend = settings.EXECUTION_BACKEND or effective_backend
+    executor_model = str(settings.EXECUTION_MODEL or "").strip()
+    if not executor_model and execution_backend == "direct_ollama":
+        executor_model = str(settings.OLLAMA_AGENT_MODEL or "").strip()
+    executor_model = executor_model or effective_model
     return {
         "planning_backend": settings.PLANNING_BACKEND or effective_backend,
         "planner_model": planner_model,
         "reasoning_profile": planning_profile,
-        "execution_backend": settings.EXECUTION_BACKEND or effective_backend,
-        "executor_model": (
-            settings.EXECUTION_MODEL or settings.OLLAMA_AGENT_MODEL or effective_model
-        ),
+        "execution_backend": execution_backend,
+        "executor_model": executor_model,
     }
 
 

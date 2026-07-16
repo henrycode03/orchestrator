@@ -9,7 +9,6 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.services.observability.build_identity import build_identity_payload
-from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 
 def _fingerprint(payload: dict[str, Any], reasoning_profile: str | None) -> str:
@@ -52,12 +51,26 @@ def active_planning_identity(db: Session) -> dict[str, str | None]:
 
 def active_execution_identity(db: Session) -> dict[str, str | None]:
     """Snapshot both role lanes at task-execution creation time."""
+    from app.services.agents.agent_runtime import (
+        BackendRole,
+        resolve_runtime_configuration,
+    )
+
+    configuration = resolve_runtime_configuration(db, BackendRole.EXECUTION)
     payload = build_identity_payload(db)
-    reasoning_profile = get_effective_adaptation_profile(db=db) or None
+    execution_profile = configuration.adaptation_profile
+    fingerprint_payload = {
+        **payload,
+        "active_backend_lanes": {"execution": configuration.backend_name},
+        "active_model_names": {"execution": configuration.model_family},
+    }
     return {
         "planning_backend": payload["planning_backend"],
-        "execution_backend": payload["execution_backend"],
+        "execution_backend": configuration.backend_name,
         "planner_model": payload["planner_model"],
-        "executor_model": payload["execution_model"],
-        "configuration_fingerprint": _fingerprint(payload, reasoning_profile),
+        "executor_model": configuration.model_family,
+        "execution_adaptation_profile": execution_profile,
+        "configuration_fingerprint": _fingerprint(
+            fingerprint_payload, execution_profile
+        ),
     }
