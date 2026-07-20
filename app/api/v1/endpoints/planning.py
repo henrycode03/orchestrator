@@ -74,6 +74,7 @@ def start_planning_session(
         payload.prompt,
         source_brain=payload.source_brain,
         skip_clarification=payload.skip_clarification,
+        protocol_version=payload.protocol_version,
     )
     return service.build_session_payload(session)
 

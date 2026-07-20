@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -40,6 +41,17 @@ from app.services.engineering_context import (
 )
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
+from app.services.planning.protocol_persistence import (
+    PROTOCOL_V1,
+    PROTOCOL_V2,
+    PlanningProtocolPersistenceService,
+    SUPPORTED_PROTOCOL_VERSIONS,
+)
+from app.services.orchestration.stage_engine import (
+    StageDefinition,
+    StageExecutor,
+    StageStatus,
+)
 from app.services.orchestration.prompt_optimization import optimize_prompt
 from app.services.orchestration.policy import PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
 from app.services.observability.planning_identity import active_planning_identity
@@ -75,11 +87,17 @@ class PlanningSessionService:
         db: Session,
         *,
         engineering_context_service: EngineeringContextService | None = None,
+        stage_definitions: Iterable[StageDefinition] = (),
+        stage_executor: StageExecutor | None = None,
     ):
         self.db = db
         self.engineering_context_service = (
             engineering_context_service or EngineeringContextService()
         )
+        self.stage_executor = stage_executor or StageExecutor(
+            db, stage_definitions=stage_definitions
+        )
+        self.protocol_persistence = PlanningProtocolPersistenceService(db)
 
     def list_sessions(self, project_id: Optional[int] = None) -> list[PlanningSession]:
         query = self.db.query(PlanningSession).join(Project)
@@ -108,7 +126,16 @@ class PlanningSessionService:
         prompt: str,
         source_brain: str = "local",
         skip_clarification: bool = False,
+        protocol_version: str = PROTOCOL_V1,
     ) -> PlanningSession:
+        normalized_protocol_version = (
+            str(protocol_version or PROTOCOL_V1).strip().lower()
+        )
+        if normalized_protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported planning protocol version: {protocol_version}",
+            )
         existing = (
             self.db.query(PlanningSession)
             .filter(
@@ -132,7 +159,7 @@ class PlanningSessionService:
             source_brain=source_brain,
             # Current Planning remains on the legacy protocol until a later
             # phase opts a session into Protocol v2 explicitly.
-            protocol_version="v1",
+            protocol_version=normalized_protocol_version,
             **identity,
         )
         self.db.add(session)
@@ -144,6 +171,25 @@ class PlanningSessionService:
                 status_code=409,
                 detail="This project already has an active planning session",
             ) from exc
+
+        if normalized_protocol_version == PROTOCOL_V2:
+            self.protocol_persistence.record_input_identity(
+                session.id,
+                planning_input=session.prompt,
+                engineering_context_identity=(
+                    f"planning-session:{session.generation_id}:unassembled"
+                ),
+                provider_identity=session.planning_backend or source_brain or "unknown",
+                model_configuration={
+                    "planner_model": session.planner_model or "unknown",
+                    "reasoning_profile": session.reasoning_profile or "default",
+                    "configuration_fingerprint": session.configuration_fingerprint
+                    or "unknown",
+                },
+                repository_identity=(project.workspace_path or f"project:{project.id}"),
+                protocol_version=PROTOCOL_V2,
+                session_generation_id=session.generation_id,
+            )
 
         msg_metadata: dict = {"kind": "prompt"}
         if skip_clarification:
@@ -356,9 +402,19 @@ class PlanningSessionService:
         session = claim
         try:
             project = session.project
-            self._advance_or_finalize(
-                session, project, generation_id=generation_id, owner_token=owner_token
-            )
+            if session.protocol_version == PROTOCOL_V2:
+                self._advance_protocol_v2(
+                    session,
+                    generation_id=generation_id,
+                    owner_token=owner_token,
+                )
+            else:
+                self._advance_or_finalize(
+                    session,
+                    project,
+                    generation_id=generation_id,
+                    owner_token=owner_token,
+                )
             self._assert_owner(session.id, generation_id, owner_token)
             self._clear_processing_lease(session)
             self.db.commit()
@@ -426,6 +482,16 @@ class PlanningSessionService:
             session.updated_at = datetime.now(timezone.utc)
         self.db.commit()
         for session_id, generation_id in session_details:
+            session = self.db.get(PlanningSession, session_id)
+            if session is not None and session.protocol_version == PROTOCOL_V2:
+                recovery = self.stage_executor.recover(session_id)
+                logger.info(
+                    "Protocol v2 stage recovery session=%s resumable=%s next=%s reason=%s",
+                    session_id,
+                    recovery.resumable,
+                    recovery.next_stage,
+                    recovery.reason,
+                )
             self.schedule_processing(session_id)
         return [session_id for session_id, _ in session_details]
 
@@ -844,6 +910,34 @@ class PlanningSessionService:
             ),
             "planner_markdown": planner_markdown,
         }
+
+    def _advance_protocol_v2(
+        self,
+        session: PlanningSession,
+        *,
+        generation_id: str,
+        owner_token: str,
+    ) -> None:
+        """Advance Protocol v2 stages without entering legacy synthesis."""
+
+        result = self.stage_executor.advance(
+            session.id,
+            session_generation_id=generation_id,
+            fencing_token=owner_token,
+        )
+        self._assert_owner(session.id, generation_id, owner_token)
+        if result.status == StageStatus.COMPLETED:
+            session.status = "completed"
+            session.current_prompt_id = None
+            session.completed_at = datetime.now(timezone.utc)
+            session.last_error = None
+            session.updated_at = datetime.now(timezone.utc)
+            return
+        if result.status in {StageStatus.FAILED, StageStatus.BLOCKED}:
+            session.status = "failed"
+            session.current_prompt_id = None
+            session.last_error = result.reason or "Protocol v2 stage execution failed"
+            session.updated_at = datetime.now(timezone.utc)
 
     def _advance_or_finalize(
         self,

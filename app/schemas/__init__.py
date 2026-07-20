@@ -187,6 +187,7 @@ class PlanningSessionSummaryResponse(BaseModel):
     prompt: str
     status: str
     source_brain: str
+    protocol_version: str = "v1"
     planning_backend: Optional[str] = None
     planner_model: Optional[str] = None
     reasoning_profile: Optional[str] = None
@@ -212,6 +213,7 @@ class PlanningSessionCreateRequest(BaseModel):
     prompt: str = Field(min_length=3)
     source_brain: str = "local"
     skip_clarification: bool = False
+    protocol_version: str = "v1"
 
 
 class PlanningSessionRespondRequest(BaseModel):

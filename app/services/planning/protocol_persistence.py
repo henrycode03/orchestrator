@@ -180,6 +180,23 @@ class PlanningProtocolPersistenceService:
             raise ProtocolOwnershipError("fencing token does not match current owner")
         return session
 
+    def assert_owner(
+        self,
+        session_id: int,
+        *,
+        protocol_version: str | None = None,
+        session_generation_id: str | None = None,
+        fencing_token: str | None = None,
+    ) -> PlanningSession:
+        """Validate the current session fence without exposing database writes."""
+
+        return self._assert_owner(
+            session_id,
+            protocol_version=protocol_version,
+            session_generation_id=session_generation_id,
+            fencing_token=fencing_token,
+        )
+
     def record_input_identity(
         self,
         session_id: int,
@@ -367,6 +384,117 @@ class PlanningProtocolPersistenceService:
         self.db.flush()
         return checkpoint
 
+    def list_checkpoints(self, session_id: int) -> list[PlanningCheckpoint]:
+        """Read checkpoints in append order for deterministic recovery."""
+
+        session = self._get_session(session_id)
+        return (
+            self.db.query(PlanningCheckpoint)
+            .filter(
+                PlanningCheckpoint.planning_session_id == session.id,
+                PlanningCheckpoint.protocol_version == session.protocol_version,
+                PlanningCheckpoint.session_generation_id == session.generation_id,
+            )
+            .order_by(PlanningCheckpoint.id.asc())
+            .all()
+        )
+
+    def effective_checkpoints(
+        self,
+        session_id: int,
+        *,
+        stage_versions: Mapping[str, int] | None = None,
+    ) -> dict[tuple[str, int], PlanningCheckpoint]:
+        """Return the latest append-only record for each stage/version pair."""
+
+        effective: dict[tuple[str, int], PlanningCheckpoint] = {}
+        for checkpoint in self.list_checkpoints(session_id):
+            if stage_versions is not None:
+                expected_version = stage_versions.get(checkpoint.stage_name)
+                if expected_version is None or checkpoint.checkpoint_version != int(
+                    expected_version
+                ):
+                    continue
+            effective[(checkpoint.stage_name, checkpoint.checkpoint_version)] = (
+                checkpoint
+            )
+        return effective
+
+    def accepted_predecessors(
+        self,
+        session_id: int,
+        *,
+        stage_versions: Mapping[str, int],
+    ) -> dict[str, PlanningCheckpoint]:
+        """Load accepted predecessor checkpoints in stable stage-name order."""
+
+        effective = self.effective_checkpoints(
+            session_id, stage_versions=stage_versions
+        )
+        return {
+            stage_name: effective[(stage_name, int(stage_versions[stage_name]))]
+            for stage_name in sorted(stage_versions)
+            if (stage_name, int(stage_versions[stage_name])) in effective
+            and effective[(stage_name, int(stage_versions[stage_name]))].status
+            == "accepted"
+        }
+
+    def invalidate_checkpoints(
+        self,
+        session_id: int,
+        *,
+        stage_names: Sequence[str],
+        reason: str,
+        fencing_token: str | None = None,
+        session_generation_id: str | None = None,
+        protocol_version: str | None = None,
+    ) -> list[PlanningCheckpoint]:
+        """Append invalidation attempts for the current downstream records.
+
+        Existing checkpoints remain immutable.  The latest record for each
+        affected stage/version becomes authoritative, so the invalidation is
+        visible to recovery and completion evaluation without erasing audit
+        history.
+        """
+
+        session = self._assert_owner(
+            session_id,
+            protocol_version=protocol_version,
+            session_generation_id=session_generation_id,
+            fencing_token=fencing_token,
+        )
+        names = {str(name).strip() for name in stage_names if str(name).strip()}
+        if not names:
+            return []
+        invalidated: list[PlanningCheckpoint] = []
+        effective = self.effective_checkpoints(session.id)
+        for key in sorted(effective):
+            checkpoint = effective[key]
+            if checkpoint.stage_name not in names or checkpoint.status == "invalidated":
+                continue
+            parent_ids = [
+                edge.parent_checkpoint_id
+                for edge in sorted(
+                    checkpoint.dependencies, key=lambda item: item.parent_checkpoint_id
+                )
+            ]
+            invalidated.append(
+                self.record_checkpoint(
+                    session.id,
+                    stage_name=checkpoint.stage_name,
+                    checkpoint_version=checkpoint.checkpoint_version,
+                    content=checkpoint.content,
+                    stage_generation_id=checkpoint.stage_generation_id,
+                    fencing_token=fencing_token,
+                    session_generation_id=session_generation_id,
+                    protocol_version=protocol_version,
+                    status="invalidated",
+                    parent_checkpoint_ids=parent_ids,
+                    failure_reason=str(reason or "dependency changed"),
+                )
+            )
+        return invalidated
+
     def record_completion_manifest(
         self,
         session_id: int,
@@ -547,6 +675,7 @@ class PlanningProtocolPersistenceService:
             "session_generation_id": session.generation_id,
             "input": session.protocol_input,
             "checkpoints": checkpoints,
+            "effective_checkpoints": self.effective_checkpoints(session.id),
             "completion_manifest": session.completion_manifest,
             "commit_manifests": list(session.commit_manifests),
         }
