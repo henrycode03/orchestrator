@@ -20,6 +20,12 @@ def _is_admin_user(user: User) -> bool:
     return bool(user.email and user.email.lower() in admin_emails)
 
 
+def is_admin_user(user: User) -> bool:
+    """Public authorization predicate for routes with stricter role policy."""
+
+    return _is_admin_user(user)
+
+
 def project_access_filter(db: Session, user: User | None):
     """Return the project visibility predicate for authenticated local users.
 

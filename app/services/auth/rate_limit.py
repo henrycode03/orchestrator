@@ -17,6 +17,7 @@ class RateLimitBucket:
     action: str
     client_id: str
     user_id: str | None = None
+    scope_id: str | None = None
 
 
 _attempts: dict[RateLimitBucket, deque[datetime]] = defaultdict(deque)
@@ -81,7 +82,11 @@ def enforce_auth_rate_limit(request: Request, action: str) -> None:
 
 
 def enforce_api_rate_limit(
-    request: Request, action: str, *, current_user: object | None = None
+    request: Request,
+    action: str,
+    *,
+    current_user: object | None = None,
+    scope_id: str | None = None,
 ) -> None:
     """Reject excessive API calls for write/mutation endpoints per client/action pair."""
 
@@ -96,6 +101,7 @@ def enforce_api_rate_limit(
         action=action,
         client_id=_get_client_id(request),
         user_id=user_id or None,
+        scope_id=str(scope_id).strip() if scope_id is not None else None,
     )
 
     with _attempts_lock:

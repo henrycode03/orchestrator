@@ -752,13 +752,14 @@ class PlanningSessionService:
         return session, committed_plan, tasks
 
     def build_session_payload(self, session: PlanningSession) -> dict[str, Any]:
-        return {
+        payload = {
             "id": session.id,
             "project_id": session.project_id,
             "title": session.title,
             "prompt": session.prompt,
             "status": session.status,
             "source_brain": session.source_brain,
+            "protocol_version": session.protocol_version,
             "planning_backend": session.planning_backend,
             "planner_model": session.planner_model,
             "reasoning_profile": session.reasoning_profile,
@@ -788,6 +789,17 @@ class PlanningSessionService:
             ],
             "committed_task_ids": self._load_committed_task_ids(session),
         }
+        if session.protocol_version == PROTOCOL_V2:
+            from app.services.planning.operator_review_persistence import (
+                OperatorReviewPersistenceService,
+            )
+
+            payload.update(
+                OperatorReviewPersistenceService(self.db).build_lifecycle_projection(
+                    session.id
+                )
+            )
+        return payload
 
     def _prepare_direct_owner(
         self, session_id: int

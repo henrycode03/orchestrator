@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     projects,
     planner,
     planning,
+    planning_reviews,
     users,
     mobile,
     resume,
@@ -86,6 +87,12 @@ api_router.include_router(
 api_router.include_router(
     planning.router,
     tags=["planning"],
+    dependencies=[Depends(get_current_active_user)],
+)
+
+api_router.include_router(
+    planning_reviews.router,
+    tags=["planning-review"],
     dependencies=[Depends(get_current_active_user)],
 )
 

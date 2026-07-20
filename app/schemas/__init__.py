@@ -206,6 +206,20 @@ class PlanningSessionResponse(PlanningSessionSummaryResponse):
     artifacts: List[PlanningArtifactResponse] = []
     tasks_preview: List[PlannerTaskCandidate] = []
     committed_task_ids: List[int] = []
+    # Protocol v2 review lifecycle projections.  These remain nullable so
+    # Protocol v1 response fields retain their legacy meaning.
+    review_state: Optional[str] = None
+    pending_review_count: Optional[int] = None
+    pending_review_stage: Optional[str] = None
+    review_required_reasons: Optional[List[str]] = None
+    current_review_id: Optional[str] = None
+    allowed_review_actions: Optional[List[str]] = None
+    accepted_brief_checkpoint_id: Optional[int] = None
+    accepted_brief_checkpoint_hash: Optional[str] = None
+    accepted_task_plan_checkpoint_id: Optional[int] = None
+    accepted_task_plan_checkpoint_hash: Optional[str] = None
+    planning_completion_state: Optional[str] = None
+    completion_blockers: Optional[List[str]] = None
 
 
 class PlanningSessionCreateRequest(BaseModel):

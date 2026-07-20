@@ -600,6 +600,7 @@ class StageExecutor:
         checkpoint_access = StageCheckpointAccess(
             self.persistence, ownership, session.protocol_version
         )
+        review_projection = self._load_review_projection(session_id)
         context = StageContext(
             session=session,
             protocol_version=session.protocol_version,
@@ -613,6 +614,9 @@ class StageExecutor:
             predecessor_checkpoints=predecessors,
             planning_brief=self._load_accepted_planning_brief(session_id),
             structured_task_plan=self._load_accepted_structured_task_plan(session_id),
+            reviewable_candidates=review_projection.get("reviewable_candidates", ()),
+            review_status=review_projection.get("review_status"),
+            latest_review_decision=review_projection.get("latest_review_decision"),
         )
         key = (session_id, stage_identifier)
         self._running.add(key)
@@ -1013,7 +1017,7 @@ class StageExecutor:
         if definition.identifier == "planning_brief" and isinstance(
             output, PlanningBrief
         ):
-            return self.persistence.record_planning_brief(
+            checkpoint = self.persistence.record_planning_brief(
                 session_id,
                 brief=output,
                 stage_generation_id=stage_generation_id,
@@ -1025,10 +1029,12 @@ class StageExecutor:
                 parent_checkpoint_ids=[],
                 failure_reason=str(reason or "stage failed"),
             )
+            self._open_review_if_eligible(session_id, checkpoint)
+            return checkpoint
         if definition.identifier == "structured_task_plan" and isinstance(
             output, StructuredTaskPlan
         ):
-            return self.persistence.record_structured_task_plan(
+            checkpoint = self.persistence.record_structured_task_plan(
                 session_id,
                 task_plan=output,
                 stage_generation_id=stage_generation_id,
@@ -1057,8 +1063,10 @@ class StageExecutor:
                     else None
                 ),
             )
+            self._open_review_if_eligible(session_id, checkpoint)
+            return checkpoint
         content = self._serialize_output(output) if output is not None else ""
-        return self.persistence.record_checkpoint(
+        checkpoint = self.persistence.record_checkpoint(
             session_id,
             stage_name=definition.identifier,
             checkpoint_version=definition.version,
@@ -1071,6 +1079,33 @@ class StageExecutor:
             status="failed",
             failure_reason=str(reason or "stage failed"),
         )
+        self._open_review_if_eligible(session_id, checkpoint)
+        return checkpoint
+
+    def _open_review_if_eligible(
+        self, session_id: int, checkpoint: PlanningCheckpoint
+    ) -> None:
+        """Open a Phase 28L aggregate for a valid review-required failure."""
+
+        if checkpoint.status != "failed":
+            return
+        try:
+            from app.services.planning.operator_review_persistence import (
+                OperatorReviewPersistenceService,
+            )
+
+            OperatorReviewPersistenceService(self.db).open_review_for_candidate(
+                session_id, checkpoint.id
+            )
+        except Exception as exc:
+            # A non-reviewable failure remains an ordinary failed checkpoint;
+            # review opening must never alter or hide the canonical failure.
+            logger.debug(
+                "Protocol v2 candidate did not open operator review session=%s checkpoint=%s reason=%s",
+                session_id,
+                checkpoint.id,
+                exc,
+            )
 
     @staticmethod
     def _serialize_output(output: Any) -> str:
@@ -1116,6 +1151,27 @@ class StageExecutor:
                 "Protocol v2 stage execution requires a persisted input manifest"
             )
         return manifest
+
+    def _load_review_projection(self, session_id: int) -> dict[str, Any]:
+        try:
+            from app.services.planning.operator_review_persistence import (
+                OperatorReviewPersistenceService,
+            )
+
+            return OperatorReviewPersistenceService(
+                self.db
+            ).build_stage_context_review_projection(session_id)
+        except Exception as exc:
+            logger.warning(
+                "Protocol v2 review projection unavailable session=%s: %s",
+                session_id,
+                exc,
+            )
+            return {
+                "reviewable_candidates": (),
+                "review_status": {"review_state": "integrity_failure"},
+                "latest_review_decision": None,
+            }
 
     def _load_accepted_planning_brief(self, session_id: int) -> PlanningBrief | None:
         try:

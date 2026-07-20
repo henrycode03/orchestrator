@@ -8,7 +8,7 @@ services.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import uuid
@@ -56,6 +56,7 @@ from app.services.planning.planning_brief import (
     PLANNING_BRIEF_VALIDATOR_VERSION,
     PlanningBrief,
     PlanningBriefSchemaError,
+    structural_diff as structural_diff_planning_briefs,
     validate_planning_brief,
 )
 from app.services.planning.protocol_persistence import (
@@ -72,6 +73,7 @@ from app.services.planning.structured_task_plan import (
     STRUCTURED_TASK_PLAN_VALIDATOR_VERSION,
     StructuredTaskPlan,
     StructuredTaskPlanSchemaError,
+    diff_structured_task_plans,
     validate_structured_task_plan,
 )
 
@@ -83,6 +85,28 @@ TERMINAL_DECISION_CONFLICTS = {
     "request_amendment": "review_already_decided",
     "cancel_review": "review_already_decided",
 }
+
+
+@dataclass(frozen=True)
+class ReviewReadModel:
+    """Verified read projection used by the authenticated API layer."""
+
+    projection: ReviewProjection
+    candidate: PlanningCheckpoint
+    validation: ReviewValidationSnapshot
+    events: tuple[DomainReviewEvent, ...]
+    eligibility: ReviewEligibilityResult
+    candidate_content: str | None
+    accepted_checkpoint: PlanningCheckpoint | None
+    structural_diff: Mapping[str, Any] | None
+
+    @property
+    def created_at(self) -> datetime | None:
+        return self.events[0].created_at if self.events else None
+
+    @property
+    def updated_at(self) -> datetime | None:
+        return self.events[-1].created_at if self.events else None
 
 
 def _utc(value: datetime) -> datetime:
@@ -1561,6 +1585,260 @@ class OperatorReviewPersistenceService:
             amendment_hash=amendment_hash,
         )
 
+    def _accepted_checkpoint_for(
+        self, candidate: PlanningCheckpoint
+    ) -> PlanningCheckpoint | None:
+        effective = self.protocol.effective_checkpoints(
+            candidate.planning_session_id,
+            stage_versions={candidate.stage_name: candidate.checkpoint_version},
+        )
+        checkpoint = effective.get((candidate.stage_name, candidate.checkpoint_version))
+        if checkpoint is None or checkpoint.status != "accepted":
+            return None
+        return checkpoint
+
+    @staticmethod
+    def _structural_diff(
+        candidate: PlanningCheckpoint,
+        accepted: PlanningCheckpoint | None,
+        candidate_content: str | None,
+    ) -> Mapping[str, Any] | None:
+        if (
+            accepted is None
+            or candidate_content is None
+            or accepted.content_hash == candidate.content_hash
+        ):
+            return None
+        try:
+            if candidate.stage_name == PLANNING_BRIEF_STAGE_NAME:
+                before = PlanningBrief.from_json(accepted.content)
+                after = PlanningBrief.from_json(candidate_content)
+                return structural_diff_planning_briefs(before, after).to_dict()
+            if candidate.stage_name == STRUCTURED_TASK_PLAN_STAGE_NAME:
+                before = StructuredTaskPlan.from_json(accepted.content)
+                after = StructuredTaskPlan.from_json(candidate_content)
+                return diff_structured_task_plans(before, after).to_dict()
+        except (
+            PlanningBriefSchemaError,
+            StructuredTaskPlanSchemaError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+        return None
+
+    def get_review_read_model(self, session_id: int, review_id: str) -> ReviewReadModel:
+        """Return one verified review only when it belongs to this session."""
+
+        first = (
+            self.db.query(PlanningReviewEvent)
+            .filter(
+                PlanningReviewEvent.review_id == str(review_id),
+                PlanningReviewEvent.planning_session_id == int(session_id),
+                PlanningReviewEvent.event_sequence == 1,
+            )
+            .one_or_none()
+        )
+        if first is None:
+            raise ReviewOperationError(
+                ReviewConflict("review_not_found", "review not found")
+            )
+        projection = self._projection(str(review_id))
+        events = self._events(str(review_id))
+        candidate = self._candidate(
+            session_id, projection.candidate_binding.candidate_checkpoint_id
+        )
+        eligibility = self.classify_candidate(session_id, candidate.id)
+        content_hash = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
+        content_visible = (
+            eligibility.binding == projection.candidate_binding
+            and content_hash == candidate.content_hash
+            and eligibility.classification
+            in {"valid_review_required", "already_accepted", "already_rejected"}
+        )
+        candidate_content = candidate.content if content_visible else None
+        accepted = self._accepted_checkpoint_for(candidate)
+        return ReviewReadModel(
+            projection=projection,
+            candidate=candidate,
+            validation=_event_snapshot_from_model(first),
+            events=events,
+            eligibility=eligibility,
+            candidate_content=candidate_content,
+            accepted_checkpoint=accepted,
+            structural_diff=self._structural_diff(
+                candidate, accepted, candidate_content
+            ),
+        )
+
+    def list_review_read_models(
+        self,
+        session_id: int,
+        *,
+        stage_name: str | None = None,
+        state: str | None = None,
+        candidate_checkpoint_id: int | None = None,
+        limit: int = 50,
+        cursor: int = 0,
+    ) -> tuple[list[ReviewReadModel], int | None]:
+        """List bounded review aggregates without selecting a latest candidate."""
+
+        limit = max(1, min(int(limit), 100))
+        cursor = max(0, int(cursor))
+        query = (
+            self.db.query(PlanningReviewEvent)
+            .filter(
+                PlanningReviewEvent.planning_session_id == int(session_id),
+                PlanningReviewEvent.event_sequence == 1,
+            )
+            .order_by(
+                PlanningReviewEvent.created_at.desc(),
+                PlanningReviewEvent.review_id.desc(),
+            )
+        )
+        if stage_name:
+            query = query.filter(PlanningReviewEvent.stage_name == str(stage_name))
+        if candidate_checkpoint_id is not None:
+            query = query.filter(
+                PlanningReviewEvent.candidate_checkpoint_id
+                == int(candidate_checkpoint_id)
+            )
+        rows = query.all()
+        models: list[ReviewReadModel] = []
+        for row in rows:
+            model = self.get_review_read_model(session_id, row.review_id)
+            if state is None or model.projection.state == state:
+                models.append(model)
+        page = models[cursor : cursor + limit]
+        next_cursor = cursor + limit if cursor + limit < len(models) else None
+        return page, next_cursor
+
+    def build_lifecycle_projection(self, session_id: int) -> dict[str, Any]:
+        """Build additive API lifecycle state from accepted checkpoints and reviews."""
+
+        session = self._session(session_id)
+        if session.protocol_version != PROTOCOL_V2:
+            return {}
+        reviews, _ = self.list_review_read_models(session_id, limit=100, cursor=0)
+        pending = [item for item in reviews if item.projection.state == "pending"]
+        stale = [
+            item for item in reviews if item.projection.state in {"stale", "superseded"}
+        ]
+        approved = [item for item in reviews if item.projection.state == "approved"]
+        rejected = [item for item in reviews if item.projection.state == "rejected"]
+        cancelled = [item for item in reviews if item.projection.state == "cancelled"]
+        effective = self.protocol.effective_checkpoints(session_id)
+        accepted = {
+            stage: checkpoint
+            for (stage, _version), checkpoint in effective.items()
+            if checkpoint.status == "accepted"
+            and stage in {PLANNING_BRIEF_STAGE_NAME, STRUCTURED_TASK_PLAN_STAGE_NAME}
+        }
+        blockers: list[str] = []
+        if pending:
+            blockers.append("review_required")
+        if stale:
+            blockers.append("review_candidate_stale")
+        if rejected:
+            blockers.append("review_rejected")
+        if cancelled:
+            blockers.append("review_cancelled")
+        if session.completion_manifest is not None:
+            lifecycle = "completed"
+            completion_state = "completed"
+        elif pending:
+            lifecycle = "review_required"
+            completion_state = "blocked"
+        elif rejected:
+            lifecycle = "review_rejected"
+            completion_state = "blocked"
+        elif cancelled:
+            lifecycle = "review_cancelled"
+            completion_state = "blocked"
+        elif stale:
+            lifecycle = "stale"
+            completion_state = "blocked"
+        elif approved:
+            lifecycle = "accepted_after_review"
+            completion_state = "reevaluation_pending"
+        elif session.status == "completed":
+            lifecycle = "completed"
+            completion_state = "completed"
+        elif session.status == "failed":
+            lifecycle = "failed"
+            completion_state = "blocked"
+        else:
+            lifecycle = "generating"
+            completion_state = "pending"
+
+        current = pending[0] if pending else (stale[0] if stale else None)
+        reasons = tuple(
+            sorted(
+                {
+                    reason
+                    for item in pending
+                    for reason in item.projection.review_required_reasons
+                }
+            )
+        )
+        return {
+            "review_state": lifecycle,
+            "pending_review_count": len(pending),
+            "pending_review_stage": (
+                current.projection.candidate_binding.stage_name if current else None
+            ),
+            "review_required_reasons": reasons,
+            "current_review_id": current.projection.review_id if current else None,
+            "allowed_review_actions": (
+                current.projection.allowed_decisions if current else ()
+            ),
+            "accepted_brief_checkpoint_id": getattr(
+                accepted.get(PLANNING_BRIEF_STAGE_NAME), "id", None
+            ),
+            "accepted_brief_checkpoint_hash": getattr(
+                accepted.get(PLANNING_BRIEF_STAGE_NAME), "content_hash", None
+            ),
+            "accepted_task_plan_checkpoint_id": getattr(
+                accepted.get(STRUCTURED_TASK_PLAN_STAGE_NAME), "id", None
+            ),
+            "accepted_task_plan_checkpoint_hash": getattr(
+                accepted.get(STRUCTURED_TASK_PLAN_STAGE_NAME), "content_hash", None
+            ),
+            "planning_completion_state": completion_state,
+            "completion_blockers": tuple(blockers),
+        }
+
+    def build_stage_context_review_projection(self, session_id: int) -> dict[str, Any]:
+        models, _ = self.list_review_read_models(session_id, limit=100, cursor=0)
+        return {
+            "reviewable_candidates": tuple(
+                {
+                    "review_id": item.projection.review_id,
+                    "stage_name": item.projection.candidate_binding.stage_name,
+                    "candidate_checkpoint_id": item.projection.candidate_binding.candidate_checkpoint_id,
+                    "candidate_content_hash": item.projection.candidate_binding.candidate_content_hash,
+                    "review_required_reasons": item.projection.review_required_reasons,
+                    "state": item.projection.state,
+                }
+                for item in models
+                if item.candidate_content is not None
+                and item.projection.state in {"pending", "stale", "superseded"}
+            ),
+            "review_status": self.build_lifecycle_projection(session_id),
+            "latest_review_decision": next(
+                (
+                    {
+                        "review_id": item.projection.review_id,
+                        "decision": item.projection.terminal_decision,
+                        "event_id": item.projection.terminal_event_id,
+                    }
+                    for item in models
+                    if item.projection.terminal_decision is not None
+                ),
+                None,
+            ),
+        }
+
     def get_review(self, review_id: str) -> ReviewProjection:
         return self._projection(review_id)
 
@@ -1571,5 +1849,6 @@ OperatorReviewService = OperatorReviewPersistenceService
 __all__ = [
     "OperatorReviewPersistenceService",
     "OperatorReviewService",
+    "ReviewReadModel",
     "event_from_model",
 ]

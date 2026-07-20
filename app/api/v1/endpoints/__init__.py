@@ -8,6 +8,7 @@ from .github import router as github_router
 from .isolation import router as isolation_router
 from .planner import router as planner_router
 from .planning import router as planning_router
+from .planning_reviews import router as planning_reviews_router
 from .permissions import router as permissions_router
 from .project_logs import router as project_logs_router
 from .projects import router as projects_router
@@ -26,4 +27,5 @@ __all__ = [
     "tasks_router",
     "planner_router",
     "planning_router",
+    "planning_reviews_router",
 ]
