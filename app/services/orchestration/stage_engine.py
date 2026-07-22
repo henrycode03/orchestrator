@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -37,6 +38,20 @@ from app.services.planning.structured_task_plan import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_checkpoint_timing(
+    checkpoint: PlanningCheckpoint, *, elapsed_seconds: float
+) -> None:
+    logger.info(
+        "[PHASE28RV_TIMING] checkpoint_persistence stage=%s status=%s "
+        "checkpoint_id=%s content_bytes=%s persistence_seconds=%s",
+        checkpoint.stage_name,
+        checkpoint.status,
+        checkpoint.id,
+        len(checkpoint.content or ""),
+        elapsed_seconds,
+    )
 
 
 class StageEngineError(RuntimeError):
@@ -683,6 +698,7 @@ class StageExecutor:
                 session_generation_id=ownership.session_generation_id,
                 fencing_token=ownership.fencing_token,
             )
+            checkpoint_started_at = time.monotonic()
             if definition.identifier == "planning_brief" and isinstance(
                 output, PlanningBrief
             ):
@@ -735,6 +751,10 @@ class StageExecutor:
                         predecessors[name].id for name in sorted(predecessors)
                     ],
                 )
+            _log_checkpoint_timing(
+                checkpoint,
+                elapsed_seconds=round(time.monotonic() - checkpoint_started_at, 3),
+            )
             return StageExecution(
                 definition,
                 attempt_id,
@@ -1014,6 +1034,7 @@ class StageExecutor:
         reason: str,
         context: StageContext | None = None,
     ) -> PlanningCheckpoint:
+        checkpoint_started_at = time.monotonic()
         if definition.identifier == "planning_brief" and isinstance(
             output, PlanningBrief
         ):
@@ -1028,6 +1049,10 @@ class StageExecutor:
                 status="failed",
                 parent_checkpoint_ids=[],
                 failure_reason=str(reason or "stage failed"),
+            )
+            _log_checkpoint_timing(
+                checkpoint,
+                elapsed_seconds=round(time.monotonic() - checkpoint_started_at, 3),
             )
             self._open_review_if_eligible(session_id, checkpoint)
             return checkpoint
@@ -1063,6 +1088,10 @@ class StageExecutor:
                     else None
                 ),
             )
+            _log_checkpoint_timing(
+                checkpoint,
+                elapsed_seconds=round(time.monotonic() - checkpoint_started_at, 3),
+            )
             self._open_review_if_eligible(session_id, checkpoint)
             return checkpoint
         content = self._serialize_output(output) if output is not None else ""
@@ -1078,6 +1107,10 @@ class StageExecutor:
             protocol_version=PROTOCOL_V2,
             status="failed",
             failure_reason=str(reason or "stage failed"),
+        )
+        _log_checkpoint_timing(
+            checkpoint,
+            elapsed_seconds=round(time.monotonic() - checkpoint_started_at, 3),
         )
         self._open_review_if_eligible(session_id, checkpoint)
         return checkpoint

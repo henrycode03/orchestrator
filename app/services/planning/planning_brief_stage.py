@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
+import hashlib
 import json
+import logging
 import re
+import time
 from typing import Any
 
 from app.services.orchestration.stage_engine import (
@@ -44,6 +47,7 @@ from app.services.planning.planning_brief import (
     validate_planning_brief,
 )
 from app.services.planning.provider_contract import (
+    BRIEF_SOURCE_REFERENCE_INSTRUCTIONS,
     PLANNING_BRIEF_CANDIDATE_FIELDS,
     PLANNING_BRIEF_CANDIDATE_RECORD_TYPES,
     build_planning_brief_schema_contract,
@@ -69,6 +73,7 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 360
 DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS = 320
 _CANONICAL_RECORD_REF = re.compile(r"^[A-Z]+-[0-9]{3}$")
 _PROVIDER_RUNTIME_FAILURES = PROVIDER_RUNTIME_FAILURES
+logger = logging.getLogger(__name__)
 
 
 class PlanningBriefStageError(RuntimeError):
@@ -478,9 +483,13 @@ def build_planning_brief_request(
         "deliverables, timeline, brief_type, top-level source_refs, or any other "
         "unsupported legacy fields. Do not emit canonical IDs: every id field, "
         "manifest/checkpoint/hash/schema/lifecycle field is application-owned and "
-        "forbidden in provider output. Use only source_id values present in the "
-        "supplied Input Manifest. Preserve semantic uncertainty rather than inventing "
-        "facts; use unresolved questions and assumptions when appropriate.\n\n"
+        "forbidden in provider output. Preserve semantic uncertainty rather than "
+        "inventing facts; use unresolved questions and assumptions when appropriate.\n"
+        "SOURCE-REFERENCE AUTHORITY (STRICT):\n"
+        + BRIEF_SOURCE_REFERENCE_INSTRUCTIONS
+        + "\nManifest source_refs and semantic record-reference fields are distinct: "
+        "source_refs use only supplied canonical source_id values; applies_to_refs "
+        "and record relationship fields use objective or collection[index] references.\n\n"
         "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
         + schema
         + "\n\nINPUT:\n"
@@ -519,9 +528,14 @@ class PlanningBriefStage(StageDefinition):
         )
 
     def execute(self, context: StageContext) -> PlanningBrief:
+        stage_started_at = time.monotonic()
         try:
+            request_started_at = time.monotonic()
             provider_input = build_planning_brief_provider_input(context)
             request = build_planning_brief_request(provider_input)
+            request_construction_seconds = round(
+                time.monotonic() - request_started_at, 3
+            )
         except PlanningBriefStageError:
             raise
         except Exception as exc:
@@ -552,29 +566,85 @@ class PlanningBriefStage(StageDefinition):
             raise PlanningBriefProviderOutputError(
                 "provider returned no candidate output"
             )
+        parser_seconds = 0.0
+        canonicalization_seconds = 0.0
         try:
+            parser_started_at = time.monotonic()
             candidate = parse_planning_brief_candidate(raw)
-            return canonicalize_planning_brief_candidate(
+            parser_seconds = round(time.monotonic() - parser_started_at, 3)
+            canonicalization_started_at = time.monotonic()
+            output = canonicalize_planning_brief_candidate(
                 candidate, context.input_manifest
             )
-        except PlanningBriefStageError:
+            canonicalization_seconds = round(
+                time.monotonic() - canonicalization_started_at, 3
+            )
+            _log_brief_timing(
+                request=request,
+                provider_input=provider_input,
+                response=response,
+                request_construction_seconds=request_construction_seconds,
+                parser_seconds=parser_seconds,
+                canonicalization_seconds=canonicalization_seconds,
+                total_seconds=round(time.monotonic() - stage_started_at, 3),
+                failure_classification=None,
+            )
+            return output
+        except PlanningBriefStageError as exc:
+            _log_brief_timing(
+                request=request,
+                provider_input=provider_input,
+                response=response,
+                request_construction_seconds=request_construction_seconds,
+                parser_seconds=parser_seconds
+                or round(time.monotonic() - parser_started_at, 3),
+                canonicalization_seconds=canonicalization_seconds,
+                total_seconds=round(time.monotonic() - stage_started_at, 3),
+                failure_classification=exc.classification,
+            )
             raise
         except Exception as exc:
+            _log_brief_timing(
+                request=request,
+                provider_input=provider_input,
+                response=response,
+                request_construction_seconds=request_construction_seconds,
+                parser_seconds=parser_seconds
+                or round(time.monotonic() - parser_started_at, 3),
+                canonicalization_seconds=canonicalization_seconds,
+                total_seconds=round(time.monotonic() - stage_started_at, 3),
+                failure_classification="provider_output_failure",
+            )
             raise PlanningBriefProviderOutputError(
                 "candidate canonicalization failed"
             ) from exc
 
     def validate(self, output: Any, context: StageContext) -> StageValidation:
+        validation_started_at = time.monotonic()
         if not isinstance(output, PlanningBrief):
-            return StageValidation(
+            result = StageValidation(
                 False, "provider_output_failure: output is not a Brief"
             )
+            logger.info(
+                "[PHASE28RV_TIMING] stage=planning_brief validation_seconds=%.3f "
+                "validation_result=invalid_output",
+                time.monotonic() - validation_started_at,
+            )
+            return result
         acceptance = validate_planning_brief(
             output, input_manifest=context.input_manifest
         )
         if not acceptance.semantically_valid:
-            return StageValidation(False, _validation_reason(acceptance))
-        return StageValidation(True)
+            result = StageValidation(False, _validation_reason(acceptance))
+        else:
+            result = StageValidation(True)
+        logger.info(
+            "[PHASE28RV_TIMING] stage=planning_brief validation_seconds=%.3f "
+            "validation_result=%s",
+            time.monotonic() - validation_started_at,
+            "accepted" if result.valid else "rejected",
+        )
+        return result
 
     def accept(self, output: Any, context: StageContext) -> StageAcceptance:
         if not isinstance(output, PlanningBrief):
@@ -595,6 +665,47 @@ def _validation_reason(acceptance: Any) -> str:
     )
     detail = ",".join(issues[:8]) or "protocol acceptance failed"
     return f"validation_failure: {detail}"
+
+
+def _log_brief_timing(
+    *,
+    request: PlanningRequest,
+    provider_input: PlanningBriefProviderInput,
+    response: PlanningResponse,
+    request_construction_seconds: float,
+    parser_seconds: float,
+    canonicalization_seconds: float,
+    total_seconds: float,
+    failure_classification: str | None,
+) -> None:
+    metadata = {
+        "artifact_kind": request.artifact_kind.value,
+        "manifest_id": request.metadata.get("manifest_id"),
+        "manifest_hash": request.metadata.get("manifest_hash"),
+        "project_id": request.project_id,
+    }
+    metadata_hash = hashlib.sha256(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    logger.info(
+        "[PHASE28RV_TIMING] stage=planning_brief provider=%s model=%s "
+        "prompt_length=%s manifest_source_count=%s metadata_hash=%s "
+        "provider_latency_seconds=%s request_construction_seconds=%s "
+        "strict_parser_seconds=%s canonicalization_seconds=%s "
+        "total_stage_seconds=%s failure_classification=%s provider_timings=%s",
+        response.provider_name,
+        response.runtime_metadata.model,
+        len(request.prompt),
+        len(provider_input.sources),
+        metadata_hash,
+        response.latency_seconds,
+        request_construction_seconds,
+        parser_seconds,
+        canonicalization_seconds,
+        total_seconds,
+        failure_classification or "none",
+        response.diagnostics.details.get("timings_seconds", {}),
+    )
 
 
 def build_protocol_v2_stage_definitions(

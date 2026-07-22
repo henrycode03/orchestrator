@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from app.celery_app import celery_app
 from app.database import get_db_session
@@ -18,10 +19,13 @@ def advance_planning_session(
     generation_id: str | None = None,
     owner_token: str | None = None,
 ) -> dict[str, object]:
+    started_at = time.monotonic()
     db = get_db_session()
     retrying = False
+    task_status = "unknown"
     try:
         if not generation_id or not owner_token:
+            task_status = "stale_owner"
             return {
                 "status": "stale_owner",
                 "session_id": session_id,
@@ -36,15 +40,19 @@ def advance_planning_session(
             processing_task_id=getattr(self.request, "id", None),
         )
         if isinstance(session, dict):
+            task_status = str(session.get("status") or "unknown")
             return session
         if not session:
+            task_status = "skipped"
             return {"status": "skipped", "session_id": session_id}
+        task_status = str(session.status or "unknown")
         return {
             "status": session.status,
             "session_id": session.id,
             "project_id": session.project_id,
         }
     except Exception as exc:
+        task_status = "exception"
         logger.exception("Planning background task failed for session %s", session_id)
         retrying = True
         raise self.retry(
@@ -59,4 +67,11 @@ def advance_planning_session(
                 owner_token,
                 getattr(self.request, "id", None),
             )
+        logger.info(
+            "[PHASE28RV_TIMING] celery_task=advance_planning_session session_id=%s "
+            "status=%s total_celery_task_seconds=%.3f",
+            session_id,
+            task_status,
+            time.monotonic() - started_at,
+        )
         db.close()

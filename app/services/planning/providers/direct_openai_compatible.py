@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
 import json
+import logging
 import math
 import threading
 import time
@@ -32,6 +34,7 @@ DIRECT_PROVIDER_VERSION = "28r-1"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 HEALTH_TIMEOUT_SECONDS = 5.0
+logger = logging.getLogger(__name__)
 
 
 class DirectProviderConfigurationError(ValueError):
@@ -70,6 +73,7 @@ class _RawProviderResponse:
     status_code: int
     content_type: str
     body: bytes
+    timings_seconds: Mapping[str, float]
 
 
 class DirectOpenAICompatiblePlanningProvider:
@@ -258,6 +262,7 @@ class DirectOpenAICompatiblePlanningProvider:
 
     def generate(self, request: PlanningRequest) -> PlanningResponse:
         started_at = time.monotonic()
+        timings: dict[str, float] = {}
         configuration = self._configuration
         effective_timeout = min(
             configuration.timeout_seconds,
@@ -272,10 +277,14 @@ class DirectOpenAICompatiblePlanningProvider:
         }
         try:
             self._ensure_not_cancelled(request, deadline)
+            request_started_at = time.monotonic()
             body = self.build_request_body(request)
             encoded_body = json.dumps(
                 body, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8")
+            timings["request_construction_seconds"] = round(
+                time.monotonic() - request_started_at, 3
+            )
             if len(encoded_body) > MAX_REQUEST_BYTES:
                 raise _DirectProviderFailure(
                     "provider_configuration_failure",
@@ -288,9 +297,12 @@ class DirectOpenAICompatiblePlanningProvider:
                 encoded_body,
                 request,
                 deadline,
+                timings,
             )
             self._ensure_not_cancelled(request, deadline)
-            candidate, response_metadata, token_usage = _parse_response(raw_response)
+            candidate, response_metadata, token_usage = _parse_response(
+                raw_response, timings
+            )
             self._ensure_not_cancelled(request, deadline)
             candidate_length_bytes = len(candidate.encode("utf-8"))
             latency = round(time.monotonic() - started_at, 3)
@@ -302,8 +314,22 @@ class DirectOpenAICompatiblePlanningProvider:
                 "response_length_bytes": len(raw_response.body),
                 "candidate_length_bytes": candidate_length_bytes,
                 "latency_seconds": latency,
+                "timings_seconds": dict(timings),
                 **response_metadata,
             }
+            logger.info(
+                "[PHASE28RV_TIMING] provider=%s model=%s artifact=%s "
+                "prompt_length=%s manifest_source_count=%s metadata_hash=%s "
+                "candidate_bytes=%s timings=%s",
+                self.name,
+                configuration.model,
+                request.artifact_kind.value,
+                len(request.prompt),
+                _manifest_source_count(request),
+                _request_metadata_hash(request),
+                candidate_length_bytes,
+                dict(timings),
+            )
             return PlanningResponse(
                 candidate_text=candidate,
                 provider_name=self.name,
@@ -328,6 +354,7 @@ class DirectOpenAICompatiblePlanningProvider:
                         "response_length_bytes": len(raw_response.body),
                         "candidate_length_bytes": candidate_length_bytes,
                         "response_mode": response_metadata["response_mode"],
+                        "timings_seconds": dict(timings),
                     },
                 ),
             )
@@ -345,6 +372,7 @@ class DirectOpenAICompatiblePlanningProvider:
             details = {
                 **base_details,
                 **exc.details,
+                "timings_seconds": dict(timings),
                 "failure_stage": exc.stage,
                 "latency_seconds": round(time.monotonic() - started_at, 3),
                 "exception_type": type(exc).__name__,
@@ -366,6 +394,7 @@ class DirectOpenAICompatiblePlanningProvider:
                 origin=ProviderFailureOrigin.INVOCATION,
                 details={
                     **base_details,
+                    "timings_seconds": dict(timings),
                     "failure_stage": "transport",
                     "latency_seconds": round(time.monotonic() - started_at, 3),
                     "exception_type": type(exc).__name__,
@@ -384,6 +413,7 @@ class DirectOpenAICompatiblePlanningProvider:
                 origin=ProviderFailureOrigin.INVOCATION,
                 details={
                     **base_details,
+                    "timings_seconds": dict(timings),
                     "failure_stage": "transport",
                     "latency_seconds": round(time.monotonic() - started_at, 3),
                     "exception_type": type(exc).__name__,
@@ -397,6 +427,7 @@ class DirectOpenAICompatiblePlanningProvider:
                 origin=ProviderFailureOrigin.INVOCATION,
                 details={
                     **base_details,
+                    "timings_seconds": dict(timings),
                     "failure_stage": "unexpected",
                     "latency_seconds": round(time.monotonic() - started_at, 3),
                     "exception_type": type(exc).__name__,
@@ -411,6 +442,7 @@ class DirectOpenAICompatiblePlanningProvider:
         encoded_body: bytes,
         request: PlanningRequest,
         deadline: float,
+        timings: dict[str, float],
     ) -> _RawProviderResponse:
         self._ensure_not_cancelled(request, deadline)
         remaining = _remaining(deadline)
@@ -425,15 +457,19 @@ class DirectOpenAICompatiblePlanningProvider:
         with self._active_client_lock:
             self._active_client = client
         try:
+            request_started_at = time.monotonic()
             with client.stream(
                 "POST",
                 self._configuration.endpoint,
                 headers=_headers(self._configuration.api_key),
                 content=encoded_body,
             ) as response:
+                request_elapsed = round(time.monotonic() - request_started_at, 3)
+                timings["connection_established_seconds"] = request_elapsed
+                timings["gateway_request_accepted_seconds"] = request_elapsed
                 status_code = int(response.status_code)
                 content_type = str(response.headers.get("content-type", "")).strip()
-                body = _read_bounded_response(response, deadline, request)
+                body = _read_bounded_response(response, deadline, request, timings)
                 if not 200 <= status_code < 300:
                     raise _DirectProviderFailure(
                         "provider_http_failure",
@@ -446,7 +482,12 @@ class DirectOpenAICompatiblePlanningProvider:
                             "retryable": status_code >= 500,
                         },
                     )
-                return _RawProviderResponse(status_code, content_type, body)
+                return _RawProviderResponse(
+                    status_code,
+                    content_type,
+                    body,
+                    dict(timings),
+                )
         finally:
             with self._active_client_lock:
                 if self._active_client is client:
@@ -552,6 +593,32 @@ def _headers(api_key: str) -> dict[str, str]:
     return headers
 
 
+def _manifest_source_count(request: PlanningRequest) -> int | None:
+    protocol_input = request.protocol_input
+    sources = (
+        protocol_input.get("sources") if isinstance(protocol_input, Mapping) else None
+    )
+    return len(sources) if isinstance(sources, (list, tuple)) else None
+
+
+def _request_metadata_hash(request: PlanningRequest) -> str:
+    bounded = {
+        "artifact_kind": request.artifact_kind.value,
+        "project_id": request.project_id,
+    }
+    for key in (
+        "manifest_id",
+        "manifest_hash",
+        "brief_checkpoint_id",
+        "brief_hash",
+    ):
+        if key in request.metadata:
+            bounded[key] = request.metadata[key]
+    return hashlib.sha256(
+        json.dumps(bounded, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def _remaining(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -565,10 +632,15 @@ def _remaining(deadline: float) -> float:
 
 
 def _read_bounded_response(
-    response: Any, deadline: float, request: PlanningRequest
+    response: Any,
+    deadline: float,
+    request: PlanningRequest,
+    timings: dict[str, float],
 ) -> bytes:
     chunks: list[bytes] = []
     total = 0
+    started_at = time.monotonic()
+    first_byte_at: float | None = None
     try:
         for chunk in response.iter_bytes():
             if not isinstance(chunk, bytes):
@@ -579,6 +651,11 @@ def _read_bounded_response(
                 )
             if not chunk:
                 continue
+            if first_byte_at is None:
+                first_byte_at = time.monotonic()
+                timings["first_response_byte_seconds"] = round(
+                    first_byte_at - started_at, 3
+                )
             _remaining(deadline)
             event = request.metadata.get("cancel_event")
             if callable(getattr(event, "is_set", None)) and event.is_set():
@@ -606,15 +683,18 @@ def _read_bounded_response(
             stage="response_stream",
             details={"response_length_bytes": total},
         ) from exc
+    timings["last_response_byte_seconds"] = round(time.monotonic() - started_at, 3)
     return b"".join(chunks)
 
 
 def _parse_response(
     response: _RawProviderResponse,
+    timings: dict[str, float],
 ) -> tuple[str, dict[str, Any], ProviderTokenUsage | None]:
+    started_at = time.monotonic()
     content_type = response.content_type.lower()
     if "text/event-stream" in content_type:
-        return _parse_sse(response.body)
+        return _parse_sse(response.body, timings, started_at)
     if "json" not in content_type:
         raise _DirectProviderFailure(
             "provider_output_failure",
@@ -630,11 +710,13 @@ def _parse_response(
             "provider response envelope is not valid JSON",
             stage="response_validation",
         ) from exc
-    return _parse_json_envelope(body)
+    return _parse_json_envelope(body, timings, started_at)
 
 
 def _parse_json_envelope(
     body: Any,
+    timings: dict[str, float],
+    started_at: float,
 ) -> tuple[str, dict[str, Any], ProviderTokenUsage | None]:
     if not isinstance(body, Mapping):
         raise _DirectProviderFailure(
@@ -660,6 +742,10 @@ def _parse_json_envelope(
             "provider response does not contain one final assistant message",
             stage="response_validation",
         )
+    timings["response_envelope_validation_seconds"] = round(
+        time.monotonic() - started_at, 3
+    )
+    extraction_started_at = time.monotonic()
     content = message.get("content")
     reasoning = message.get("reasoning_content") or message.get("reasoning")
     if not isinstance(content, str) or not content.strip():
@@ -677,6 +763,9 @@ def _parse_json_envelope(
             "provider response ended at the output limit",
             stage="response_validation",
         )
+    timings["semantic_candidate_extraction_seconds"] = round(
+        time.monotonic() - extraction_started_at, 3
+    )
     return (
         content,
         {
@@ -692,6 +781,8 @@ def _parse_json_envelope(
 
 def _parse_sse(
     body: bytes,
+    timings: dict[str, float],
+    started_at: float,
 ) -> tuple[str, dict[str, Any], ProviderTokenUsage | None]:
     try:
         text = body.decode("utf-8")
@@ -798,6 +889,10 @@ def _parse_sse(
             "provider response stream ended before a final candidate",
             stage="response_stream",
         )
+    timings["response_envelope_validation_seconds"] = round(
+        time.monotonic() - started_at, 3
+    )
+    extraction_started_at = time.monotonic()
     candidate = "".join(content_parts)
     if not candidate.strip():
         detail = (
@@ -808,6 +903,9 @@ def _parse_sse(
         raise _DirectProviderFailure(
             "provider_output_failure", detail, stage="response_validation"
         )
+    timings["semantic_candidate_extraction_seconds"] = round(
+        time.monotonic() - extraction_started_at, 3
+    )
     return (
         candidate,
         {

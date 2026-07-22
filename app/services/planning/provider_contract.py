@@ -154,14 +154,34 @@ _TASK_PLAN_ENUMS: Mapping[tuple[str, str], Sequence[str]] = {
     ("IntentionalOmission", "reason_code"): OMISSION_REASON_CODES,
 }
 
-_SOURCE_REFERENCE_FIELDS = frozenset(
-    {
-        "source_refs",
-        "source_requirement_ids",
-        "requirement_ids",
-        "constraint_ids",
-        "acceptance_criterion_ids",
-    }
+_MANIFEST_SOURCE_REFERENCE_SEMANTICS = (
+    "every value must exactly equal a canonical source_id supplied in the "
+    "bounded Input Manifest"
+)
+_SEMANTIC_RECORD_REFERENCE_SEMANTICS = (
+    "semantic record reference using objective or collection[index]; "
+    "the application assigns canonical IDs"
+)
+_REFERENCE_FIELD_SEMANTICS = {
+    "source_refs": _MANIFEST_SOURCE_REFERENCE_SEMANTICS,
+    "applies_to_refs": _SEMANTIC_RECORD_REFERENCE_SEMANTICS,
+    "source_requirement_ids": _SEMANTIC_RECORD_REFERENCE_SEMANTICS,
+    "requirement_ids": _SEMANTIC_RECORD_REFERENCE_SEMANTICS,
+    "constraint_ids": _SEMANTIC_RECORD_REFERENCE_SEMANTICS,
+    "acceptance_criterion_ids": _SEMANTIC_RECORD_REFERENCE_SEMANTICS,
+    "temporary_assumption_id": _SEMANTIC_RECORD_REFERENCE_SEMANTICS,
+}
+
+BRIEF_SOURCE_REFERENCE_INSTRUCTIONS = (
+    "Every source reference must exactly equal an identifier supplied by the "
+    "application in the bounded Input Manifest. Do not create, abbreviate, "
+    "rename, normalize, infer, or alias source identifiers. Do not use filenames, "
+    "titles, ordinal labels, human descriptions, URLs, or array positions unless "
+    "those exact values are the supplied canonical identifiers. When no supplied "
+    "source supports a semantic statement, preserve uncertainty, mark the "
+    "applicable field accordingly, or omit the unsupported assertion as allowed by "
+    "the schema. Never invent a source reference to satisfy a required-looking "
+    "structure."
 )
 
 
@@ -221,10 +241,9 @@ def _record_contract(
         allowed = enums.get((record_type.__name__, item.name))
         if allowed:
             descriptor["allowed_values"] = sorted(str(value) for value in allowed)
-        if item.name in _SOURCE_REFERENCE_FIELDS:
-            descriptor["reference_semantics"] = (
-                "references supplied Input Manifest or accepted Brief records; never invent references"
-            )
+        reference_semantics = _REFERENCE_FIELD_SEMANTICS.get(item.name)
+        if reference_semantics is not None:
+            descriptor["reference_semantics"] = reference_semantics
         if descriptor.get("nullable"):
             optional.append(item.name)
         else:
@@ -275,6 +294,8 @@ def build_planning_brief_schema_contract() -> dict[str, Any]:
         },
         "source_reference_requirements": {
             "source_refs": "array[string]; every value must be a source_id present in the supplied Input Manifest",
+            "manifest_authority": BRIEF_SOURCE_REFERENCE_INSTRUCTIONS,
+            "semantic_record_refs": "applies_to_refs, source_requirement_ids, requirement_ids, constraint_ids, acceptance_criterion_ids, and temporary_assumption_id use objective or collection[index] references only; they are not manifest source identifiers",
             "record_references": "Use objective or collection[index] only; the application resolves and assigns canonical IDs",
         },
         "application_owned_fields": [
@@ -334,6 +355,7 @@ def build_structured_task_plan_schema_contract() -> dict[str, Any]:
             "dependency_task_refs": "prerequisite_task_id and dependent_task_id must use tasks[index] or #index, never TASK-NNN",
             "execution_group_task_refs": "task_ids must use tasks[index] or #index; the application resolves them",
             "omissions": "target_id must be an accepted Brief requirement or acceptance criterion and the reason must be explicit",
+            "manifest_sources": "Structured Task Plan candidates have no source_refs field; traceability and omission targets use accepted Brief IDs, never manifest source identifiers",
         },
         "application_owned_fields": [
             "all Task, Dependency, and ExecutionGroup id fields",

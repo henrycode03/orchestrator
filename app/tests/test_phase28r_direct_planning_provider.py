@@ -214,6 +214,15 @@ def test_valid_stream_response_returns_only_assistant_content(monkeypatch):
     assert response.diagnostics.category == "provider_success"
     assert response.diagnostics.details["response_mode"] == "streaming_sse"
     assert response.diagnostics.details["candidate_length_bytes"] == len(b'{"ok":true}')
+    assert set(response.diagnostics.details["timings_seconds"]) >= {
+        "request_construction_seconds",
+        "connection_established_seconds",
+        "gateway_request_accepted_seconds",
+        "first_response_byte_seconds",
+        "last_response_byte_seconds",
+        "response_envelope_validation_seconds",
+        "semantic_candidate_extraction_seconds",
+    }
     assert response.runtime_metadata.details["http_status"] == 200
     assert _Client.calls[0]["url"] == "http://gateway:8000/v1/chat/completions"
 
