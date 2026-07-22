@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -45,6 +45,7 @@ _ERROR_STATUS = {
     "completion_manifest_missing": _HTTP_422,
     "completion_manifest_inconsistent": _HTTP_422,
     "commit_manifest_conflict": status.HTTP_409_CONFLICT,
+    "idempotency_key_conflict": status.HTTP_409_CONFLICT,
     "integrity_failure": status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
 
@@ -148,7 +149,8 @@ def _response(result: ExecutionCommitResult) -> ExecutionCommitResponse:
         dependency_edge_count=result.dependency_edge_count,
         group_count=result.group_count,
         group_membership_count=result.group_membership_count,
-        execution_failure_reason=result.execution_failure_reason,
+        retryable=result.retryable,
+        execution_error_code=result.execution_error_code,
     )
 
 
@@ -161,6 +163,7 @@ def commit_execution(
     session_id: int,
     payload: ExecutionCommitRequestPayload,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -171,6 +174,7 @@ def commit_execution(
             session.id,
             ExecutionCommitRequest(
                 idempotency_key=payload.idempotency_key,
+                operator_subject=current_user.email,
                 structured_task_plan_checkpoint_id=payload.structured_task_plan_checkpoint_id,
                 structured_task_plan_hash=payload.structured_task_plan_hash,
                 expected_session_generation_id=payload.expected_session_generation_id,
@@ -196,6 +200,8 @@ def commit_execution(
         result="replayed" if result.idempotent_replay else "success",
         execution_plan_id=result.execution_plan_id,
     )
+    if result.boundary_state == "released_execution_pending":
+        response.status_code = status.HTTP_202_ACCEPTED
     return _response(result)
 
 

@@ -46,7 +46,8 @@ class ExecutionCommitResponse(ExecutionCommitSchema):
     dependency_edge_count: int
     group_count: int
     group_membership_count: int
-    execution_failure_reason: str | None = None
+    retryable: bool = False
+    execution_error_code: str | None = None
 
 
 __all__ = [

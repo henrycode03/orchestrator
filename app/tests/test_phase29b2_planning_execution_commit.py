@@ -123,9 +123,16 @@ def _build_approved_session(db_session, *, idempotency_key="approve-1"):
     return project, session, plan, review.review_id, result, promotion_checkpoint
 
 
-def _request_for(promotion_checkpoint, session, *, idempotency_key="exec-commit-1"):
+def _request_for(
+    promotion_checkpoint,
+    session,
+    *,
+    idempotency_key="exec-commit-1",
+    operator_subject="operator@example.test",
+):
     return ExecutionCommitRequest(
         idempotency_key=idempotency_key,
+        operator_subject=operator_subject,
         structured_task_plan_checkpoint_id=promotion_checkpoint.id,
         structured_task_plan_hash=promotion_checkpoint.content_hash,
         expected_session_generation_id=session.generation_id,
@@ -228,6 +235,7 @@ def test_pending_review_is_rejected(db_session):
     )
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-pending",
         structured_task_plan_checkpoint_id=candidate.id,
         structured_task_plan_hash=candidate.content_hash,
@@ -253,6 +261,7 @@ def test_rejected_review_is_rejected(db_session):
 
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-rejected",
         structured_task_plan_checkpoint_id=candidate.id,
         structured_task_plan_hash=candidate.content_hash,
@@ -278,6 +287,7 @@ def test_cancelled_review_is_rejected(db_session):
 
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-cancelled",
         structured_task_plan_checkpoint_id=candidate.id,
         structured_task_plan_hash=candidate.content_hash,
@@ -339,6 +349,7 @@ def test_unreviewed_directly_accepted_task_plan_is_rejected(db_session):
 
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-unreviewed",
         structured_task_plan_checkpoint_id=checkpoint.id,
         structured_task_plan_hash=checkpoint.content_hash,
@@ -355,6 +366,7 @@ def test_wrong_checkpoint_id_is_rejected(db_session):
     )
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-wrong-id",
         structured_task_plan_checkpoint_id=promotion_checkpoint.id + 999,
         structured_task_plan_hash=promotion_checkpoint.content_hash,
@@ -371,6 +383,7 @@ def test_wrong_task_plan_hash_is_rejected(db_session):
     )
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-wrong-hash",
         structured_task_plan_checkpoint_id=promotion_checkpoint.id,
         structured_task_plan_hash="0" * 64,
@@ -387,6 +400,7 @@ def test_wrong_session_generation_is_rejected(db_session):
     )
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-wrong-generation",
         structured_task_plan_checkpoint_id=promotion_checkpoint.id,
         structured_task_plan_hash=promotion_checkpoint.content_hash,
@@ -403,6 +417,7 @@ def test_wrong_expected_review_id_is_rejected(db_session):
     )
     service = PlanningExecutionCommitService(db_session)
     request = ExecutionCommitRequest(
+        operator_subject="operator@example.test",
         idempotency_key="exec-commit-wrong-review",
         structured_task_plan_checkpoint_id=promotion_checkpoint.id,
         structured_task_plan_hash=promotion_checkpoint.content_hash,
@@ -558,6 +573,11 @@ def test_different_authority_with_existing_commit_manifest_conflicts(db_session)
     manifest.task_provenance = tampered
     db_session.commit()
 
+    # A fresh idempotency key forces full authority re-resolution instead of
+    # a cached command replay, so the tampered manifest is detected.
     with pytest.raises(ExecutionCommitError) as exc_info:
-        service.commit(session.id, _request_for(promotion_checkpoint, session))
+        service.commit(
+            session.id,
+            _request_for(promotion_checkpoint, session, idempotency_key="fresh-key"),
+        )
     assert exc_info.value.code == "commit_manifest_conflict"

@@ -870,6 +870,48 @@ class ExecutionGroupMember(Base):
     execution_task = relationship("ExecutionTask")
 
 
+class ExecutionCommitCommand(Base):
+    """Phase 29B-3 command-replay binding for the public execution-commit
+    endpoint.  This is control state only -- it never becomes a second
+    authority source.  ``PlanningCommitManifest`` and ``ExecutionPlan``
+    remain the sole authority records; this row only lets a caller replay
+    or resume a specific idempotency-keyed release command."""
+
+    __tablename__ = "execution_commit_commands"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    operator_subject = Column(String(255), nullable=False, index=True)
+    idempotency_key = Column(String(128), nullable=False)
+    canonical_request_hash = Column(String(64), nullable=False)
+    planning_commit_manifest_id = Column(
+        Integer, ForeignKey("planning_commit_manifests.id"), nullable=True, index=True
+    )
+    execution_plan_id = Column(
+        Integer, ForeignKey("execution_plans.id"), nullable=True, index=True
+    )
+    boundary_state = Column(String(40), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "operator_subject",
+            "idempotency_key",
+            name="uq_execution_commit_command_idempotency",
+        ),
+    )
+
+    planning_session = relationship("PlanningSession")
+    planning_commit_manifest = relationship("PlanningCommitManifest")
+    execution_plan = relationship("ExecutionPlan")
+
+
 class SessionState(Base):
     """Session state persistence model"""
 

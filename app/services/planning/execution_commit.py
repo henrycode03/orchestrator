@@ -19,6 +19,7 @@ for the full design record.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from typing import Mapping
 from sqlalchemy.orm import Session
 
 from app.models import (
+    ExecutionCommitCommand,
     ExecutionDependencyEdge,
     ExecutionGroup,
     ExecutionGroupMember,
@@ -58,6 +60,13 @@ from app.services.planning.structured_task_plan import (
 )
 
 PROVENANCE_SCHEMA = "planning_execution_commit.v1"
+COMMAND_SCHEMA = "planning_execution_commit_command.v1"
+
+# Bounded public code for a failed Transaction B (Execution materialization).
+# Never the raw ``ExecutionPlanCommitError`` text.
+EXECUTION_MATERIALIZATION_FAILED = "execution_materialization_failed"
+
+logger = logging.getLogger(__name__)
 
 # Public bounded error codes.  The API layer maps these to HTTP statuses.
 ERROR_CODES = frozenset(
@@ -72,6 +81,7 @@ ERROR_CODES = frozenset(
         "completion_manifest_missing",
         "completion_manifest_inconsistent",
         "commit_manifest_conflict",
+        "idempotency_key_conflict",
         "integrity_failure",
     }
 )
@@ -98,6 +108,7 @@ class ExecutionCommitRequest:
     """
 
     idempotency_key: str
+    operator_subject: str
     structured_task_plan_checkpoint_id: int
     structured_task_plan_hash: str
     expected_session_generation_id: str
@@ -127,6 +138,10 @@ class ExecutionCommitResult:
     dependency_edge_count: int = 0
     group_count: int = 0
     group_membership_count: int = 0
+    retryable: bool = False
+    execution_error_code: str | None = None
+    # Internal-only diagnostic detail.  Never serialized in the public API
+    # response -- log it server-side instead.
     execution_failure_reason: str | None = None
 
 
@@ -395,6 +410,132 @@ class PlanningExecutionCommitService:
             "operator_subject": operator_subject,
         }
 
+    # -- idempotency command binding -------------------------------------
+
+    @staticmethod
+    def _canonical_request_hash(
+        session_id: int, request: ExecutionCommitRequest
+    ) -> str:
+        return canonical_json_hash(
+            {
+                "schema": COMMAND_SCHEMA,
+                "planning_session_id": session_id,
+                "structured_task_plan_checkpoint_id": (
+                    request.structured_task_plan_checkpoint_id
+                ),
+                "structured_task_plan_hash": request.structured_task_plan_hash,
+                "expected_session_generation_id": (
+                    request.expected_session_generation_id
+                ),
+                "expected_review_id": request.expected_review_id,
+                "expected_approval_event_id": request.expected_approval_event_id,
+            }
+        )
+
+    def _find_command(
+        self, request: ExecutionCommitRequest
+    ) -> ExecutionCommitCommand | None:
+        return (
+            self.db.query(ExecutionCommitCommand)
+            .filter(
+                ExecutionCommitCommand.operator_subject == request.operator_subject,
+                ExecutionCommitCommand.idempotency_key == request.idempotency_key,
+            )
+            .one_or_none()
+        )
+
+    def _replay_from_command(
+        self, command: ExecutionCommitCommand
+    ) -> ExecutionCommitResult:
+        manifest = self.db.get(
+            PlanningCommitManifest, command.planning_commit_manifest_id
+        )
+        if manifest is None:
+            raise ExecutionCommitError(
+                "integrity_failure",
+                "the commit manifest bound to this idempotency key could "
+                "not be resolved",
+            )
+        execution_plan = None
+        if command.execution_plan_id is not None:
+            execution_plan = self.db.get(ExecutionPlan, command.execution_plan_id)
+        if execution_plan is None:
+            raise ExecutionCommitError(
+                "integrity_failure",
+                "the Execution Plan bound to this idempotency key could "
+                "not be resolved",
+            )
+        provenance = manifest.task_provenance
+        task_count = (
+            self.db.query(ExecutionTask)
+            .filter(ExecutionTask.execution_plan_id == execution_plan.id)
+            .count()
+        )
+        edge_count = (
+            self.db.query(ExecutionDependencyEdge)
+            .filter(ExecutionDependencyEdge.execution_plan_id == execution_plan.id)
+            .count()
+        )
+        group_count = (
+            self.db.query(ExecutionGroup)
+            .filter(ExecutionGroup.execution_plan_id == execution_plan.id)
+            .count()
+        )
+        membership_count = (
+            self.db.query(ExecutionGroupMember)
+            .join(ExecutionGroup)
+            .filter(ExecutionGroup.execution_plan_id == execution_plan.id)
+            .count()
+        )
+        return ExecutionCommitResult(
+            planning_session_id=manifest.planning_session_id,
+            session_generation_id=manifest.session_generation_id,
+            structured_task_plan_checkpoint_id=provenance.get(
+                "structured_task_plan_checkpoint_id"
+            ),
+            structured_task_plan_hash=provenance.get("structured_task_plan_hash"),
+            review_id=provenance.get("review_id"),
+            approval_event_id=provenance.get("approval_event_id"),
+            completion_manifest_id=manifest.completion_manifest_id,
+            completion_manifest_hash=provenance.get("completion_manifest_hash"),
+            planning_commit_manifest_id=manifest.id,
+            commit_identity=manifest.commit_identity,
+            boundary_state="released",
+            idempotent_replay=True,
+            integrity_status="valid",
+            execution_plan_id=execution_plan.id,
+            execution_plan_generation=execution_plan.generation,
+            execution_plan_status=execution_plan.status,
+            task_count=task_count,
+            dependency_edge_count=edge_count,
+            group_count=group_count,
+            group_membership_count=membership_count,
+        )
+
+    def _upsert_command(
+        self,
+        existing_command: ExecutionCommitCommand | None,
+        *,
+        session_id: int,
+        request: ExecutionCommitRequest,
+        canonical_request_hash: str,
+        planning_commit_manifest_id: int,
+    ) -> None:
+        if existing_command is None:
+            self.db.add(
+                ExecutionCommitCommand(
+                    planning_session_id=session_id,
+                    operator_subject=request.operator_subject,
+                    idempotency_key=request.idempotency_key,
+                    canonical_request_hash=canonical_request_hash,
+                    planning_commit_manifest_id=planning_commit_manifest_id,
+                    boundary_state="released_execution_pending",
+                )
+            )
+        else:
+            existing_command.planning_commit_manifest_id = planning_commit_manifest_id
+            existing_command.boundary_state = "released_execution_pending"
+
     # -- commit ----------------------------------------------------------
 
     def commit(
@@ -402,6 +543,25 @@ class PlanningExecutionCommitService:
         session_id: int,
         request: ExecutionCommitRequest,
     ) -> ExecutionCommitResult:
+        canonical_request_hash = self._canonical_request_hash(session_id, request)
+        existing_command = self._find_command(request)
+        if existing_command is not None:
+            if (
+                existing_command.canonical_request_hash != canonical_request_hash
+                or existing_command.planning_session_id != session_id
+            ):
+                raise ExecutionCommitError(
+                    "idempotency_key_conflict",
+                    "idempotency key is already bound to a different "
+                    "execution commit request",
+                )
+            if existing_command.boundary_state == "released":
+                return self._replay_from_command(existing_command)
+            # boundary_state == "released_execution_pending": the bound
+            # Planning authority was already released in Transaction A but
+            # Execution materialization (Transaction B) previously failed.
+            # Fall through and retry against the same authority.
+
         session, _project = self._resolve_session_and_project(session_id)
         checkpoint = self._resolve_approved_task_plan(session, request)
         review_id, event_id, approval_operator_subject = self._resolve_approval_event(
@@ -414,6 +574,12 @@ class PlanningExecutionCommitService:
                 "accepted Structured Task Plan could not be re-derived",
             )
 
+        # Only manifests that claim to release *this exact* accepted
+        # checkpoint are compared for conflict.  A manifest bound to a
+        # different accepted promotion checkpoint (e.g. a future Planning
+        # amendment/regeneration cycle) is a separate historical release,
+        # not a competing claim over the same release identity, and must
+        # not be rejected here.
         prior_manifests = (
             self.db.query(PlanningCommitManifest)
             .filter(PlanningCommitManifest.planning_session_id == session.id)
@@ -421,76 +587,128 @@ class PlanningExecutionCommitService:
         )
         for prior in prior_manifests:
             provenance = prior.task_provenance
-            prior_hash = (
-                provenance.get("structured_task_plan_hash")
-                if isinstance(provenance, Mapping)
-                else None
-            )
+            if not isinstance(provenance, Mapping):
+                continue
+            prior_checkpoint_id = provenance.get("structured_task_plan_checkpoint_id")
+            if prior_checkpoint_id != checkpoint.id:
+                continue
+            prior_hash = provenance.get("structured_task_plan_hash")
             if prior_hash != checkpoint.content_hash:
                 raise ExecutionCommitError(
                     "commit_manifest_conflict",
                     "a different Planning commit manifest already releases "
-                    "a competing task-plan authority for this session",
+                    "a competing authority for this Structured Task Plan "
+                    "checkpoint",
                 )
 
-        # All ``_assert_owner``-gated persistence calls below (completion
-        # reevaluation, commit-manifest record) share one short-lived lease.
-        # On any failure this whole attempt is rolled back uncommitted, so
-        # the lease never needs to be explicitly released on the error path.
-        locked = self._acquire_lease(session)
-        try:
-            existing_completion = (
-                self.db.query(PlanningCompletionManifest)
-                .filter(PlanningCompletionManifest.planning_session_id == session.id)
+        # A pure identity replay never needs a processing lease: nothing new
+        # is written to Planning state when the exact release identity
+        # (session, checkpoint, completion manifest, review, approval) has
+        # already produced a commit manifest.  This is checked with a plain
+        # read before touching ``processing_token`` so a concurrent owner of
+        # an unrelated Planning operation never blocks an already-released
+        # authority from being replayed.
+        existing_completion = (
+            self.db.query(PlanningCompletionManifest)
+            .filter(PlanningCompletionManifest.planning_session_id == session.id)
+            .one_or_none()
+        )
+        planning_commit_manifest = None
+        completion_manifest = existing_completion
+        if existing_completion is not None:
+            self._verify_completion_manifest(session, checkpoint, existing_completion)
+            prospective_identity = self._commit_identity(
+                session, checkpoint, existing_completion, review_id, event_id
+            )
+            planning_commit_manifest = (
+                self.db.query(PlanningCommitManifest)
+                .filter(PlanningCommitManifest.commit_identity == prospective_identity)
                 .one_or_none()
             )
-            if existing_completion is not None:
-                completion_manifest = existing_completion
-            else:
-                completion = self._evaluate_completion(locked)
-                if not completion.complete or completion.manifest is None:
-                    raise ExecutionCommitError(
-                        "completion_manifest_missing", completion.reason
-                    )
-                completion_manifest = completion.manifest
-            self._verify_completion_manifest(session, checkpoint, completion_manifest)
 
-            provenance = self._build_provenance(
-                session,
-                checkpoint,
-                task_plan,
-                completion_manifest,
-                review_id,
-                event_id,
-                approval_operator_subject,
-            )
-            commit_identity = self._commit_identity(
-                session, checkpoint, completion_manifest, review_id, event_id
+        if planning_commit_manifest is not None:
+            replayed_a = True
+            self._upsert_command(
+                existing_command,
+                session_id=session.id,
+                request=request,
+                canonical_request_hash=canonical_request_hash,
+                planning_commit_manifest_id=planning_commit_manifest.id,
             )
             try:
-                planning_commit_manifest = self.protocol.record_commit_manifest(
-                    session.id,
-                    task_provenance=provenance,
-                    commit_identity=commit_identity,
-                    completion_manifest_id=completion_manifest.id,
-                    fencing_token=locked.processing_token,
-                    session_generation_id=session.generation_id,
-                    protocol_version=PROTOCOL_V2,
-                )
-            except ProtocolPersistenceError as exc:
-                raise ExecutionCommitError(
-                    "commit_manifest_conflict", str(exc)
-                ) from exc
-        except Exception:
-            self.db.rollback()
-            raise
-        self._release_lease(locked)
-        self.db.commit()
-        self.db.refresh(planning_commit_manifest)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        else:
+            # All ``_assert_owner``-gated persistence calls below (completion
+            # reevaluation, commit-manifest record) share one short-lived
+            # lease.  On any failure this whole attempt is rolled back
+            # uncommitted, so the lease never needs to be explicitly
+            # released on the error path.
+            locked = self._acquire_lease(session)
+            try:
+                if completion_manifest is None:
+                    completion = self._evaluate_completion(locked)
+                    if not completion.complete or completion.manifest is None:
+                        raise ExecutionCommitError(
+                            "completion_manifest_missing", completion.reason
+                        )
+                    completion_manifest = completion.manifest
+                    self._verify_completion_manifest(
+                        session, checkpoint, completion_manifest
+                    )
 
-        replayed_a = any(
-            item.id == planning_commit_manifest.id for item in prior_manifests
-        )
+                provenance = self._build_provenance(
+                    session,
+                    checkpoint,
+                    task_plan,
+                    completion_manifest,
+                    review_id,
+                    event_id,
+                    approval_operator_subject,
+                )
+                commit_identity = self._commit_identity(
+                    session, checkpoint, completion_manifest, review_id, event_id
+                )
+                try:
+                    planning_commit_manifest = self.protocol.record_commit_manifest(
+                        session.id,
+                        task_provenance=provenance,
+                        commit_identity=commit_identity,
+                        completion_manifest_id=completion_manifest.id,
+                        fencing_token=locked.processing_token,
+                        session_generation_id=session.generation_id,
+                        protocol_version=PROTOCOL_V2,
+                    )
+                except ProtocolPersistenceError as exc:
+                    raise ExecutionCommitError(
+                        "commit_manifest_conflict", str(exc)
+                    ) from exc
+            except Exception:
+                self.db.rollback()
+                raise
+            self._release_lease(locked)
+
+            self._upsert_command(
+                existing_command,
+                session_id=session.id,
+                request=request,
+                canonical_request_hash=canonical_request_hash,
+                planning_commit_manifest_id=planning_commit_manifest.id,
+            )
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+
+            replayed_a = any(
+                item.id == planning_commit_manifest.id for item in prior_manifests
+            )
+
+        self.db.refresh(planning_commit_manifest)
+        command = self._find_command(request)
 
         # -- Transaction B: Execution materialization --------------------
         existing_execution_plan_id = None
@@ -508,9 +726,21 @@ class PlanningExecutionCommitService:
             execution_service = ExecutionPlanCommitService(self.db)
             execution_plan = execution_service.commit(planning_commit_manifest.id)
             execution_service.verify_integrity(execution_plan.id)
+            command.execution_plan_id = execution_plan.id
+            command.boundary_state = "released"
             self.db.commit()
         except ExecutionPlanCommitError as exc:
             self.db.rollback()
+            logger.error(
+                "execution_commit_materialization_failed",
+                extra={
+                    "planning_session_id": session.id,
+                    "planning_commit_manifest_id": planning_commit_manifest.id,
+                    "operator_subject": request.operator_subject,
+                    "idempotency_key": request.idempotency_key,
+                    "detail": str(exc),
+                },
+            )
             return ExecutionCommitResult(
                 planning_session_id=session.id,
                 session_generation_id=session.generation_id,
@@ -524,7 +754,9 @@ class PlanningExecutionCommitService:
                 commit_identity=planning_commit_manifest.commit_identity,
                 boundary_state="released_execution_pending",
                 idempotent_replay=replayed_a,
-                integrity_status="execution_materialization_failed",
+                integrity_status="execution_materialization_pending",
+                retryable=True,
+                execution_error_code=EXECUTION_MATERIALIZATION_FAILED,
                 execution_failure_reason=str(exc),
             )
 

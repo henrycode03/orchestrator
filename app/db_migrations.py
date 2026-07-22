@@ -1376,6 +1376,63 @@ def _migration_031_execution_plan_persistence(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_032_execution_commit_command(engine: Engine) -> None:
+    """Add the Phase 29B-3 execution-commit idempotency command binding.
+
+    This table is additive and holds only command-replay/control state; it
+    never becomes a second authority source over Planning or Execution
+    tables.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_commit_commands (
+                    id INTEGER PRIMARY KEY,
+                    planning_session_id INTEGER NOT NULL,
+                    operator_subject VARCHAR(255) NOT NULL,
+                    idempotency_key VARCHAR(128) NOT NULL,
+                    canonical_request_hash VARCHAR(64) NOT NULL,
+                    planning_commit_manifest_id INTEGER,
+                    execution_plan_id INTEGER,
+                    boundary_state VARCHAR(40) NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_execution_commit_command_idempotency
+                        UNIQUE (operator_subject, idempotency_key),
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id) ON DELETE CASCADE,
+                    FOREIGN KEY(planning_commit_manifest_id)
+                        REFERENCES planning_commit_manifests (id),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id)
+                )
+                """
+            )
+        )
+        indexes = {
+            "ix_execution_commit_commands_session": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_commit_commands_session "
+                "ON execution_commit_commands (planning_session_id)"
+            ),
+            "ix_execution_commit_commands_operator": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_commit_commands_operator "
+                "ON execution_commit_commands (operator_subject)"
+            ),
+            "ix_execution_commit_commands_manifest": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_commit_commands_manifest "
+                "ON execution_commit_commands (planning_commit_manifest_id)"
+            ),
+            "ix_execution_commit_commands_plan": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_commit_commands_plan "
+                "ON execution_commit_commands (execution_plan_id)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1813,6 +1870,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="031_execution_plan_persistence",
         description="Add the Phase 29B-1 Execution Plan graph tables",
         upgrade=_migration_031_execution_plan_persistence,
+    ),
+    Migration(
+        version="032_execution_commit_command",
+        description="Add the Phase 29B-3 execution-commit idempotency command binding",
+        upgrade=_migration_032_execution_commit_command,
     ),
 )
 
