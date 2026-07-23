@@ -712,6 +712,10 @@ class _OutputHashMatchesValidator:
         return _predicate_result(
             "passed" if passed else "failed",
             "output_hash_matches" if passed else "output_hash_mismatch",
+            diagnostics={
+                "hash_verification_level": "authority_claim_consistency",
+                "byte_level_recomputed": False,
+            },
             expected={
                 "hash_algorithm": evidence.expected_hash_algorithm,
                 "hash": evidence.expected_hash,

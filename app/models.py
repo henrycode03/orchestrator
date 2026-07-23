@@ -759,6 +759,16 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    validation_runs = relationship(
+        "ExecutionTaskValidationRun",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    acceptance_decisions = relationship(
+        "ExecutionTaskAcceptanceDecision",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
     validation_contract_set_hash = Column(String(64), nullable=True, index=True)
 
 
@@ -851,6 +861,16 @@ class ExecutionTask(Base):
     )
     validation_predicate_results = relationship(
         "ExecutionTaskValidationPredicateResult",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    validation_runs = relationship(
+        "ExecutionTaskValidationRun",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    acceptance_decisions = relationship(
+        "ExecutionTaskAcceptanceDecision",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -1182,6 +1202,244 @@ class ExecutionTaskValidationPredicateResult(Base):
     candidate_outcome = relationship("ExecutionTaskAttemptOutcome")
     validation_specification = relationship("ExecutionTaskValidationSpecification")
     evidence_snapshot = relationship("ExecutionTaskResolvedValidationEvidence")
+
+
+class ExecutionTaskValidationRun(Base):
+    """Canonical orchestration record for one frozen candidate validation."""
+
+    __tablename__ = "execution_task_validation_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_id = Column(
+        Integer,
+        ForeignKey("execution_task_validation_specifications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_hash = Column(String(64), nullable=False, index=True)
+    validation_contract_set_hash = Column(String(64), nullable=False, index=True)
+    task_state_at_start = Column(String(20), nullable=False)
+    task_state_version_at_start = Column(Integer, nullable=False)
+    validation_run_generation = Column(Integer, nullable=False)
+    validation_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_validation_command_id = Column(
+        String(128), nullable=False, unique=True
+    )
+    canonical_validation_command_payload = Column(JSON, nullable=False)
+    canonical_validation_command_hash = Column(String(64), nullable=False)
+    validator_set_id = Column(String(128), nullable=False)
+    validator_set_version = Column(String(64), nullable=False)
+    environment_configuration_hash = Column(String(64), nullable=False)
+    resolver_contract_version = Column(String(64), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    run_status = Column(String(32), nullable=False, index=True)
+    required_evidence_count = Column(Integer, nullable=False, default=0)
+    resolved_evidence_count = Column(Integer, nullable=False, default=0)
+    required_predicate_count = Column(Integer, nullable=False, default=0)
+    evaluated_predicate_count = Column(Integer, nullable=False, default=0)
+    passed_predicate_count = Column(Integer, nullable=False, default=0)
+    failed_predicate_count = Column(Integer, nullable=False, default=0)
+    missing_predicate_count = Column(Integer, nullable=False, default=0)
+    unsupported_predicate_count = Column(Integer, nullable=False, default=0)
+    validator_error_count = Column(Integer, nullable=False, default=0)
+    invalid_evidence_count = Column(Integer, nullable=False, default=0)
+    pass_policy_result = Column(String(32), nullable=True)
+    review_requirement = Column(String(32), nullable=True)
+    review_result = Column(JSON, nullable=True)
+    final_validation_classification = Column(String(32), nullable=True, index=True)
+    aggregate_evidence_hash = Column(String(64), nullable=True)
+    aggregate_predicate_result_hash = Column(String(64), nullable=True)
+    canonical_result_payload = Column(JSON, nullable=True)
+    canonical_result_hash = Column(String(64), nullable=True)
+    acceptance_decision_id = Column(Integer, nullable=True, unique=True, index=True)
+    lifecycle_transition_id = Column(Integer, nullable=True, index=True)
+    lifecycle_transition_sequence = Column(Integer, nullable=True)
+    bounded_reason = Column(String(64), nullable=True)
+    bounded_detail = Column(String(1024), nullable=True)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_outcome_id",
+            "validation_specification_id",
+            "validation_run_generation",
+            name="uq_execution_task_validation_run_candidate_spec_generation",
+        ),
+        CheckConstraint(
+            "validation_run_generation > 0",
+            name="ck_execution_task_validation_run_generation_positive",
+        ),
+        CheckConstraint(
+            "task_state_version_at_start >= 0",
+            name="ck_execution_task_validation_run_state_version_nonnegative",
+        ),
+        CheckConstraint(
+            "run_status IN ('pending', 'running', 'completed', 'blocked', "
+            "'validation_error', 'review_required', 'accepted', 'rejected', 'cancelled')",
+            name="ck_execution_task_validation_run_status",
+        ),
+        Index(
+            "ix_execution_task_validation_runs_task_status",
+            "execution_task_id",
+            "run_status",
+        ),
+        Index(
+            "ix_execution_task_validation_runs_candidate_spec",
+            "candidate_outcome_id",
+            "validation_specification_id",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="validation_runs")
+    execution_task = relationship("ExecutionTask", back_populates="validation_runs")
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    candidate_outcome = relationship("ExecutionTaskAttemptOutcome")
+    validation_specification = relationship("ExecutionTaskValidationSpecification")
+
+
+class ExecutionTaskAcceptanceDecision(Base):
+    """Immutable acceptance classification and, only when authorized, lifecycle link."""
+
+    __tablename__ = "execution_task_acceptance_decisions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_id = Column(
+        Integer,
+        ForeignKey("execution_task_validation_specifications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_hash = Column(String(64), nullable=False, index=True)
+    validation_run_id = Column(
+        Integer,
+        ForeignKey("execution_task_validation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    validation_run_result_hash = Column(String(64), nullable=False)
+    aggregate_evidence_hash = Column(String(64), nullable=False)
+    aggregate_predicate_result_hash = Column(String(64), nullable=False)
+    pass_policy_id = Column(String(64), nullable=False)
+    pass_policy_version = Column(Integer, nullable=False)
+    pass_policy_result = Column(String(32), nullable=False)
+    review_requirement = Column(String(32), nullable=False)
+    review_result = Column(JSON, nullable=False)
+    review_reference = Column(String(128), nullable=True)
+    decision_status = Column(String(32), nullable=False, index=True)
+    decision_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_decision_command_id = Column(String(128), nullable=False, unique=True)
+    canonical_decision_command_payload = Column(JSON, nullable=False)
+    canonical_decision_command_hash = Column(String(64), nullable=False)
+    canonical_decision_payload = Column(JSON, nullable=False)
+    canonical_decision_hash = Column(String(64), nullable=False)
+    decision_reason = Column(String(64), nullable=False)
+    bounded_detail = Column(String(1024), nullable=True)
+    decision_actor_type = Column(String(64), nullable=False)
+    decision_actor_id = Column(String(255), nullable=False)
+    decided_at = Column(DateTime(timezone=True), nullable=False)
+    lifecycle_transition_id = Column(Integer, nullable=True, index=True)
+    lifecycle_transition_sequence = Column(Integer, nullable=True)
+    resulting_task_state = Column(String(20), nullable=False)
+    resulting_task_state_version = Column(Integer, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_outcome_id",
+            "validation_specification_id",
+            name="uq_execution_task_acceptance_candidate_spec",
+        ),
+        CheckConstraint(
+            "pass_policy_version > 0",
+            name="ck_execution_task_acceptance_policy_version_positive",
+        ),
+        CheckConstraint(
+            "resulting_task_state_version >= 0",
+            name="ck_execution_task_acceptance_state_version_nonnegative",
+        ),
+        CheckConstraint(
+            "decision_status IN ('accepted', 'rejected', 'blocked', "
+            "'validation_error', 'review_required')",
+            name="ck_execution_task_acceptance_decision_status",
+        ),
+        Index(
+            "ix_execution_task_acceptance_task_status",
+            "execution_task_id",
+            "decision_status",
+        ),
+        Index(
+            "ix_execution_task_acceptance_plan_status",
+            "execution_plan_id",
+            "decision_status",
+        ),
+    )
+
+    execution_plan = relationship(
+        "ExecutionPlan", back_populates="acceptance_decisions"
+    )
+    execution_task = relationship(
+        "ExecutionTask", back_populates="acceptance_decisions"
+    )
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    candidate_outcome = relationship("ExecutionTaskAttemptOutcome")
+    validation_specification = relationship("ExecutionTaskValidationSpecification")
+    validation_run = relationship("ExecutionTaskValidationRun")
 
 
 class ExecutionTaskSchedulerClaim(Base):

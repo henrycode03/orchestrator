@@ -2740,6 +2740,195 @@ def _migration_039_execution_task_validation_primitives(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_040_execution_task_validation_runs_acceptance(engine: Engine) -> None:
+    """Add empty validation-run and acceptance-decision authority tables.
+
+    This migration is additive and deliberately creates no run, decision,
+    evidence, predicate, lifecycle, retry, review, or dependency records.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_validation_runs (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    candidate_outcome_id INTEGER NOT NULL,
+                    validation_specification_id INTEGER NOT NULL,
+                    validation_specification_hash VARCHAR(64) NOT NULL,
+                    validation_contract_set_hash VARCHAR(64) NOT NULL,
+                    task_state_at_start VARCHAR(20) NOT NULL,
+                    task_state_version_at_start INTEGER NOT NULL,
+                    validation_run_generation INTEGER NOT NULL,
+                    validation_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_validation_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_validation_command_payload JSON NOT NULL,
+                    canonical_validation_command_hash VARCHAR(64) NOT NULL,
+                    validator_set_id VARCHAR(128) NOT NULL,
+                    validator_set_version VARCHAR(64) NOT NULL,
+                    environment_configuration_hash VARCHAR(64) NOT NULL,
+                    resolver_contract_version VARCHAR(64) NOT NULL,
+                    started_at DATETIME NOT NULL,
+                    completed_at DATETIME,
+                    run_status VARCHAR(32) NOT NULL,
+                    required_evidence_count INTEGER NOT NULL DEFAULT 0,
+                    resolved_evidence_count INTEGER NOT NULL DEFAULT 0,
+                    required_predicate_count INTEGER NOT NULL DEFAULT 0,
+                    evaluated_predicate_count INTEGER NOT NULL DEFAULT 0,
+                    passed_predicate_count INTEGER NOT NULL DEFAULT 0,
+                    failed_predicate_count INTEGER NOT NULL DEFAULT 0,
+                    missing_predicate_count INTEGER NOT NULL DEFAULT 0,
+                    unsupported_predicate_count INTEGER NOT NULL DEFAULT 0,
+                    validator_error_count INTEGER NOT NULL DEFAULT 0,
+                    invalid_evidence_count INTEGER NOT NULL DEFAULT 0,
+                    pass_policy_result VARCHAR(32),
+                    review_requirement VARCHAR(32),
+                    review_result JSON,
+                    final_validation_classification VARCHAR(32),
+                    aggregate_evidence_hash VARCHAR(64),
+                    aggregate_predicate_result_hash VARCHAR(64),
+                    canonical_result_payload JSON,
+                    canonical_result_hash VARCHAR(64),
+                    acceptance_decision_id INTEGER UNIQUE,
+                    lifecycle_transition_id INTEGER,
+                    lifecycle_transition_sequence INTEGER,
+                    bounded_reason VARCHAR(64),
+                    bounded_detail VARCHAR(1024),
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_task_validation_run_candidate_spec_generation
+                        UNIQUE (
+                            candidate_outcome_id,
+                            validation_specification_id,
+                            validation_run_generation
+                        ),
+                    CONSTRAINT ck_execution_task_validation_run_generation_positive
+                        CHECK (validation_run_generation > 0),
+                    CONSTRAINT ck_execution_task_validation_run_state_version_nonnegative
+                        CHECK (task_state_version_at_start >= 0),
+                    CONSTRAINT ck_execution_task_validation_run_status
+                        CHECK (run_status IN (
+                            'pending', 'running', 'completed', 'blocked',
+                            'validation_error', 'review_required', 'accepted',
+                            'rejected', 'cancelled'
+                        )),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(validation_specification_id)
+                        REFERENCES execution_task_validation_specifications (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_acceptance_decisions (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    candidate_outcome_id INTEGER NOT NULL,
+                    validation_specification_id INTEGER NOT NULL,
+                    validation_specification_hash VARCHAR(64) NOT NULL,
+                    validation_run_id INTEGER NOT NULL UNIQUE,
+                    validation_run_result_hash VARCHAR(64) NOT NULL,
+                    aggregate_evidence_hash VARCHAR(64) NOT NULL,
+                    aggregate_predicate_result_hash VARCHAR(64) NOT NULL,
+                    pass_policy_id VARCHAR(64) NOT NULL,
+                    pass_policy_version INTEGER NOT NULL,
+                    pass_policy_result VARCHAR(32) NOT NULL,
+                    review_requirement VARCHAR(32) NOT NULL,
+                    review_result JSON NOT NULL,
+                    review_reference VARCHAR(128),
+                    decision_status VARCHAR(32) NOT NULL,
+                    decision_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_decision_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_decision_command_payload JSON NOT NULL,
+                    canonical_decision_command_hash VARCHAR(64) NOT NULL,
+                    canonical_decision_payload JSON NOT NULL,
+                    canonical_decision_hash VARCHAR(64) NOT NULL,
+                    decision_reason VARCHAR(64) NOT NULL,
+                    bounded_detail VARCHAR(1024),
+                    decision_actor_type VARCHAR(64) NOT NULL,
+                    decision_actor_id VARCHAR(255) NOT NULL,
+                    decided_at DATETIME NOT NULL,
+                    lifecycle_transition_id INTEGER,
+                    lifecycle_transition_sequence INTEGER,
+                    resulting_task_state VARCHAR(20) NOT NULL,
+                    resulting_task_state_version INTEGER NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_task_acceptance_candidate_spec
+                        UNIQUE (candidate_outcome_id, validation_specification_id),
+                    CONSTRAINT ck_execution_task_acceptance_policy_version_positive
+                        CHECK (pass_policy_version > 0),
+                    CONSTRAINT ck_execution_task_acceptance_state_version_nonnegative
+                        CHECK (resulting_task_state_version >= 0),
+                    CONSTRAINT ck_execution_task_acceptance_decision_status
+                        CHECK (decision_status IN (
+                            'accepted', 'rejected', 'blocked',
+                            'validation_error', 'review_required'
+                        )),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(validation_specification_id)
+                        REFERENCES execution_task_validation_specifications (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(validation_run_id)
+                        REFERENCES execution_task_validation_runs (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "ix_execution_task_validation_runs_task_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_validation_runs_task_status "
+                "ON execution_task_validation_runs (execution_task_id, run_status)"
+            ),
+            "ix_execution_task_validation_runs_candidate_spec": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_validation_runs_candidate_spec "
+                "ON execution_task_validation_runs "
+                "(candidate_outcome_id, validation_specification_id)"
+            ),
+            "ix_execution_task_acceptance_task_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_acceptance_task_status "
+                "ON execution_task_acceptance_decisions "
+                "(execution_task_id, decision_status)"
+            ),
+            "ix_execution_task_acceptance_plan_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_acceptance_plan_status "
+                "ON execution_task_acceptance_decisions "
+                "(execution_plan_id, decision_status)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3230,6 +3419,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="039_execution_task_validation_primitives",
         description="Add read-only evidence snapshots and deterministic predicate results",
         upgrade=_migration_039_execution_task_validation_primitives,
+    ),
+    Migration(
+        version="040_execution_task_validation_runs_acceptance",
+        description="Add canonical validation runs and acceptance decisions",
+        upgrade=_migration_040_execution_task_validation_runs_acceptance,
     ),
 )
 
