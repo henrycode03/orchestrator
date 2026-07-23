@@ -50,6 +50,9 @@ EXECUTION_EVIDENCE_REFERENCE_GRAMMAR_VERSION = "execution-evidence-reference/1"
 MAX_EVIDENCE_BYTES = MAX_CANDIDATE_CONTENT_BYTES
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
 DEFAULT_EVIDENCE_MEDIA_TYPE = "application/octet-stream"
+SUPPORTED_EVIDENCE_MEDIA_TYPES = MEDIA_TYPES - {
+    "application/vnd.orchestrator.changeset+json"
+}
 
 # Reserved for future versions: benchmark, coverage, profiling, security
 # scan, static analysis, and custom plugin kinds are not accepted here.
@@ -108,7 +111,7 @@ def normalize_evidence_media_type(value: Any) -> str:
     if value is None or str(value).strip() == "":
         return DEFAULT_EVIDENCE_MEDIA_TYPE
     result = str(value).strip().lower()
-    if result not in MEDIA_TYPES or _CONTROL_RE.search(result):
+    if result not in SUPPORTED_EVIDENCE_MEDIA_TYPES or _CONTROL_RE.search(result):
         raise ExecutionEvidenceError(
             "execution_evidence_media_type_invalid", "media type is not supported"
         )
@@ -509,7 +512,7 @@ def verify_execution_evidence_integrity(
         issues.append("execution_evidence_hash_malformed")
     if row.declared_sha256 is not None and not _HASH_RE.fullmatch(row.declared_sha256):
         issues.append("execution_evidence_declared_hash_malformed")
-    if row.media_type not in MEDIA_TYPES:
+    if row.media_type not in SUPPORTED_EVIDENCE_MEDIA_TYPES:
         issues.append("execution_evidence_media_type_invalid")
     if row.byte_length < 0 or row.byte_length > MAX_EVIDENCE_BYTES:
         issues.append("execution_evidence_size_invalid")

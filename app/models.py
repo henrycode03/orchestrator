@@ -59,6 +59,9 @@ class Project(Base):
     permission_requests = relationship(
         "PermissionRequest", back_populates="project", cascade="all, delete-orphan"
     )
+    execution_workspace_targets = relationship(
+        "ExecutionWorkspaceTarget", back_populates="project"
+    )
 
 
 class Task(Base):
@@ -789,6 +792,10 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    apply_attempts = relationship(
+        "ExecutionTaskApplyAttempt",
+        foreign_keys="ExecutionTaskApplyAttempt.execution_plan_id",
+    )
     recovery_policy_id = Column(String(64), nullable=True, index=True)
     recovery_policy_version = Column(Integer, nullable=True)
     validation_contract_set_hash = Column(String(64), nullable=True, index=True)
@@ -915,6 +922,10 @@ class ExecutionTask(Base):
         "ExecutionEvidence",
         back_populates="execution_task",
         cascade="all, delete-orphan",
+    )
+    apply_attempts = relationship(
+        "ExecutionTaskApplyAttempt",
+        foreign_keys="ExecutionTaskApplyAttempt.execution_task_id",
     )
 
 
@@ -2848,10 +2859,11 @@ class ExecutionTaskChangeSetOperation(Base):
 class ExecutionTaskApplyAuthorization(Base):
     """Canonical permission decision to attempt applying one exact ChangeSet.
 
-    Acceptance is a prerequisite, never authorization itself.  Only one
-    active authorization may exist per (ChangeSet, policy id, policy
-    version); a replayed request with the same idempotency key returns the
-    same row instead of mutating it.
+    Acceptance is a prerequisite, never authorization itself.  D-1 policy-v1
+    service semantics retain one authorization per ChangeSet/policy.  Phase
+    29D-2 policy-v2 rows are immutable reevaluation records bound to an exact
+    base-state authority; idempotency and the service policy fence duplicate
+    authorized decisions without rewriting v1 rows.
     """
 
     __tablename__ = "execution_task_apply_authorizations"
@@ -2896,6 +2908,18 @@ class ExecutionTaskApplyAuthorization(Base):
         nullable=False,
         index=True,
     )
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     target_workspace_identity = Column(String(255), nullable=True)
     base_state_hash = Column(String(64), nullable=False)
     apply_policy_id = Column(String(64), nullable=False)
@@ -2919,12 +2943,6 @@ class ExecutionTaskApplyAuthorization(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
-            "change_set_id",
-            "apply_policy_id",
-            "apply_policy_version",
-            name="uq_execution_task_apply_authorization_changeset_policy",
-        ),
         CheckConstraint(
             "attempt_generation > 0 AND apply_policy_version > 0",
             name="ck_execution_task_apply_authorization_generation_positive",
@@ -2946,6 +2964,417 @@ class ExecutionTaskApplyAuthorization(Base):
     change_set = relationship("ExecutionTaskChangeSet")
     acceptance_decision = relationship("ExecutionTaskAcceptanceDecision")
     target_project = relationship("Project")
+
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    base_state = relationship("ExecutionWorkspaceBaseState")
+
+
+class ExecutionWorkspaceTarget(Base):
+    """Immutable, independently inspected project-to-workspace identity."""
+
+    __tablename__ = "execution_workspace_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    authority_version = Column(Integer, nullable=False, default=1)
+    target_status = Column(String(24), nullable=False, default="active", index=True)
+    configured_workspace_path = Column(String(512), nullable=False)
+    normalized_realpath = Column(String(1024), nullable=False)
+    filesystem_device = Column(String(64), nullable=True)
+    filesystem_inode = Column(String(64), nullable=True)
+    target_identity = Column(String(255), nullable=False, unique=True, index=True)
+    repository_kind = Column(String(32), nullable=False)
+    repository_identity = Column(String(255), nullable=True)
+    repository_root_realpath = Column(String(1024), nullable=True)
+    repository_root_identity = Column(String(255), nullable=True)
+    canonical_target_payload = Column(JSON, nullable=False)
+    canonical_target_hash = Column(String(64), nullable=False)
+    registration_idempotency_key = Column(String(128), nullable=False, unique=True)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "target_identity",
+            name="uq_execution_workspace_target_project_identity",
+        ),
+        CheckConstraint(
+            "authority_version > 0",
+            name="ck_execution_workspace_target_version_positive",
+        ),
+        CheckConstraint(
+            "target_status IN ('active', 'superseded')",
+            name="ck_execution_workspace_target_status",
+        ),
+        Index(
+            "ix_execution_workspace_targets_project_status",
+            "project_id",
+            "target_status",
+        ),
+        Index("ix_execution_workspace_targets_realpath", "normalized_realpath"),
+    )
+
+    project = relationship("Project", back_populates="execution_workspace_targets")
+
+
+class ExecutionWorkspaceBaseState(Base):
+    """Immutable read-only observation of one target for one ChangeSet."""
+
+    __tablename__ = "execution_workspace_base_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    target_identity = Column(String(255), nullable=False)
+    repository_kind = Column(String(32), nullable=False)
+    repository_identity = Column(String(255), nullable=True)
+    repository_root_identity = Column(String(255), nullable=True)
+    repository_head = Column(String(128), nullable=False)
+    workspace_clean = Column(Boolean, nullable=False)
+    dirty_state = Column(String(32), nullable=False)
+    dirty_path_count = Column(Integer, nullable=False)
+    dirty_paths = Column(JSON, nullable=False)
+    dirty_path_summary_hash = Column(String(64), nullable=False)
+    repository_operation_state = Column(JSON, nullable=False)
+    inspection_policy_id = Column(String(64), nullable=False)
+    inspection_policy_version = Column(Integer, nullable=False)
+    tool_identity = Column(String(64), nullable=False)
+    tool_version = Column(String(64), nullable=False)
+    path_observation_count = Column(Integer, nullable=False)
+    canonical_observation_payload = Column(JSON, nullable=False)
+    canonical_observation_hash = Column(String(64), nullable=False, index=True)
+    observation_idempotency_key = Column(String(128), nullable=False, unique=True)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    inspected_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_target_id",
+            "change_set_id",
+            "canonical_observation_hash",
+            name="uq_execution_workspace_base_state_observation",
+        ),
+        CheckConstraint(
+            "inspection_policy_version > 0 AND path_observation_count > 0",
+            name="ck_execution_workspace_base_state_bounds",
+        ),
+        CheckConstraint(
+            "dirty_state IN ('clean', 'unrelated_dirty', 'conflicting_dirty')",
+            name="ck_execution_workspace_base_state_dirty_state",
+        ),
+    )
+
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    project = relationship("Project")
+    change_set = relationship("ExecutionTaskChangeSet")
+    path_observations = relationship(
+        "ExecutionWorkspacePathObservation",
+        back_populates="base_state",
+        cascade="all, delete-orphan",
+        order_by="ExecutionWorkspacePathObservation.observation_index",
+    )
+
+
+class ExecutionWorkspacePathObservation(Base):
+    """Bounded immutable observation for one ChangeSet operation path."""
+
+    __tablename__ = "execution_workspace_path_observations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    observation_index = Column(Integer, nullable=False)
+    operation = Column(String(32), nullable=False)
+    path = Column(String(1024), nullable=False)
+    exists = Column(Boolean, nullable=False)
+    entry_type = Column(String(32), nullable=False)
+    content_sha256 = Column(String(64), nullable=True)
+    byte_length = Column(Integer, nullable=True)
+    mode_classification = Column(String(32), nullable=True)
+    symlink_status = Column(String(32), nullable=False)
+    canonical_observation_payload = Column(JSON, nullable=False)
+    canonical_observation_hash = Column(String(64), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "base_state_id",
+            "observation_index",
+            name="uq_execution_workspace_path_observation_index",
+        ),
+        UniqueConstraint(
+            "base_state_id", "path", name="uq_execution_workspace_path_observation_path"
+        ),
+        CheckConstraint(
+            "observation_index >= 0",
+            name="ck_execution_workspace_path_observation_index",
+        ),
+    )
+
+    base_state = relationship(
+        "ExecutionWorkspaceBaseState", back_populates="path_observations"
+    )
+
+
+class ExecutionTaskApplyApproval(Base):
+    """Immutable operator decision for one exact ChangeSet/base state pair."""
+
+    __tablename__ = "execution_task_apply_approvals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    change_set_hash = Column(String(64), nullable=False)
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    workspace_target_hash = Column(String(64), nullable=False)
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    base_state_hash = Column(String(64), nullable=False)
+    apply_policy_id = Column(String(64), nullable=False)
+    apply_policy_version = Column(Integer, nullable=False)
+    decision = Column(String(16), nullable=False, index=True)
+    approver_actor_type = Column(String(64), nullable=False)
+    approver_actor_id = Column(String(255), nullable=False)
+    reviewed_summary_payload = Column(JSON, nullable=False)
+    reviewed_summary_hash = Column(String(64), nullable=False)
+    canonical_approval_payload = Column(JSON, nullable=False)
+    canonical_approval_hash = Column(String(64), nullable=False, index=True)
+    approval_idempotency_key = Column(String(128), nullable=False, unique=True)
+    decided_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "change_set_id",
+            "base_state_id",
+            "apply_policy_id",
+            "apply_policy_version",
+            name="uq_execution_task_apply_approval_exact_scope",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0 AND apply_policy_version > 0",
+            name="ck_execution_task_apply_approval_versions_positive",
+        ),
+        CheckConstraint(
+            "decision IN ('approved', 'rejected')",
+            name="ck_execution_task_apply_approval_decision",
+        ),
+    )
+
+    change_set = relationship("ExecutionTaskChangeSet")
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    base_state = relationship("ExecutionWorkspaceBaseState")
+
+
+class ExecutionTaskApplyAttempt(Base):
+    """Immutable pre-mutation intent consuming one authorized decision."""
+
+    __tablename__ = "execution_task_apply_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    change_set_hash = Column(String(64), nullable=False)
+    authorization_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_authorizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    authorization_hash = Column(String(64), nullable=False)
+    approval_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_approvals.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    approval_hash = Column(String(64), nullable=False)
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    workspace_target_hash = Column(String(64), nullable=False)
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    base_state_hash = Column(String(64), nullable=False)
+    apply_policy_id = Column(String(64), nullable=False)
+    apply_policy_version = Column(Integer, nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    status = Column(String(32), nullable=False, index=True)
+    status_reason = Column(String(64), nullable=True)
+    canonical_command_payload = Column(JSON, nullable=False)
+    canonical_command_hash = Column(String(64), nullable=False, index=True)
+    precondition_verification_hash = Column(String(64), nullable=True)
+    apply_attempt_idempotency_key = Column(String(128), nullable=False, unique=True)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_task_id",
+            "attempt_number",
+            name="uq_execution_task_apply_attempt_task_number",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0 AND attempt_number > 0 AND apply_policy_version > 0",
+            name="ck_execution_task_apply_attempt_versions_positive",
+        ),
+        CheckConstraint(
+            "status IN ('created', 'precondition_verified', 'blocked', 'cancelled')",
+            name="ck_execution_task_apply_attempt_status",
+        ),
+    )
+
+    change_set = relationship("ExecutionTaskChangeSet")
+    authorization = relationship("ExecutionTaskApplyAuthorization")
+    approval = relationship("ExecutionTaskApplyApproval")
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    base_state = relationship("ExecutionWorkspaceBaseState")
+    precondition_verifications = relationship(
+        "ExecutionTaskApplyPreconditionVerification",
+        back_populates="apply_attempt",
+        cascade="all, delete-orphan",
+        order_by="ExecutionTaskApplyPreconditionVerification.sequence",
+    )
+
+
+class ExecutionTaskApplyPreconditionVerification(Base):
+    """Append-only read-only observation linked to an apply attempt."""
+
+    __tablename__ = "execution_task_apply_precondition_verifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    apply_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sequence = Column(Integer, nullable=False)
+    outcome = Column(String(48), nullable=False)
+    reason = Column(String(64), nullable=False)
+    authorized_base_state_id = Column(Integer, nullable=False)
+    authorized_base_state_hash = Column(String(64), nullable=False)
+    observed_target_identity = Column(String(255), nullable=True)
+    observed_state_hash = Column(String(64), nullable=True)
+    canonical_verification_payload = Column(JSON, nullable=False)
+    canonical_verification_hash = Column(String(64), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "apply_attempt_id",
+            "sequence",
+            name="uq_execution_task_apply_precondition_verification_sequence",
+        ),
+        CheckConstraint(
+            "sequence > 0",
+            name="ck_execution_task_apply_precondition_verification_sequence",
+        ),
+        CheckConstraint(
+            "outcome IN ("
+            "'precondition_verified', 'blocked_workspace_changed', "
+            "'blocked_target_identity_changed', 'blocked_repository_head_changed', "
+            "'blocked_path_state_changed', 'blocked_dirty_state', "
+            "'blocked_approval_missing', 'blocked_integrity_failure')",
+            name="ck_execution_task_apply_precondition_verification_outcome",
+        ),
+    )
+
+    apply_attempt = relationship(
+        "ExecutionTaskApplyAttempt", back_populates="precondition_verifications"
+    )
 
 
 class ExecutionTaskTransition(Base):

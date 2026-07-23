@@ -3619,6 +3619,369 @@ def _migration_046_execution_task_changeset_apply_authorization(engine: Engine) 
             connection.execute(text(statement))
 
 
+def _migration_047_workspace_base_state_apply_attempt_boundary(engine: Engine) -> None:
+    """Add empty Phase 29D-2 workspace/apply authorities.
+
+    This migration is additive and replay-safe.  It never resolves a
+    historical Project.workspace_path, inspects a workspace, fabricates a
+    target/base/approval/attempt, or changes task lifecycle.  Existing D-1
+    authorization rows are copied byte-for-byte when SQLite's old v1 unique
+    constraint must be replaced so v2 can have one authorization per exact
+    ChangeSet/base-state scope.
+    """
+
+    table_names = _table_names(engine)
+    if "execution_task_apply_authorizations" in table_names and not _has_column(
+        engine, "execution_task_apply_authorizations", "base_state_id"
+    ):
+        # Phase 29D-1's SQLite table used a v1-only unique constraint.  A
+        # table rebuild preserves every historical value while permitting v2
+        # observations to be independently authorized for refreshed bases.
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
+            transaction = connection.begin()
+            try:
+                connection.execute(
+                    text(
+                        "ALTER TABLE execution_task_apply_authorizations "
+                        "RENAME TO execution_task_apply_authorizations_046_legacy"
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE execution_task_apply_authorizations (
+                            id INTEGER PRIMARY KEY,
+                            execution_plan_id INTEGER NOT NULL,
+                            execution_task_id INTEGER NOT NULL,
+                            execution_task_attempt_id INTEGER NOT NULL,
+                            attempt_generation INTEGER NOT NULL,
+                            change_set_id INTEGER NOT NULL,
+                            change_set_hash VARCHAR(64) NOT NULL,
+                            acceptance_decision_id INTEGER NOT NULL,
+                            acceptance_decision_hash VARCHAR(64) NOT NULL,
+                            target_project_id INTEGER NOT NULL,
+                            workspace_target_id INTEGER,
+                            base_state_id INTEGER,
+                            target_workspace_identity VARCHAR(255),
+                            base_state_hash VARCHAR(64) NOT NULL,
+                            apply_policy_id VARCHAR(64) NOT NULL,
+                            apply_policy_version INTEGER NOT NULL,
+                            authorization_status VARCHAR(32) NOT NULL,
+                            decision_reason VARCHAR(64) NOT NULL,
+                            bounded_detail VARCHAR(1024),
+                            canonical_input_payload JSON NOT NULL,
+                            canonical_input_hash VARCHAR(64) NOT NULL,
+                            canonical_decision_payload JSON NOT NULL,
+                            canonical_decision_hash VARCHAR(64) NOT NULL,
+                            authorization_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                            deterministic_authorization_command_id VARCHAR(128) NOT NULL UNIQUE,
+                            decision_actor_type VARCHAR(64) NOT NULL,
+                            decision_actor_id VARCHAR(255) NOT NULL,
+                            decided_at DATETIME NOT NULL,
+                            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            CONSTRAINT ck_execution_task_apply_authorization_generation_positive
+                                CHECK (attempt_generation > 0 AND apply_policy_version > 0),
+                            CONSTRAINT ck_execution_task_apply_authorization_status
+                                CHECK (authorization_status IN ('authorized', 'blocked', 'denied')),
+                            FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE CASCADE,
+                            FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                            FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                            FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE CASCADE,
+                            FOREIGN KEY(acceptance_decision_id) REFERENCES execution_task_acceptance_decisions (id) ON DELETE CASCADE,
+                            FOREIGN KEY(target_project_id) REFERENCES projects (id) ON DELETE CASCADE
+                        )
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO execution_task_apply_authorizations (
+                            id, execution_plan_id, execution_task_id,
+                            execution_task_attempt_id, attempt_generation,
+                            change_set_id, change_set_hash, acceptance_decision_id,
+                            acceptance_decision_hash, target_project_id,
+                            workspace_target_id, base_state_id,
+                            target_workspace_identity, base_state_hash,
+                            apply_policy_id, apply_policy_version,
+                            authorization_status, decision_reason, bounded_detail,
+                            canonical_input_payload, canonical_input_hash,
+                            canonical_decision_payload, canonical_decision_hash,
+                            authorization_idempotency_key,
+                            deterministic_authorization_command_id,
+                            decision_actor_type, decision_actor_id, decided_at, created_at
+                        )
+                        SELECT id, execution_plan_id, execution_task_id,
+                            execution_task_attempt_id, attempt_generation,
+                            change_set_id, change_set_hash, acceptance_decision_id,
+                            acceptance_decision_hash, target_project_id,
+                            NULL, NULL, target_workspace_identity, base_state_hash,
+                            apply_policy_id, apply_policy_version,
+                            authorization_status, decision_reason, bounded_detail,
+                            canonical_input_payload, canonical_input_hash,
+                            canonical_decision_payload, canonical_decision_hash,
+                            authorization_idempotency_key,
+                            deterministic_authorization_command_id,
+                            decision_actor_type, decision_actor_id, decided_at, created_at
+                        FROM execution_task_apply_authorizations_046_legacy
+                        """
+                    )
+                )
+                connection.execute(
+                    text("DROP TABLE execution_task_apply_authorizations_046_legacy")
+                )
+                transaction.commit()
+            except Exception:
+                transaction.rollback()
+                raise
+            finally:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_workspace_targets (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    authority_version INTEGER NOT NULL,
+                    target_status VARCHAR(24) NOT NULL,
+                    configured_workspace_path VARCHAR(512) NOT NULL,
+                    normalized_realpath VARCHAR(1024) NOT NULL,
+                    filesystem_device VARCHAR(64),
+                    filesystem_inode VARCHAR(64),
+                    target_identity VARCHAR(255) NOT NULL UNIQUE,
+                    repository_kind VARCHAR(32) NOT NULL,
+                    repository_identity VARCHAR(255),
+                    repository_root_realpath VARCHAR(1024),
+                    repository_root_identity VARCHAR(255),
+                    canonical_target_payload JSON NOT NULL,
+                    canonical_target_hash VARCHAR(64) NOT NULL,
+                    registration_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_workspace_target_project_identity
+                        UNIQUE (project_id, target_identity),
+                    CONSTRAINT ck_execution_workspace_target_version_positive
+                        CHECK (authority_version > 0),
+                    CONSTRAINT ck_execution_workspace_target_status
+                        CHECK (target_status IN ('active', 'superseded')),
+                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_workspace_base_states (
+                    id INTEGER PRIMARY KEY,
+                    workspace_target_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    target_identity VARCHAR(255) NOT NULL,
+                    repository_kind VARCHAR(32) NOT NULL,
+                    repository_identity VARCHAR(255),
+                    repository_root_identity VARCHAR(255),
+                    repository_head VARCHAR(128) NOT NULL,
+                    workspace_clean BOOLEAN NOT NULL,
+                    dirty_state VARCHAR(32) NOT NULL,
+                    dirty_path_count INTEGER NOT NULL,
+                    dirty_paths JSON NOT NULL,
+                    dirty_path_summary_hash VARCHAR(64) NOT NULL,
+                    repository_operation_state JSON NOT NULL,
+                    inspection_policy_id VARCHAR(64) NOT NULL,
+                    inspection_policy_version INTEGER NOT NULL,
+                    tool_identity VARCHAR(64) NOT NULL,
+                    tool_version VARCHAR(64) NOT NULL,
+                    path_observation_count INTEGER NOT NULL,
+                    canonical_observation_payload JSON NOT NULL,
+                    canonical_observation_hash VARCHAR(64) NOT NULL,
+                    observation_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    inspected_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_workspace_base_state_observation
+                        UNIQUE (workspace_target_id, change_set_id, canonical_observation_hash),
+                    CONSTRAINT ck_execution_workspace_base_state_bounds
+                        CHECK (inspection_policy_version > 0 AND path_observation_count > 0),
+                    CONSTRAINT ck_execution_workspace_base_state_dirty_state
+                        CHECK (dirty_state IN ('clean', 'unrelated_dirty', 'conflicting_dirty')),
+                    FOREIGN KEY(workspace_target_id) REFERENCES execution_workspace_targets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_workspace_path_observations (
+                    id INTEGER PRIMARY KEY,
+                    base_state_id INTEGER NOT NULL,
+                    observation_index INTEGER NOT NULL,
+                    operation VARCHAR(32) NOT NULL,
+                    path VARCHAR(1024) NOT NULL,
+                    "exists" BOOLEAN NOT NULL,
+                    entry_type VARCHAR(32) NOT NULL,
+                    content_sha256 VARCHAR(64),
+                    byte_length INTEGER,
+                    mode_classification VARCHAR(32),
+                    symlink_status VARCHAR(32) NOT NULL,
+                    canonical_observation_payload JSON NOT NULL,
+                    canonical_observation_hash VARCHAR(64) NOT NULL,
+                    CONSTRAINT uq_execution_workspace_path_observation_index
+                        UNIQUE (base_state_id, observation_index),
+                    CONSTRAINT uq_execution_workspace_path_observation_path
+                        UNIQUE (base_state_id, path),
+                    CONSTRAINT ck_execution_workspace_path_observation_index
+                        CHECK (observation_index >= 0),
+                    FOREIGN KEY(base_state_id) REFERENCES execution_workspace_base_states (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_apply_approvals (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    change_set_hash VARCHAR(64) NOT NULL,
+                    workspace_target_id INTEGER NOT NULL,
+                    workspace_target_hash VARCHAR(64) NOT NULL,
+                    base_state_id INTEGER NOT NULL,
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    apply_policy_id VARCHAR(64) NOT NULL,
+                    apply_policy_version INTEGER NOT NULL,
+                    decision VARCHAR(16) NOT NULL,
+                    approver_actor_type VARCHAR(64) NOT NULL,
+                    approver_actor_id VARCHAR(255) NOT NULL,
+                    reviewed_summary_payload JSON NOT NULL,
+                    reviewed_summary_hash VARCHAR(64) NOT NULL,
+                    canonical_approval_payload JSON NOT NULL,
+                    canonical_approval_hash VARCHAR(64) NOT NULL,
+                    approval_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    decided_at DATETIME NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_task_apply_approval_exact_scope
+                        UNIQUE (change_set_id, base_state_id, apply_policy_id, apply_policy_version),
+                    CONSTRAINT ck_execution_task_apply_approval_versions_positive
+                        CHECK (attempt_generation > 0 AND apply_policy_version > 0),
+                    CONSTRAINT ck_execution_task_apply_approval_decision
+                        CHECK (decision IN ('approved', 'rejected')),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(workspace_target_id) REFERENCES execution_workspace_targets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(base_state_id) REFERENCES execution_workspace_base_states (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_apply_attempts (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    change_set_hash VARCHAR(64) NOT NULL,
+                    authorization_id INTEGER NOT NULL UNIQUE,
+                    authorization_hash VARCHAR(64) NOT NULL,
+                    approval_id INTEGER NOT NULL,
+                    approval_hash VARCHAR(64) NOT NULL,
+                    workspace_target_id INTEGER NOT NULL,
+                    workspace_target_hash VARCHAR(64) NOT NULL,
+                    base_state_id INTEGER NOT NULL,
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    apply_policy_id VARCHAR(64) NOT NULL,
+                    apply_policy_version INTEGER NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    status_reason VARCHAR(64),
+                    canonical_command_payload JSON NOT NULL,
+                    canonical_command_hash VARCHAR(64) NOT NULL,
+                    precondition_verification_hash VARCHAR(64),
+                    apply_attempt_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_task_apply_attempt_task_number
+                        UNIQUE (execution_task_id, attempt_number),
+                    CONSTRAINT ck_execution_task_apply_attempt_versions_positive
+                        CHECK (attempt_generation > 0 AND attempt_number > 0 AND apply_policy_version > 0),
+                    CONSTRAINT ck_execution_task_apply_attempt_status
+                        CHECK (status IN ('created', 'precondition_verified', 'blocked', 'cancelled')),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(authorization_id) REFERENCES execution_task_apply_authorizations (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(approval_id) REFERENCES execution_task_apply_approvals (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(workspace_target_id) REFERENCES execution_workspace_targets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(base_state_id) REFERENCES execution_workspace_base_states (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_apply_precondition_verifications (
+                    id INTEGER PRIMARY KEY,
+                    apply_attempt_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    outcome VARCHAR(48) NOT NULL,
+                    reason VARCHAR(64) NOT NULL,
+                    authorized_base_state_id INTEGER NOT NULL,
+                    authorized_base_state_hash VARCHAR(64) NOT NULL,
+                    observed_target_identity VARCHAR(255),
+                    observed_state_hash VARCHAR(64),
+                    canonical_verification_payload JSON NOT NULL,
+                    canonical_verification_hash VARCHAR(64) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_task_apply_precondition_verification_sequence
+                        UNIQUE (apply_attempt_id, sequence),
+                    CONSTRAINT ck_execution_task_apply_precondition_verification_sequence
+                        CHECK (sequence > 0),
+                    CONSTRAINT ck_execution_task_apply_precondition_verification_outcome
+                        CHECK (outcome IN ('precondition_verified', 'blocked_workspace_changed',
+                            'blocked_target_identity_changed', 'blocked_repository_head_changed',
+                            'blocked_path_state_changed', 'blocked_dirty_state',
+                            'blocked_approval_missing', 'blocked_integrity_failure')),
+                    FOREIGN KEY(apply_attempt_id) REFERENCES execution_task_apply_attempts (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_workspace_targets_project_status ON execution_workspace_targets (project_id, target_status)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_workspace_targets_realpath ON execution_workspace_targets (normalized_realpath)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_workspace_base_states_target_created ON execution_workspace_base_states (workspace_target_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_workspace_base_states_changeset_created ON execution_workspace_base_states (change_set_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_workspace_path_observations_base ON execution_workspace_path_observations (base_state_id, observation_index)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_approvals_task_decision ON execution_task_apply_approvals (execution_task_id, decision)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_attempts_task_status ON execution_task_apply_attempts (execution_task_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_attempts_base_state ON execution_task_apply_attempts (base_state_id)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_precondition_verifications_attempt ON execution_task_apply_precondition_verifications (apply_attempt_id, sequence)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -4147,6 +4510,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "authorization authorities"
         ),
         upgrade=_migration_046_execution_task_changeset_apply_authorization,
+    ),
+    Migration(
+        version="047_workspace_base_state_apply_attempt_boundary",
+        description=(
+            "Add immutable workspace target/base-state, approval, apply-attempt, "
+            "and precondition-verification authorities"
+        ),
+        upgrade=_migration_047_workspace_base_state_apply_attempt_boundary,
     ),
 )
 

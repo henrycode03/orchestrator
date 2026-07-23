@@ -361,16 +361,25 @@ def verify_apply_authorization_integrity(
         != row.authorization_status
     ):
         issues.append("apply_authorization_status_tampered")
-    duplicate = (
-        db.query(ExecutionTaskApplyAuthorization)
-        .filter(
-            ExecutionTaskApplyAuthorization.change_set_id == row.change_set_id,
-            ExecutionTaskApplyAuthorization.apply_policy_id == row.apply_policy_id,
-            ExecutionTaskApplyAuthorization.apply_policy_version
-            == row.apply_policy_version,
-        )
-        .count()
+    duplicate_query = db.query(ExecutionTaskApplyAuthorization).filter(
+        ExecutionTaskApplyAuthorization.change_set_id == row.change_set_id,
+        ExecutionTaskApplyAuthorization.apply_policy_id == row.apply_policy_id,
+        ExecutionTaskApplyAuthorization.apply_policy_version
+        == row.apply_policy_version,
     )
+    if row.apply_policy_version == APPLY_POLICY_VERSION:
+        duplicate_query = duplicate_query.filter(
+            ExecutionTaskApplyAuthorization.base_state_id.is_(None)
+        )
+    else:
+        duplicate_query = duplicate_query.filter(
+            ExecutionTaskApplyAuthorization.base_state_id == row.base_state_id
+        )
+        if row.authorization_status == "authorized":
+            duplicate_query = duplicate_query.filter(
+                ExecutionTaskApplyAuthorization.authorization_status == "authorized"
+            )
+    duplicate = duplicate_query.count()
     if duplicate != 1:
         issues.append("apply_authorization_duplicate_active")
     return ApplyAuthorizationIntegrityResult(
@@ -379,6 +388,33 @@ def verify_apply_authorization_integrity(
         not issues,
         tuple(sorted(set(issues))),
     )
+
+
+# Phase 29D-2 is kept in a separate module so the persisted D-1 policy and
+# historical authorization rows remain untouched.  These lazy wrappers keep
+# the established apply_authorization import surface available to callers.
+def evaluate_apply_policy_v2(*args: Any, **kwargs: Any):
+    from app.services.execution.controlled_apply import (
+        evaluate_apply_policy_v2 as _evaluate,
+    )
+
+    return _evaluate(*args, **kwargs)
+
+
+def controlled_apply_policy_v2(*args: Any, **kwargs: Any):
+    from app.services.execution.controlled_apply import (
+        controlled_apply_policy_v2 as _policy,
+    )
+
+    return _policy(*args, **kwargs)
+
+
+def controlled_apply_policy(*args: Any, **kwargs: Any):
+    from app.services.execution.controlled_apply import (
+        controlled_apply_policy as _policy,
+    )
+
+    return _policy(*args, **kwargs)
 
 
 __all__ = [
@@ -394,6 +430,9 @@ __all__ = [
     "ApplyAuthorizationService",
     "ApplyPolicyDecision",
     "AuthorizeApplyCommand",
+    "controlled_apply_policy",
+    "controlled_apply_policy_v2",
+    "evaluate_apply_policy_v2",
     "evaluate_apply_policy",
     "verify_apply_authorization_integrity",
 ]

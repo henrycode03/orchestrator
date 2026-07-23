@@ -43,7 +43,16 @@ MAX_JSON_PROJECTION_BYTES = 65_536
 MAX_JSON_PROJECTION_DEPTH = 8
 MAX_JSON_PROJECTION_ITEMS = 128
 MAX_JSON_PROJECTION_STRING_LENGTH = 4_096
-MEDIA_TYPES = frozenset({"application/json", "text/plain", "application/octet-stream"})
+CHANGESET_MEDIA_TYPE = "application/vnd.orchestrator.changeset+json"
+MEDIA_TYPES = frozenset(
+    {
+        "application/json",
+        "text/plain",
+        "application/octet-stream",
+        CHANGESET_MEDIA_TYPE,
+    }
+)
+JSON_MEDIA_TYPES = frozenset({"application/json", CHANGESET_MEDIA_TYPE})
 DEFAULT_MEDIA_TYPE = "application/octet-stream"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _KEY_RE = re.compile(r"^sha256/[0-9a-f]{2}/([0-9a-f]{64})$")
@@ -180,7 +189,7 @@ def _projection_value(value: Any, *, depth: int = 0) -> Any:
 
 
 def _json_projection(content: bytes, media_type: str) -> tuple[Any | None, str | None]:
-    if media_type != "application/json":
+    if media_type not in JSON_MEDIA_TYPES:
         return None, None
     try:
         text = content.decode("utf-8", errors="strict")
@@ -919,6 +928,7 @@ __all__ = [
     "IngestCandidateContentCommand",
     "LocalContentAddressedStore",
     "MEDIA_TYPES",
+    "CHANGESET_MEDIA_TYPE",
     "StoredCandidateContent",
     "normalize_media_type",
     "verify_candidate_content_integrity",
