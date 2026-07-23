@@ -2677,6 +2677,277 @@ class ExecutionEvidence(Base):
     execution_task_attempt = relationship("ExecutionTaskAttempt")
 
 
+class ExecutionTaskChangeSet(Base):
+    """Immutable proposed mutation intent derived from one accepted candidate.
+
+    A row never mutates.  It binds exactly one structured, byte-backed
+    ``ExecutionTaskCandidateContent`` row (the JSON ChangeSet payload itself)
+    to exactly one accepted ``ExecutionTaskAcceptanceDecision``.  It grants no
+    permission to mutate anything; only a separate
+    ``ExecutionTaskApplyAuthorization`` may later authorize an apply attempt.
+    """
+
+    __tablename__ = "execution_task_change_sets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    candidate_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_candidate_content_id = Column(
+        Integer,
+        ForeignKey("execution_task_candidate_contents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_candidate_content_sha256 = Column(String(64), nullable=False)
+    acceptance_decision_id = Column(
+        Integer,
+        ForeignKey("execution_task_acceptance_decisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    acceptance_decision_hash = Column(String(64), nullable=False)
+    changeset_format = Column(String(64), nullable=False)
+    media_type = Column(String(96), nullable=False)
+    target_project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_workspace_identity = Column(String(255), nullable=True)
+    base_state_payload = Column(JSON, nullable=False)
+    base_state_hash = Column(String(64), nullable=False)
+    operation_count = Column(Integer, nullable=False)
+    canonical_changeset_payload = Column(JSON, nullable=False)
+    changeset_sha256 = Column(String(64), nullable=False, index=True)
+    canonical_metadata_payload = Column(JSON, nullable=False)
+    canonical_metadata_hash = Column(String(64), nullable=False)
+    ingestion_idempotency_key = Column(String(128), nullable=False, unique=True)
+    canonical_ingestion_command_payload = Column(JSON, nullable=False)
+    canonical_ingestion_command_hash = Column(String(64), nullable=False)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_generation > 0",
+            name="ck_execution_task_change_set_generation_positive",
+        ),
+        CheckConstraint(
+            "operation_count > 0",
+            name="ck_execution_task_change_set_operation_count_positive",
+        ),
+        CheckConstraint(
+            "changeset_format = 'orchestrator-changeset/1'",
+            name="ck_execution_task_change_set_format_v1",
+        ),
+        Index(
+            "ix_execution_task_change_sets_task_created",
+            "execution_task_id",
+            "created_at",
+        ),
+        Index(
+            "ix_execution_task_change_sets_plan_created",
+            "execution_plan_id",
+            "created_at",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan")
+    execution_task = relationship("ExecutionTask")
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    candidate_outcome = relationship("ExecutionTaskAttemptOutcome")
+    source_candidate_content = relationship("ExecutionTaskCandidateContent")
+    acceptance_decision = relationship("ExecutionTaskAcceptanceDecision")
+    target_project = relationship("Project")
+    operations = relationship(
+        "ExecutionTaskChangeSetOperation",
+        back_populates="change_set",
+        cascade="all, delete-orphan",
+        order_by="ExecutionTaskChangeSetOperation.operation_index",
+    )
+
+
+class ExecutionTaskChangeSetOperation(Base):
+    """One immutable, ordered, bounded operation within one ChangeSet.
+
+    Content-bearing operations reference immutable byte-backed authority only
+    (``candidate-content://<id>`` or ``execution-evidence://<id>``); raw bytes
+    are never duplicated into this row.
+    """
+
+    __tablename__ = "execution_task_change_set_operations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    operation_index = Column(Integer, nullable=False)
+    operation = Column(String(32), nullable=False)
+    canonical_path = Column(String(1024), nullable=False)
+    expected_previous_sha256 = Column(String(64), nullable=True)
+    content_reference = Column(String(160), nullable=True)
+    content_reference_scheme = Column(String(32), nullable=True)
+    content_reference_id = Column(Integer, nullable=True)
+    content_sha256 = Column(String(64), nullable=True)
+    content_media_type = Column(String(96), nullable=True)
+    content_byte_length = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "change_set_id",
+            "operation_index",
+            name="uq_execution_task_change_set_operation_index",
+        ),
+        UniqueConstraint(
+            "change_set_id",
+            "canonical_path",
+            name="uq_execution_task_change_set_operation_path",
+        ),
+        CheckConstraint(
+            "operation_index >= 0",
+            name="ck_execution_task_change_set_operation_index_nonnegative",
+        ),
+        CheckConstraint(
+            "operation IN ('create_file', 'replace_file', 'delete_file')",
+            name="ck_execution_task_change_set_operation_type",
+        ),
+    )
+
+    change_set = relationship("ExecutionTaskChangeSet", back_populates="operations")
+
+
+class ExecutionTaskApplyAuthorization(Base):
+    """Canonical permission decision to attempt applying one exact ChangeSet.
+
+    Acceptance is a prerequisite, never authorization itself.  Only one
+    active authorization may exist per (ChangeSet, policy id, policy
+    version); a replayed request with the same idempotency key returns the
+    same row instead of mutating it.
+    """
+
+    __tablename__ = "execution_task_apply_authorizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    change_set_hash = Column(String(64), nullable=False)
+    acceptance_decision_id = Column(
+        Integer,
+        ForeignKey("execution_task_acceptance_decisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    acceptance_decision_hash = Column(String(64), nullable=False)
+    target_project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_workspace_identity = Column(String(255), nullable=True)
+    base_state_hash = Column(String(64), nullable=False)
+    apply_policy_id = Column(String(64), nullable=False)
+    apply_policy_version = Column(Integer, nullable=False)
+    authorization_status = Column(String(32), nullable=False, index=True)
+    decision_reason = Column(String(64), nullable=False)
+    bounded_detail = Column(String(1024), nullable=True)
+    canonical_input_payload = Column(JSON, nullable=False)
+    canonical_input_hash = Column(String(64), nullable=False)
+    canonical_decision_payload = Column(JSON, nullable=False)
+    canonical_decision_hash = Column(String(64), nullable=False, index=True)
+    authorization_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_authorization_command_id = Column(
+        String(128), nullable=False, unique=True
+    )
+    decision_actor_type = Column(String(64), nullable=False)
+    decision_actor_id = Column(String(255), nullable=False)
+    decided_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "change_set_id",
+            "apply_policy_id",
+            "apply_policy_version",
+            name="uq_execution_task_apply_authorization_changeset_policy",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0 AND apply_policy_version > 0",
+            name="ck_execution_task_apply_authorization_generation_positive",
+        ),
+        CheckConstraint(
+            "authorization_status IN ('authorized', 'blocked', 'denied')",
+            name="ck_execution_task_apply_authorization_status",
+        ),
+        Index(
+            "ix_execution_task_apply_authorizations_task_status",
+            "execution_task_id",
+            "authorization_status",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan")
+    execution_task = relationship("ExecutionTask")
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    change_set = relationship("ExecutionTaskChangeSet")
+    acceptance_decision = relationship("ExecutionTaskAcceptanceDecision")
+    target_project = relationship("Project")
+
+
 class ExecutionTaskTransition(Base):
     """Immutable lifecycle transition event for one Execution Task."""
 

@@ -3444,6 +3444,181 @@ def _migration_045_execution_evidence_validation_boundary(engine: Engine) -> Non
         )
 
 
+def _migration_046_execution_task_changeset_apply_authorization(engine: Engine) -> None:
+    """Add empty Phase 29D-1 ChangeSet and Controlled Apply authorities.
+
+    This migration creates only tables and indexes.  It never infers a
+    ChangeSet from historical candidate content, fabricates an authorization,
+    mutates a workspace/repository, or touches any Phase 29 lifecycle field.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_change_sets (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    candidate_outcome_id INTEGER NOT NULL,
+                    source_candidate_content_id INTEGER NOT NULL,
+                    source_candidate_content_sha256 VARCHAR(64) NOT NULL,
+                    acceptance_decision_id INTEGER NOT NULL,
+                    acceptance_decision_hash VARCHAR(64) NOT NULL,
+                    changeset_format VARCHAR(64) NOT NULL,
+                    media_type VARCHAR(96) NOT NULL,
+                    target_project_id INTEGER NOT NULL,
+                    target_workspace_identity VARCHAR(255),
+                    base_state_payload JSON NOT NULL,
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    operation_count INTEGER NOT NULL,
+                    canonical_changeset_payload JSON NOT NULL,
+                    changeset_sha256 VARCHAR(64) NOT NULL,
+                    canonical_metadata_payload JSON NOT NULL,
+                    canonical_metadata_hash VARCHAR(64) NOT NULL,
+                    ingestion_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_ingestion_command_payload JSON NOT NULL,
+                    canonical_ingestion_command_hash VARCHAR(64) NOT NULL,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT ck_execution_task_change_set_generation_positive
+                        CHECK (attempt_generation > 0),
+                    CONSTRAINT ck_execution_task_change_set_operation_count_positive
+                        CHECK (operation_count > 0),
+                    CONSTRAINT ck_execution_task_change_set_format_v1
+                        CHECK (changeset_format = 'orchestrator-changeset/1'),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(source_candidate_content_id)
+                        REFERENCES execution_task_candidate_contents (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(acceptance_decision_id)
+                        REFERENCES execution_task_acceptance_decisions (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_project_id)
+                        REFERENCES projects (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_change_set_operations (
+                    id INTEGER PRIMARY KEY,
+                    change_set_id INTEGER NOT NULL,
+                    operation_index INTEGER NOT NULL,
+                    operation VARCHAR(32) NOT NULL,
+                    canonical_path VARCHAR(1024) NOT NULL,
+                    expected_previous_sha256 VARCHAR(64),
+                    content_reference VARCHAR(160),
+                    content_reference_scheme VARCHAR(32),
+                    content_reference_id INTEGER,
+                    content_sha256 VARCHAR(64),
+                    content_media_type VARCHAR(96),
+                    content_byte_length INTEGER,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_task_change_set_operation_index
+                        UNIQUE (change_set_id, operation_index),
+                    CONSTRAINT uq_execution_task_change_set_operation_path
+                        UNIQUE (change_set_id, canonical_path),
+                    CONSTRAINT ck_execution_task_change_set_operation_index_nonnegative
+                        CHECK (operation_index >= 0),
+                    CONSTRAINT ck_execution_task_change_set_operation_type
+                        CHECK (operation IN
+                            ('create_file', 'replace_file', 'delete_file')),
+                    FOREIGN KEY(change_set_id)
+                        REFERENCES execution_task_change_sets (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_apply_authorizations (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    change_set_hash VARCHAR(64) NOT NULL,
+                    acceptance_decision_id INTEGER NOT NULL,
+                    acceptance_decision_hash VARCHAR(64) NOT NULL,
+                    target_project_id INTEGER NOT NULL,
+                    target_workspace_identity VARCHAR(255),
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    apply_policy_id VARCHAR(64) NOT NULL,
+                    apply_policy_version INTEGER NOT NULL,
+                    authorization_status VARCHAR(32) NOT NULL,
+                    decision_reason VARCHAR(64) NOT NULL,
+                    bounded_detail VARCHAR(1024),
+                    canonical_input_payload JSON NOT NULL,
+                    canonical_input_hash VARCHAR(64) NOT NULL,
+                    canonical_decision_payload JSON NOT NULL,
+                    canonical_decision_hash VARCHAR(64) NOT NULL,
+                    authorization_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_authorization_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    decision_actor_type VARCHAR(64) NOT NULL,
+                    decision_actor_id VARCHAR(255) NOT NULL,
+                    decided_at DATETIME NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_task_apply_authorization_changeset_policy
+                        UNIQUE (change_set_id, apply_policy_id, apply_policy_version),
+                    CONSTRAINT ck_execution_task_apply_authorization_generation_positive
+                        CHECK (attempt_generation > 0 AND apply_policy_version > 0),
+                    CONSTRAINT ck_execution_task_apply_authorization_status
+                        CHECK (authorization_status IN
+                            ('authorized', 'blocked', 'denied')),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(change_set_id)
+                        REFERENCES execution_task_change_sets (id) ON DELETE CASCADE,
+                    FOREIGN KEY(acceptance_decision_id)
+                        REFERENCES execution_task_acceptance_decisions (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_project_id)
+                        REFERENCES projects (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_change_sets_task_created "
+            "ON execution_task_change_sets (execution_task_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_change_sets_plan_created "
+            "ON execution_task_change_sets (execution_plan_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_change_sets_changeset_sha256 "
+            "ON execution_task_change_sets (changeset_sha256)",
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_execution_task_change_set_operations_change_set "
+            "ON execution_task_change_set_operations (change_set_id)",
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_execution_task_apply_authorizations_task_status "
+            "ON execution_task_apply_authorizations "
+            "(execution_task_id, authorization_status)",
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_execution_task_apply_authorizations_change_set "
+            "ON execution_task_apply_authorizations (change_set_id)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3964,6 +4139,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="045_execution_evidence_validation_boundary",
         description=("Add Phase 29C-12 execution evidence validation boundary index"),
         upgrade=_migration_045_execution_evidence_validation_boundary,
+    ),
+    Migration(
+        version="046_execution_task_changeset_apply_authorization",
+        description=(
+            "Add Phase 29D-1 immutable ChangeSet and Controlled Apply "
+            "authorization authorities"
+        ),
+        upgrade=_migration_046_execution_task_changeset_apply_authorization,
     ),
 )
 
