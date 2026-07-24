@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.orm import sessionmaker
 
-from app.db_migrations import run_schema_migrations
+from app.db_migrations import (
+    MIGRATIONS,
+    _migration_036_execution_task_runtime_ownership,
+    _migration_037_execution_task_runtime_evidence,
+    run_schema_migrations,
+)
 
 
 def _legacy_engine(tmp_path: Path):
@@ -172,3 +178,139 @@ def test_schema_migrations_add_template_id_when_runtime_migration_already_applie
 
     task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
     assert "template_id" in task_columns
+
+
+def test_attempt_rebuild_preserves_child_foreign_keys_with_sqlite_enforcement(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'attempt-rebuild.db'}")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("CREATE TABLE execution_plans (id INTEGER PRIMARY KEY)")
+            )
+            connection.execute(
+                text("CREATE TABLE execution_tasks (id INTEGER PRIMARY KEY)")
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_task_dispatch_intents (
+                        id INTEGER PRIMARY KEY,
+                        execution_task_id INTEGER,
+                        dispatch_status VARCHAR(32),
+                        submission_lease_expires_at DATETIME,
+                        dispatch_command_id INTEGER
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_task_scheduler_claims (
+                        consumed_dispatch_intent_id INTEGER
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_task_attempts (
+                        id INTEGER PRIMARY KEY,
+                        execution_plan_id INTEGER NOT NULL,
+                        execution_task_id INTEGER NOT NULL,
+                        dispatch_intent_id INTEGER NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        attempt_identity VARCHAR(128) NOT NULL,
+                        broker_task_id VARCHAR(255) NOT NULL,
+                        attempt_status VARCHAR(24) NOT NULL DEFAULT 'created',
+                        created_at DATETIME NOT NULL,
+                        submitted_at DATETIME,
+                        cancelled_at DATETIME,
+                        updated_at DATETIME,
+                        CHECK (attempt_status IN ('created', 'submitted', 'cancelled'))
+                    )
+                    """
+                )
+            )
+
+        _migration_036_execution_task_runtime_ownership(engine)
+        _migration_037_execution_task_runtime_evidence(engine)
+
+        referred_tables = {
+            foreign_key["referred_table"]
+            for foreign_key in inspect(engine).get_foreign_keys(
+                "execution_task_runtime_leases"
+            )
+        }
+        assert "execution_task_attempts" in referred_tables
+        assert "execution_task_attempts_phase29c5_old" not in referred_tables
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+            assert connection.exec_driver_sql("PRAGMA legacy_alter_table").scalar() == 0
+    finally:
+        engine.dispose()
+
+
+def test_canonical_init_db_bootstraps_and_replays_empty_sqlite(
+    tmp_path,
+    monkeypatch,
+):
+    from app import database
+    from app.models import Base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty.sqlite'}")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+    try:
+        database.init_db()
+        with engine.connect() as connection:
+            first_versions = tuple(
+                row[0]
+                for row in connection.execute(
+                    text("SELECT version FROM schema_migrations ORDER BY version")
+                )
+            )
+            first_tables = set(inspect(engine).get_table_names())
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+        assert first_versions == tuple(migration.version for migration in MIGRATIONS)
+        assert {
+            "projects",
+            "tasks",
+            "sessions",
+            "execution_task_attempts",
+            "execution_task_post_apply_validations",
+        } <= first_tables
+
+        database.init_db()
+        with engine.connect() as connection:
+            second_versions = tuple(
+                row[0]
+                for row in connection.execute(
+                    text("SELECT version FROM schema_migrations ORDER BY version")
+                )
+            )
+            second_tables = set(inspect(engine).get_table_names())
+
+        assert second_versions == first_versions
+        assert second_tables == first_tables
+        db = database.get_db_session()
+        try:
+            assert db.execute(text("SELECT COUNT(*) FROM projects")).scalar_one() == 0
+        finally:
+            db.close()
+    finally:
+        engine.dispose()

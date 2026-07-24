@@ -6,6 +6,7 @@ versioned migrations that are tracked in the database.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable
@@ -90,6 +91,50 @@ def _record_migration(engine: Engine, migration: Migration) -> None:
                 "applied_at": datetime.now(timezone.utc).isoformat(),
             },
         )
+
+
+@contextmanager
+def _migration_transaction(engine: Engine, *, table_rebuild: bool = False):
+    """Run one migration transaction with bounded SQLite rebuild settings.
+
+    SQLite rewrites child foreign-key declarations to a temporary table name
+    when a referenced table is renamed.  During a table rebuild that leaves
+    child authorities pointing at the temporary name after the old table is
+    dropped.  Keep foreign-key enforcement enabled for normal application and
+    migration work, but use SQLite's legacy rename behavior only for the
+    bounded rebuild transaction and restore both connection settings before
+    releasing the connection.
+    """
+
+    if not table_rebuild or engine.dialect.name != "sqlite":
+        with engine.begin() as connection:
+            yield connection
+        return
+
+    with engine.connect() as connection:
+        foreign_keys = int(
+            connection.exec_driver_sql("PRAGMA foreign_keys").scalar() or 0
+        )
+        legacy_alter_table = int(
+            connection.exec_driver_sql("PRAGMA legacy_alter_table").scalar() or 0
+        )
+        connection.commit()
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.exec_driver_sql("PRAGMA legacy_alter_table=ON")
+        connection.commit()
+        try:
+            with connection.begin():
+                yield connection
+        finally:
+            if connection.in_transaction():
+                connection.rollback()
+            connection.exec_driver_sql(
+                f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}"
+            )
+            connection.exec_driver_sql(
+                "PRAGMA legacy_alter_table=" f"{'ON' if legacy_alter_table else 'OFF'}"
+            )
+            connection.commit()
 
 
 def _migration_001_runtime_columns(engine: Engine) -> None:
@@ -1858,7 +1903,7 @@ def _migration_036_execution_task_runtime_ownership(engine: Engine) -> None:
     """Add Phase 29C-5 fenced runtime ownership and running evidence."""
 
     table_names = _table_names(engine)
-    with engine.begin() as connection:
+    with _migration_transaction(engine, table_rebuild=True) as connection:
         if "execution_task_transitions" in table_names:
             for column_name, ddl in (
                 (
@@ -2046,7 +2091,7 @@ def _migration_037_execution_task_runtime_evidence(engine: Engine) -> None:
     """Add Phase 29C-6B start, progress, and canonical outcome evidence."""
 
     table_names = _table_names(engine)
-    with engine.begin() as connection:
+    with _migration_transaction(engine, table_rebuild=True) as connection:
         if "execution_task_attempts" in table_names:
             # The Phase 29C-5 table has a status CHECK that predates the
             # attempt-local candidate_completed state.  Rebuild only this
@@ -2947,7 +2992,7 @@ def _migration_041_execution_task_recovery_boundary(engine: Engine) -> None:
     """
 
     table_names = _table_names(engine)
-    with engine.begin() as connection:
+    with _migration_transaction(engine, table_rebuild=True) as connection:
         if "execution_plans" in table_names:
             for column_name, ddl in (
                 (
