@@ -4048,6 +4048,139 @@ def _migration_048_controlled_apply_result_authority(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_049_pre_apply_snapshot_authority(engine: Engine) -> None:
+    """Add immutable Phase 29D-3A pre-apply bytes and scope authorities."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_pre_apply_snapshots (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    apply_attempt_id INTEGER NOT NULL UNIQUE,
+                    apply_attempt_hash VARCHAR(64) NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    change_set_hash VARCHAR(64) NOT NULL,
+                    authorization_id INTEGER NOT NULL,
+                    authorization_hash VARCHAR(64) NOT NULL,
+                    approval_id INTEGER NOT NULL,
+                    approval_hash VARCHAR(64) NOT NULL,
+                    workspace_target_id INTEGER NOT NULL,
+                    workspace_target_hash VARCHAR(64) NOT NULL,
+                    base_state_id INTEGER NOT NULL,
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    final_precondition_verification_hash VARCHAR(64) NOT NULL,
+                    capture_command_hash VARCHAR(64) NOT NULL,
+                    status VARCHAR(16) NOT NULL,
+                    failure_reason VARCHAR(64),
+                    failure_detail VARCHAR(1024),
+                    expected_entry_count INTEGER NOT NULL,
+                    captured_entry_count INTEGER NOT NULL,
+                    canonical_payload JSON NOT NULL,
+                    canonical_sha256 VARCHAR(64) NOT NULL,
+                    snapshot_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_bounds
+                        CHECK (attempt_generation > 0 AND expected_entry_count > 0 AND
+                            captured_entry_count >= 0 AND captured_entry_count <= expected_entry_count),
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_status
+                        CHECK (status IN ('captured', 'failed')),
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_failure_shape
+                        CHECK ((status = 'captured' AND failure_reason IS NULL AND
+                            captured_entry_count = expected_entry_count) OR
+                            (status = 'failed' AND failure_reason IS NOT NULL)),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(apply_attempt_id) REFERENCES execution_task_apply_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(authorization_id) REFERENCES execution_task_apply_authorizations (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(approval_id) REFERENCES execution_task_apply_approvals (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(workspace_target_id) REFERENCES execution_workspace_targets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(base_state_id) REFERENCES execution_workspace_base_states (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_pre_apply_snapshot_entries (
+                    id INTEGER PRIMARY KEY,
+                    snapshot_id INTEGER NOT NULL,
+                    entry_index INTEGER NOT NULL,
+                    operation VARCHAR(32) NOT NULL,
+                    canonical_path VARCHAR(1024) NOT NULL,
+                    previous_exists BOOLEAN NOT NULL,
+                    previous_entry_type VARCHAR(32) NOT NULL,
+                    previous_sha256 VARCHAR(64),
+                    previous_byte_length INTEGER,
+                    previous_content_reference VARCHAR(160),
+                    previous_storage_key VARCHAR(160),
+                    expected_post_apply_exists BOOLEAN NOT NULL,
+                    expected_post_apply_sha256 VARCHAR(64),
+                    canonical_entry_payload JSON NOT NULL,
+                    canonical_entry_hash VARCHAR(64) NOT NULL,
+                    CONSTRAINT uq_execution_task_pre_apply_snapshot_entry_index
+                        UNIQUE (snapshot_id, entry_index),
+                    CONSTRAINT uq_execution_task_pre_apply_snapshot_entry_path
+                        UNIQUE (snapshot_id, canonical_path),
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_entry_index
+                        CHECK (entry_index >= 0),
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_entry_operation
+                        CHECK (operation IN ('create_file', 'replace_file', 'delete_file')),
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_entry_previous_shape
+                        CHECK ((previous_exists = 0 AND previous_entry_type = 'absent' AND
+                            previous_sha256 IS NULL AND previous_byte_length IS NULL AND
+                            previous_content_reference IS NULL AND previous_storage_key IS NULL) OR
+                            (previous_exists = 1 AND previous_entry_type = 'regular_file' AND
+                            previous_sha256 IS NOT NULL AND previous_byte_length IS NOT NULL AND
+                            previous_content_reference IS NOT NULL AND previous_storage_key IS NOT NULL)),
+                    CONSTRAINT ck_execution_task_pre_apply_snapshot_entry_post_shape
+                        CHECK ((expected_post_apply_exists = 1 AND expected_post_apply_sha256 IS NOT NULL) OR
+                            (expected_post_apply_exists = 0 AND expected_post_apply_sha256 IS NULL)),
+                    FOREIGN KEY(snapshot_id) REFERENCES execution_task_pre_apply_snapshots (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        if not _has_column(
+            engine, "execution_task_apply_results", "pre_apply_snapshot_id"
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_task_apply_results ADD COLUMN "
+                    "pre_apply_snapshot_id INTEGER REFERENCES execution_task_pre_apply_snapshots (id) ON DELETE RESTRICT"
+                )
+            )
+        if not _has_column(
+            engine, "execution_task_apply_results", "pre_apply_snapshot_hash"
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_task_apply_results ADD COLUMN "
+                    "pre_apply_snapshot_hash VARCHAR(64)"
+                )
+            )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_pre_apply_snapshots_task_status "
+            "ON execution_task_pre_apply_snapshots (execution_task_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_pre_apply_snapshots_hash "
+            "ON execution_task_pre_apply_snapshots (canonical_sha256)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_pre_apply_snapshot_entries_snapshot "
+            "ON execution_task_pre_apply_snapshot_entries (snapshot_id, entry_index)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_pre_apply_snapshot_entries_storage "
+            "ON execution_task_pre_apply_snapshot_entries (previous_storage_key)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_task_apply_results_snapshot "
+            "ON execution_task_apply_results (pre_apply_snapshot_id)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -4589,6 +4722,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="048_controlled_apply_result_authority",
         description="Add immutable Phase 29D-3 Controlled Apply Result authority",
         upgrade=_migration_048_controlled_apply_result_authority,
+    ),
+    Migration(
+        version="049_pre_apply_snapshot_authority",
+        description="Add immutable Phase 29D-3A pre-apply snapshot authority",
+        upgrade=_migration_049_pre_apply_snapshot_authority,
     ),
 )
 

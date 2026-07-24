@@ -30,6 +30,7 @@ from app.models import (
     ExecutionTaskAttempt,
     ExecutionTaskAttemptOutcome,
     ExecutionTaskCandidateContent,
+    ExecutionTaskPreApplySnapshotEntry,
 )
 from app.services.planning.operator_review import canonical_json_hash
 
@@ -633,6 +634,13 @@ class CandidateContentIngestionService:
             .filter(ExecutionTaskCandidateContent.storage_key == storage_key)
             .count()
         )
+        linked += (
+            self.db.query(ExecutionTaskPreApplySnapshotEntry)
+            .filter(
+                ExecutionTaskPreApplySnapshotEntry.previous_storage_key == storage_key
+            )
+            .count()
+        )
         if linked == 0:
             self.store.delete_if_unreferenced(storage_key)
 
@@ -905,6 +913,12 @@ def cleanup_unlinked_candidate_content(
     from app.models import ExecutionEvidence
 
     linked |= {row.storage_key for row in db.query(ExecutionEvidence.storage_key).all()}
+    linked |= {
+        row.previous_storage_key
+        for row in db.query(ExecutionTaskPreApplySnapshotEntry.previous_storage_key)
+        .filter(ExecutionTaskPreApplySnapshotEntry.previous_storage_key.is_not(None))
+        .all()
+    }
     removed: list[str] = []
     for key in reader.list_storage_keys():
         if key not in linked:

@@ -928,6 +928,11 @@ class ExecutionTask(Base):
         "ExecutionTaskApplyAttempt",
         foreign_keys="ExecutionTaskApplyAttempt.execution_task_id",
     )
+    pre_apply_snapshots = relationship(
+        "ExecutionTaskPreApplySnapshot",
+        foreign_keys="ExecutionTaskPreApplySnapshot.execution_task_id",
+        back_populates="execution_task",
+    )
 
 
 class ExecutionValidationSchema(Base):
@@ -3446,6 +3451,14 @@ class ExecutionTaskApplyResult(Base):
         index=True,
     )
     base_state_hash = Column(String(64), nullable=False)
+    pre_apply_snapshot_id = Column(
+        Integer,
+        ForeignKey("execution_task_pre_apply_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    pre_apply_snapshot_hash = Column(String(64), nullable=True)
     status = Column(String(16), nullable=False, index=True)
     failure_reason = Column(String(64), nullable=True)
     failure_detail = Column(String(1024), nullable=True)
@@ -3486,6 +3499,211 @@ class ExecutionTaskApplyResult(Base):
     approval = relationship("ExecutionTaskApplyApproval")
     workspace_target = relationship("ExecutionWorkspaceTarget")
     base_state = relationship("ExecutionWorkspaceBaseState")
+    pre_apply_snapshot = relationship("ExecutionTaskPreApplySnapshot")
+
+
+class ExecutionTaskPreApplySnapshot(Base):
+    """Immutable pre-mutation recovery material for one apply attempt."""
+
+    __tablename__ = "execution_task_pre_apply_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    apply_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    apply_attempt_hash = Column(String(64), nullable=False)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    change_set_hash = Column(String(64), nullable=False)
+    authorization_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_authorizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    authorization_hash = Column(String(64), nullable=False)
+    approval_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_approvals.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    approval_hash = Column(String(64), nullable=False)
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    workspace_target_hash = Column(String(64), nullable=False)
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    base_state_hash = Column(String(64), nullable=False)
+    final_precondition_verification_hash = Column(String(64), nullable=False)
+    capture_command_hash = Column(String(64), nullable=False, index=True)
+    status = Column(String(16), nullable=False, index=True)
+    failure_reason = Column(String(64), nullable=True)
+    failure_detail = Column(String(1024), nullable=True)
+    expected_entry_count = Column(Integer, nullable=False)
+    captured_entry_count = Column(Integer, nullable=False)
+    canonical_payload = Column(JSON, nullable=False)
+    canonical_sha256 = Column(String(64), nullable=False, index=True)
+    snapshot_idempotency_key = Column(String(128), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_generation > 0 AND expected_entry_count > 0 "
+            "AND captured_entry_count >= 0 AND captured_entry_count <= expected_entry_count",
+            name="ck_execution_task_pre_apply_snapshot_bounds",
+        ),
+        CheckConstraint(
+            "status IN ('captured', 'failed')",
+            name="ck_execution_task_pre_apply_snapshot_status",
+        ),
+        CheckConstraint(
+            "(status = 'captured' AND failure_reason IS NULL "
+            "AND captured_entry_count = expected_entry_count) OR "
+            "(status = 'failed' AND failure_reason IS NOT NULL)",
+            name="ck_execution_task_pre_apply_snapshot_failure_shape",
+        ),
+        Index(
+            "ix_execution_task_pre_apply_snapshots_task_status",
+            "execution_task_id",
+            "status",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan")
+    execution_task = relationship("ExecutionTask", back_populates="pre_apply_snapshots")
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    apply_attempt = relationship("ExecutionTaskApplyAttempt")
+    change_set = relationship("ExecutionTaskChangeSet")
+    authorization = relationship("ExecutionTaskApplyAuthorization")
+    approval = relationship("ExecutionTaskApplyApproval")
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    base_state = relationship("ExecutionWorkspaceBaseState")
+    entries = relationship(
+        "ExecutionTaskPreApplySnapshotEntry",
+        back_populates="snapshot",
+        cascade="all, delete-orphan",
+        order_by="ExecutionTaskPreApplySnapshotEntry.entry_index",
+    )
+
+
+class ExecutionTaskPreApplySnapshotEntry(Base):
+    """One ordered, immutable path observation in a pre-apply snapshot."""
+
+    __tablename__ = "execution_task_pre_apply_snapshot_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(
+        Integer,
+        ForeignKey("execution_task_pre_apply_snapshots.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    entry_index = Column(Integer, nullable=False)
+    operation = Column(String(32), nullable=False)
+    canonical_path = Column(String(1024), nullable=False)
+    previous_exists = Column(Boolean, nullable=False)
+    previous_entry_type = Column(String(32), nullable=False)
+    previous_sha256 = Column(String(64), nullable=True)
+    previous_byte_length = Column(Integer, nullable=True)
+    previous_content_reference = Column(String(160), nullable=True)
+    previous_storage_key = Column(String(160), nullable=True)
+    expected_post_apply_exists = Column(Boolean, nullable=False)
+    expected_post_apply_sha256 = Column(String(64), nullable=True)
+    canonical_entry_payload = Column(JSON, nullable=False)
+    canonical_entry_hash = Column(String(64), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "entry_index",
+            name="uq_execution_task_pre_apply_snapshot_entry_index",
+        ),
+        UniqueConstraint(
+            "snapshot_id",
+            "canonical_path",
+            name="uq_execution_task_pre_apply_snapshot_entry_path",
+        ),
+        CheckConstraint(
+            "entry_index >= 0",
+            name="ck_execution_task_pre_apply_snapshot_entry_index",
+        ),
+        CheckConstraint(
+            "operation IN ('create_file', 'replace_file', 'delete_file')",
+            name="ck_execution_task_pre_apply_snapshot_entry_operation",
+        ),
+        CheckConstraint(
+            "(previous_exists = 0 AND previous_entry_type = 'absent' "
+            "AND previous_sha256 IS NULL AND previous_byte_length IS NULL "
+            "AND previous_content_reference IS NULL AND previous_storage_key IS NULL) OR "
+            "(previous_exists = 1 AND previous_entry_type = 'regular_file' "
+            "AND previous_sha256 IS NOT NULL AND previous_byte_length IS NOT NULL "
+            "AND previous_content_reference IS NOT NULL AND previous_storage_key IS NOT NULL)",
+            name="ck_execution_task_pre_apply_snapshot_entry_previous_shape",
+        ),
+        CheckConstraint(
+            "(expected_post_apply_exists = 1 AND expected_post_apply_sha256 IS NOT NULL) OR "
+            "(expected_post_apply_exists = 0 AND expected_post_apply_sha256 IS NULL)",
+            name="ck_execution_task_pre_apply_snapshot_entry_post_shape",
+        ),
+    )
+
+    snapshot = relationship("ExecutionTaskPreApplySnapshot", back_populates="entries")
+
+
+@event.listens_for(ExecutionTaskPreApplySnapshot, "before_update")
+def _reject_pre_apply_snapshot_update(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskPreApplySnapshot is immutable")
+
+
+@event.listens_for(ExecutionTaskPreApplySnapshot, "before_delete")
+def _reject_pre_apply_snapshot_delete(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskPreApplySnapshot is immutable")
+
+
+@event.listens_for(ExecutionTaskPreApplySnapshotEntry, "before_update")
+def _reject_pre_apply_snapshot_entry_update(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskPreApplySnapshotEntry is immutable")
+
+
+@event.listens_for(ExecutionTaskPreApplySnapshotEntry, "before_delete")
+def _reject_pre_apply_snapshot_entry_delete(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskPreApplySnapshotEntry is immutable")
 
 
 @event.listens_for(ExecutionTaskApplyResult, "before_update")

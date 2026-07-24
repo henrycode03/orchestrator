@@ -1050,6 +1050,8 @@ def workspace_authority_retention_order() -> tuple[str, ...]:
         "execution_task_apply_approvals",
         "execution_task_apply_attempts",
         "execution_task_apply_precondition_verifications",
+        "execution_task_pre_apply_snapshots",
+        "execution_task_pre_apply_snapshot_entries",
         "execution_task_apply_results",
     )
 

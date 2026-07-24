@@ -255,7 +255,9 @@ def test_apply_create_replace_delete_is_atomic_and_replay_safe(
     assert (context["root"] / "src/replace.txt").read_bytes() == b"replaced\n"
     assert not (context["root"] / "src/remove.txt").exists()
     assert len(first.result.applied_operations) == 3
-    assert verify_apply_result_integrity(db_session, first.result.id).verified
+    assert verify_apply_result_integrity(
+        db_session, first.result.id, store=context["store"]
+    ).verified
 
     replay = service.execute(ExecuteApplyCommand(context["attempt"].id))
     assert replay.replayed is True
@@ -361,7 +363,9 @@ def test_io_failure_is_failed_and_compensated(db_session, tmp_path, monkeypatch)
     assert failed.status == "failed"
     assert failed.failure_reason == "io_failure"
     assert (context["root"] / "src/file.txt").read_bytes() == original
-    assert verify_apply_result_integrity(db_session, failed.id).verified
+    assert verify_apply_result_integrity(
+        db_session, failed.id, store=context["store"]
+    ).verified
 
 
 def test_concurrent_apply_attempt_times_out_and_creates_blocked_result(

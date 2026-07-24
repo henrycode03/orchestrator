@@ -30,6 +30,7 @@ from app.models import (
     ExecutionTaskCandidateContent,
     ExecutionTaskChangeSet,
     ExecutionTaskChangeSetOperation,
+    ExecutionTaskPreApplySnapshot,
     ExecutionWorkspaceBaseState,
     ExecutionWorkspaceTarget,
 )
@@ -48,6 +49,13 @@ from app.services.execution.execution_evidence import (
     ExecutionEvidenceError,
     parse_execution_evidence_reference,
     resolve_execution_evidence_reference,
+)
+from app.services.execution.pre_apply_snapshot import (
+    CapturePreApplySnapshotCommand,
+    PreApplySnapshotError,
+    PreApplySnapshotOperation,
+    PreApplySnapshotService,
+    verify_pre_apply_snapshot_integrity,
 )
 from app.services.planning.operator_review import canonical_json_hash
 from app.services.workspace.project_mutation_lock import (
@@ -98,13 +106,29 @@ class _PreparedOperation:
     content_reference: str | None
     content_sha256: str | None
     content: bytes | None
+    previous_exists: bool
+    previous_entry_type: str
+    previous_byte_length: int | None
     temporary_path: Path | None = None
     backup_path: Path | None = None
     installed: bool = False
 
 
+@dataclass(frozen=True)
+class _FinalPreconditionVerification:
+    operations: list[_PreparedOperation]
+    payload: dict[str, Any]
+    verification_hash: str
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _short_detail(value: str | None) -> str | None:
@@ -224,9 +248,81 @@ class ApplyExecutionService:
                 replay = self._existing_result(attempt.id)
                 if replay is not None:
                     return ApplyExecutionResult(replay, replayed=True)
+                existing_snapshot = self._existing_snapshot(attempt.id)
+                if existing_snapshot is not None:
+                    snapshot_integrity = verify_pre_apply_snapshot_integrity(
+                        self.db, existing_snapshot.id, store=self.store
+                    )
+                    reason = (
+                        "pre_apply_snapshot_integrity_failure"
+                        if not snapshot_integrity.verified
+                        else "pre_apply_snapshot_without_result"
+                    )
+                    detail = (
+                        ",".join(snapshot_integrity.issues)
+                        if not snapshot_integrity.verified
+                        else "an existing snapshot has no apply result; mutation is not replayed"
+                    )
+                    return ApplyExecutionResult(
+                        self._persist_result(
+                            attempt,
+                            status="blocked",
+                            failure_reason=reason,
+                            failure_detail=detail,
+                            applied_operations=[],
+                            started_at=started_at,
+                            ended_at=self._now(),
+                            lock_acquired=True,
+                            snapshot=existing_snapshot,
+                        )
+                    )
+                snapshot = None
                 try:
-                    prepared = self._final_precondition_verification(attempt)
-                    applied_operations = self._apply_atomically(prepared)
+                    final_verification = self._final_precondition_verification(attempt)
+                    snapshot = (
+                        PreApplySnapshotService(
+                            self.db, store=self.store, now=self._now
+                        )
+                        .capture(
+                            CapturePreApplySnapshotCommand(
+                                apply_attempt_id=attempt.id,
+                                final_precondition_verification_payload=final_verification.payload,
+                                final_precondition_verification_hash=final_verification.verification_hash,
+                                operations=tuple(
+                                    PreApplySnapshotOperation(
+                                        operation=item.operation,
+                                        canonical_path=item.canonical_path,
+                                        previous_exists=item.previous_exists,
+                                        previous_entry_type=item.previous_entry_type,
+                                        previous_sha256=item.expected_previous_sha256,
+                                        previous_byte_length=item.previous_byte_length,
+                                        expected_post_apply_exists=item.operation
+                                        != "delete_file",
+                                        expected_post_apply_sha256=item.content_sha256,
+                                    )
+                                    for item in final_verification.operations
+                                ),
+                            )
+                        )
+                        .snapshot
+                    )
+                    if snapshot.status != "captured":
+                        raise ApplyPreconditionBlocked(
+                            "pre_apply_snapshot_failed",
+                            snapshot.failure_detail
+                            or "pre-apply snapshot capture failed",
+                        )
+                    snapshot_integrity = verify_pre_apply_snapshot_integrity(
+                        self.db, snapshot.id, store=self.store
+                    )
+                    if not snapshot_integrity.verified:
+                        raise ApplyPreconditionBlocked(
+                            "pre_apply_snapshot_integrity_failure",
+                            ",".join(snapshot_integrity.issues),
+                        )
+                    applied_operations = self._apply_atomically(
+                        final_verification.operations
+                    )
                     result = self._persist_result(
                         attempt,
                         status="applied",
@@ -236,6 +332,19 @@ class ApplyExecutionService:
                         started_at=started_at,
                         ended_at=self._now(),
                         lock_acquired=True,
+                        snapshot=snapshot,
+                    )
+                except PreApplySnapshotError as exc:
+                    result = self._persist_result(
+                        attempt,
+                        status="blocked",
+                        failure_reason=exc.code,
+                        failure_detail=exc.message,
+                        applied_operations=[],
+                        started_at=started_at,
+                        ended_at=self._now(),
+                        lock_acquired=True,
+                        snapshot=snapshot,
                     )
                 except ApplyPreconditionBlocked as exc:
                     result = self._persist_result(
@@ -247,6 +356,7 @@ class ApplyExecutionService:
                         started_at=started_at,
                         ended_at=self._now(),
                         lock_acquired=True,
+                        snapshot=snapshot,
                     )
                 except ApplyExecutionError as exc:
                     result = self._persist_result(
@@ -258,6 +368,7 @@ class ApplyExecutionService:
                         started_at=started_at,
                         ended_at=self._now(),
                         lock_acquired=True,
+                        snapshot=snapshot,
                     )
                 except Exception as exc:  # pragma: no cover - defensive authority path
                     result = self._persist_result(
@@ -269,6 +380,7 @@ class ApplyExecutionService:
                         started_at=started_at,
                         ended_at=self._now(),
                         lock_acquired=True,
+                        snapshot=snapshot,
                     )
                 return ApplyExecutionResult(result)
         except ProjectMutationLockError:
@@ -296,9 +408,20 @@ class ApplyExecutionService:
             .one_or_none()
         )
 
+    def _existing_snapshot(
+        self, apply_attempt_id: int
+    ) -> ExecutionTaskPreApplySnapshot | None:
+        return (
+            self.db.query(ExecutionTaskPreApplySnapshot)
+            .filter(
+                ExecutionTaskPreApplySnapshot.apply_attempt_id == int(apply_attempt_id)
+            )
+            .one_or_none()
+        )
+
     def _final_precondition_verification(
         self, attempt: ExecutionTaskApplyAttempt
-    ) -> list[_PreparedOperation]:
+    ) -> _FinalPreconditionVerification:
         change_set = self.db.get(ExecutionTaskChangeSet, attempt.change_set_id)
         authorization = self.db.get(
             ExecutionTaskApplyAuthorization, attempt.authorization_id
@@ -384,6 +507,7 @@ class ApplyExecutionService:
                 "verification_drift", "ChangeSet has no executable operations"
             )
         prepared: list[_PreparedOperation] = []
+        verification_operations: list[dict[str, Any]] = []
         for row in operations:
             try:
                 canonical_path = validate_changeset_path(row.canonical_path)
@@ -411,6 +535,10 @@ class ApplyExecutionService:
                         "verification_drift",
                         f"create target already exists: {canonical_path}",
                     )
+                previous_exists = False
+                previous_entry_type = "absent"
+                previous_byte_length = None
+                previous_hash = None
             elif row.operation in {"replace_file", "delete_file"}:
                 if metadata is None:
                     raise ApplyPreconditionBlocked(
@@ -421,11 +549,15 @@ class ApplyExecutionService:
                         "verification_drift",
                         f"target is not a regular file: {canonical_path}",
                     )
-                current_hash, _ = _hash_file(path)
+                current_hash, current_length = _hash_file(path)
                 if current_hash != row.expected_previous_sha256:
                     raise ApplyPreconditionBlocked(
                         "hash_mismatch", f"expected file hash differs: {canonical_path}"
                     )
+                previous_exists = True
+                previous_entry_type = "regular_file"
+                previous_byte_length = current_length
+                previous_hash = current_hash
             else:
                 raise ApplyPreconditionBlocked(
                     "verification_drift", f"unsupported operation: {row.operation}"
@@ -450,9 +582,37 @@ class ApplyExecutionService:
                     content_reference=row.content_reference,
                     content_sha256=content_sha256,
                     content=content,
+                    previous_exists=previous_exists,
+                    previous_entry_type=previous_entry_type,
+                    previous_byte_length=previous_byte_length,
                 )
             )
-        return prepared
+            verification_operations.append(
+                {
+                    "operation": row.operation,
+                    "canonical_path": canonical_path,
+                    "previous_exists": previous_exists,
+                    "previous_entry_type": previous_entry_type,
+                    "previous_sha256": previous_hash,
+                    "previous_byte_length": previous_byte_length,
+                    "expected_post_apply_exists": row.operation != "delete_file",
+                    "expected_post_apply_sha256": content_sha256,
+                }
+            )
+        payload = {
+            "schema_version": "execution-task-final-precondition-verification/1.0",
+            "apply_attempt_id": attempt.id,
+            "apply_attempt_hash": attempt.canonical_command_hash,
+            "workspace_target_id": target.id,
+            "workspace_target_hash": target.canonical_target_hash,
+            "workspace_target_identity": target.target_identity,
+            "operations": verification_operations,
+        }
+        return _FinalPreconditionVerification(
+            operations=prepared,
+            payload=payload,
+            verification_hash=canonical_json_hash(payload),
+        )
 
     @staticmethod
     def _verify_parent_directories(root: Path, path: Path) -> None:
@@ -621,6 +781,7 @@ class ApplyExecutionService:
         started_at: datetime,
         ended_at: datetime,
         lock_acquired: bool,
+        snapshot: ExecutionTaskPreApplySnapshot | None = None,
     ) -> ExecutionTaskApplyResult:
         if status not in APPLY_RESULT_STATUSES:
             raise ValueError(f"unsupported apply result status: {status}")
@@ -642,6 +803,10 @@ class ApplyExecutionService:
             "workspace_target_hash": attempt.workspace_target_hash,
             "base_state_id": attempt.base_state_id,
             "base_state_hash": attempt.base_state_hash,
+            "pre_apply_snapshot_id": snapshot.id if snapshot is not None else None,
+            "pre_apply_snapshot_hash": (
+                snapshot.canonical_sha256 if snapshot is not None else None
+            ),
             "status": status,
             "failure_reason": failure_reason,
             "failure_detail": _short_detail(failure_detail),
@@ -668,6 +833,10 @@ class ApplyExecutionService:
             workspace_target_hash=attempt.workspace_target_hash,
             base_state_id=attempt.base_state_id,
             base_state_hash=attempt.base_state_hash,
+            pre_apply_snapshot_id=snapshot.id if snapshot is not None else None,
+            pre_apply_snapshot_hash=(
+                snapshot.canonical_sha256 if snapshot is not None else None
+            ),
             status=status,
             failure_reason=failure_reason,
             failure_detail=_short_detail(failure_detail),
@@ -699,7 +868,12 @@ class ApplyResultIntegrity:
     issues: tuple[str, ...] = ()
 
 
-def verify_apply_result_integrity(db: Session, result_id: int) -> ApplyResultIntegrity:
+def verify_apply_result_integrity(
+    db: Session,
+    result_id: int,
+    *,
+    store: CandidateContentStore | None = None,
+) -> ApplyResultIntegrity:
     row = db.get(ExecutionTaskApplyResult, int(result_id))
     if row is None:
         return ApplyResultIntegrity(None, False, ("apply_result_missing",))
@@ -720,6 +894,13 @@ def verify_apply_result_integrity(db: Session, result_id: int) -> ApplyResultInt
         issues.append("apply_result_authorization_hash_mismatch")
     if row.canonical_payload.get("base_state_hash") != row.base_state_hash:
         issues.append("apply_result_base_state_hash_mismatch")
+    if row.canonical_payload.get("pre_apply_snapshot_id") != row.pre_apply_snapshot_id:
+        issues.append("apply_result_snapshot_id_mismatch")
+    if (
+        row.canonical_payload.get("pre_apply_snapshot_hash")
+        != row.pre_apply_snapshot_hash
+    ):
+        issues.append("apply_result_snapshot_hash_mismatch")
     if row.status == "applied" and row.failure_reason is not None:
         issues.append("apply_result_applied_failure_reason")
     if row.status in {"blocked", "failed"} and row.failure_reason is None:
@@ -736,6 +917,25 @@ def verify_apply_result_integrity(db: Session, result_id: int) -> ApplyResultInt
             issues.append("apply_result_authorization_linkage_mismatch")
         if attempt.base_state_id != row.base_state_id:
             issues.append("apply_result_base_state_linkage_mismatch")
+    if row.pre_apply_snapshot_id is not None:
+        snapshot = db.get(ExecutionTaskPreApplySnapshot, row.pre_apply_snapshot_id)
+        if snapshot is None:
+            issues.append("apply_result_snapshot_missing")
+        else:
+            if snapshot.apply_attempt_id != row.apply_attempt_id:
+                issues.append("apply_result_snapshot_linkage_mismatch")
+            if snapshot.canonical_sha256 != row.pre_apply_snapshot_hash:
+                issues.append("apply_result_snapshot_hash_linkage_mismatch")
+            if _as_utc(snapshot.created_at) > _as_utc(row.ended_at):
+                issues.append("apply_result_snapshot_created_after_result")
+            snapshot_integrity = verify_pre_apply_snapshot_integrity(
+                db, snapshot.id, store=store
+            )
+            if not snapshot_integrity.verified:
+                issues.extend(
+                    f"apply_result_snapshot_{issue}"
+                    for issue in snapshot_integrity.issues
+                )
     return ApplyResultIntegrity(row.id, not issues, tuple(sorted(set(issues))))
 
 
