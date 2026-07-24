@@ -15,7 +15,7 @@ import re
 from types import MappingProxyType
 from typing import Any
 
-from app.services.orchestration.stage_engine import (
+from app.services.planning.stage_contract import (
     StageAcceptance,
     StageContext,
     StageDefinition,

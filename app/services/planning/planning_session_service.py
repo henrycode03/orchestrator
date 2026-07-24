@@ -41,6 +41,10 @@ from app.services.engineering_context import (
 )
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
+from app.services.planning.planning_dispatch import (
+    PlanningTaskDispatcher,
+    get_planning_task_dispatcher,
+)
 from app.services.planning.protocol_persistence import (
     PROTOCOL_V1,
     PROTOCOL_V2,
@@ -100,8 +104,10 @@ class PlanningSessionService:
         stage_definitions: Iterable[StageDefinition] | None = None,
         stage_executor: StageExecutor | None = None,
         planning_provider: PlanningProvider | None = None,
+        planning_dispatcher: PlanningTaskDispatcher | None = None,
     ):
         self.db = db
+        self.planning_dispatcher = planning_dispatcher
         self.engineering_context_service = (
             engineering_context_service or EngineeringContextService()
         )
@@ -596,10 +602,13 @@ class PlanningSessionService:
             return None
 
         try:
-            from app.tasks.planning_tasks import advance_planning_session
-
-            advance_planning_session.apply_async(
-                args=(session_id, generation_id, owner_token),
+            dispatcher = self.planning_dispatcher or get_planning_task_dispatcher()
+            if dispatcher is None:
+                raise RuntimeError("planning task dispatcher is not registered")
+            dispatcher.dispatch(
+                session_id=session_id,
+                generation_id=generation_id,
+                owner_token=owner_token,
                 task_id=task_id,
             )
         except Exception:

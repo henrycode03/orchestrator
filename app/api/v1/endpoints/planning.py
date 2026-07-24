@@ -22,9 +22,11 @@ from app.schemas import (
     TaskResponse,
 )
 from app.services.planning.planning_session_service import PlanningSessionService
+from app.tasks.planning_dispatch import ensure_planning_task_dispatcher
 from app.services.auth.authorization import get_project_for_user, project_access_filter
 
 router = APIRouter(prefix="/planning")
+ensure_planning_task_dispatcher()
 
 
 class PlanningCommitResponse(PlanningSessionResponse):

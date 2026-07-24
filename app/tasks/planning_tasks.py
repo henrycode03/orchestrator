@@ -7,6 +7,7 @@ import time
 
 from app.celery_app import celery_app
 from app.database import get_db_session
+from app.services.planning.planning_dispatch import register_planning_task_dispatcher
 from app.services.planning.planning_session_service import PlanningSessionService
 
 logger = logging.getLogger(__name__)
@@ -75,3 +76,25 @@ def advance_planning_session(
             time.monotonic() - started_at,
         )
         db.close()
+
+
+class _RegisteredPlanningTaskDispatcher:
+    """Compatibility adapter that preserves the task object's publish path."""
+
+    def dispatch(
+        self,
+        *,
+        session_id: int,
+        generation_id: str,
+        owner_token: str,
+        task_id: str,
+    ) -> None:
+        advance_planning_session.apply_async(
+            args=(session_id, generation_id, owner_token),
+            task_id=task_id,
+        )
+
+
+# Importing this module still registers exactly one task.  It additionally
+# supplies the task-layer adapter used by direct synchronous service tests.
+register_planning_task_dispatcher(_RegisteredPlanningTaskDispatcher())

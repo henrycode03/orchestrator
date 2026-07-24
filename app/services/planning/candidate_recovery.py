@@ -7,12 +7,31 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
-from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.planning.candidate_planning_outcome import CandidatePlanningOutcome
 from app.services.planning.candidate_selection_policy import select_candidate
 from app.services.planning.plan_candidate import PlanCandidate
 from app.services.planning.slot_merge_operator import SlotMergeInput, SlotMergeOperator
+
+PLAN_CANDIDATE_CREATED = "plan_candidate_created"
+PLAN_CANDIDATE_VALIDATED = "plan_candidate_validated"
+PLAN_CANDIDATE_SELECTED = "plan_candidate_selected"
+PLAN_CANDIDATE_REJECTED = "plan_candidate_rejected"
+PLAN_SLOT_MERGED = "plan_slot_merged"
+PLAN_CANDIDATE_EXHAUSTED = "plan_candidate_exhausted"
+
+CandidateRecoveryEventReporter = Callable[
+    [Any, str, Optional[PlanCandidate], Optional[Mapping[str, Any]]], str
+]
+_event_reporter: CandidateRecoveryEventReporter | None = None
+
+
+def register_candidate_recovery_event_reporter(
+    reporter: CandidateRecoveryEventReporter | None,
+) -> None:
+    """Install the orchestration-owned event adapter for runtime recovery."""
+
+    global _event_reporter
+    _event_reporter = reporter
 
 
 def stable_plan_hash(plan: Any) -> str:
@@ -50,6 +69,7 @@ class CandidateRecoveryRequest:
     parent_event_id: Optional[str]
     generate_sibling: Callable[[], tuple[list[dict[str, Any]], str]]
     validate_candidate: Callable[[list[dict[str, Any]], str], Any]
+    event_reporter: CandidateRecoveryEventReporter | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +87,7 @@ class SlotMergeCandidateRecoveryRequest:
     parent_event_id: Optional[str]
     validate_candidate: Callable[[list[dict[str, Any]], str], Any]
     policy_version: str = "phase17h"
+    event_reporter: CandidateRecoveryEventReporter | None = None
 
 
 def _verdict_status(verdict: Any) -> str:
@@ -102,18 +123,10 @@ def _emit(
     candidate: Optional[PlanCandidate] = None,
     details: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    payload: dict[str, Any] = dict(details or {})
-    if candidate is not None:
-        payload.update(candidate.to_dict())
-    event = append_orchestration_event(
-        project_dir=request.project_dir,
-        session_id=request.session_id,
-        task_id=request.task_id,
-        event_type=event_type,
-        parent_event_id=request.parent_event_id,
-        details=payload,
-    )
-    return str(event.get("event_id") or "")
+    reporter = getattr(request, "event_reporter", None) or _event_reporter
+    if reporter is None:
+        return ""
+    return str(reporter(request, event_type, candidate, details) or "")
 
 
 def _candidate_from_verdict(
@@ -200,14 +213,14 @@ def execute_single_sibling_candidate_recovery(
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_CREATED,
+            event_type=PLAN_CANDIDATE_CREATED,
             candidate=original,
         )
     )
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_VALIDATED,
+            event_type=PLAN_CANDIDATE_VALIDATED,
             candidate=original,
         )
     )
@@ -227,14 +240,14 @@ def execute_single_sibling_candidate_recovery(
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_CREATED,
+            event_type=PLAN_CANDIDATE_CREATED,
             candidate=sibling,
         )
     )
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_VALIDATED,
+            event_type=PLAN_CANDIDATE_VALIDATED,
             candidate=sibling,
         )
     )
@@ -261,7 +274,7 @@ def execute_single_sibling_candidate_recovery(
         audit_event_ids.append(
             _emit(
                 request=request,
-                event_type=EventType.PLAN_CANDIDATE_SELECTED,
+                event_type=PLAN_CANDIDATE_SELECTED,
                 candidate=selected,
             )
         )
@@ -270,7 +283,7 @@ def execute_single_sibling_candidate_recovery(
                 audit_event_ids.append(
                     _emit(
                         request=request,
-                        event_type=EventType.PLAN_CANDIDATE_REJECTED,
+                        event_type=PLAN_CANDIDATE_REJECTED,
                         candidate=candidate,
                         details={"reason": "lower_rank_than_selected"},
                     )
@@ -294,7 +307,7 @@ def execute_single_sibling_candidate_recovery(
         audit_event_ids.append(
             _emit(
                 request=request,
-                event_type=EventType.PLAN_CANDIDATE_REJECTED,
+                event_type=PLAN_CANDIDATE_REJECTED,
                 candidate=candidate,
                 details={"reason": "validator_rejected"},
             )
@@ -302,7 +315,7 @@ def execute_single_sibling_candidate_recovery(
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_EXHAUSTED,
+            event_type=PLAN_CANDIDATE_EXHAUSTED,
             details={
                 "candidate_count": len(candidates),
                 "planning_failure_signature": failure_signature,
@@ -354,14 +367,14 @@ def execute_slot_merge_candidate_recovery(
         audit_event_ids.append(
             _emit(
                 request=request,
-                event_type=EventType.PLAN_CANDIDATE_CREATED,
+                event_type=PLAN_CANDIDATE_CREATED,
                 candidate=parent,
             )
         )
         audit_event_ids.append(
             _emit(
                 request=request,
-                event_type=EventType.PLAN_CANDIDATE_VALIDATED,
+                event_type=PLAN_CANDIDATE_VALIDATED,
                 candidate=parent,
             )
         )
@@ -391,7 +404,7 @@ def execute_slot_merge_candidate_recovery(
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_SLOT_MERGED,
+            event_type=PLAN_SLOT_MERGED,
             candidate=merged,
             details={
                 "parent_candidate_ids": list(merge_result.parent_candidate_ids),
@@ -404,14 +417,14 @@ def execute_slot_merge_candidate_recovery(
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_CREATED,
+            event_type=PLAN_CANDIDATE_CREATED,
             candidate=merged,
         )
     )
     audit_event_ids.append(
         _emit(
             request=request,
-            event_type=EventType.PLAN_CANDIDATE_VALIDATED,
+            event_type=PLAN_CANDIDATE_VALIDATED,
             candidate=merged,
         )
     )
@@ -422,7 +435,7 @@ def execute_slot_merge_candidate_recovery(
         audit_event_ids.append(
             _emit(
                 request=request,
-                event_type=EventType.PLAN_CANDIDATE_SELECTED,
+                event_type=PLAN_CANDIDATE_SELECTED,
                 candidate=selected,
             )
         )
@@ -431,7 +444,7 @@ def execute_slot_merge_candidate_recovery(
                 audit_event_ids.append(
                     _emit(
                         request=request,
-                        event_type=EventType.PLAN_CANDIDATE_REJECTED,
+                        event_type=PLAN_CANDIDATE_REJECTED,
                         candidate=candidate,
                         details={"reason": "lower_rank_than_selected"},
                     )
@@ -441,7 +454,7 @@ def execute_slot_merge_candidate_recovery(
             audit_event_ids.append(
                 _emit(
                     request=request,
-                    event_type=EventType.PLAN_CANDIDATE_REJECTED,
+                    event_type=PLAN_CANDIDATE_REJECTED,
                     candidate=candidate,
                     details={"reason": "validator_rejected"},
                 )
@@ -449,7 +462,7 @@ def execute_slot_merge_candidate_recovery(
         audit_event_ids.append(
             _emit(
                 request=request,
-                event_type=EventType.PLAN_CANDIDATE_EXHAUSTED,
+                event_type=PLAN_CANDIDATE_EXHAUSTED,
                 details={
                     "candidate_count": len(candidates),
                     "planning_failure_signature": failure_signature,

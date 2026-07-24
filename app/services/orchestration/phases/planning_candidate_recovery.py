@@ -20,6 +20,7 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
 from app.services.orchestration.state.persistence import record_validation_verdict
+from app.services.orchestration.events import report_candidate_recovery_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
@@ -210,6 +211,7 @@ def try_candidate_recovery_after_validation(
                 parent_event_id=(planning_phase_event or {}).get("event_id"),
                 generate_sibling=_generate_sibling,
                 validate_candidate=_validate_candidate,
+                event_reporter=report_candidate_recovery_event,
             )
         )
         runtime_result_holder["result"] = runtime_result
@@ -306,6 +308,7 @@ def try_slot_merge_recovery_after_validation(
                 runtime_profile=settings.RUNTIME_PROFILE,
                 parent_event_id=(planning_phase_event or {}).get("event_id"),
                 validate_candidate=_validate_candidate,
+                event_reporter=report_candidate_recovery_event,
             )
         )
         runtime_result_holder["result"] = runtime_result
