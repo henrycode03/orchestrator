@@ -212,20 +212,24 @@ def test_discovery_tool_suppression_is_ephemeral_and_openclaw_validated(
 
         env = os.environ.copy()
         env.update(binding.environment)
-        result = subprocess.run(
-            [shutil.which("openclaw") or "openclaw", "config", "validate", "--json"],
-            cwd=runtime_workspace,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert json.loads(result.stdout)["valid"] is True
+        openclaw = shutil.which("openclaw")
+        if openclaw is not None:
+            result = subprocess.run(
+                [openclaw, "config", "validate", "--json"],
+                cwd=runtime_workspace,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert json.loads(result.stdout)["valid"] is True
     finally:
         binding.release()
     assert config_path.read_bytes() == original_config
+    if openclaw is None:
+        pytest.skip("OpenClaw CLI is not installed in this test environment")
 
 
 def test_discovery_failure_is_terminal_and_not_reflection_retryable():
