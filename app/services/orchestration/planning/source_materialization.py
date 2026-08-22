@@ -229,8 +229,28 @@ class PlannerSourceMaterialization:
             ],
         }
 
-    def to_prompt_block(self, *, provider_safe: bool = False) -> str:
-        return render_planner_source_materialization(self, provider_safe=provider_safe)
+    def to_prompt_block(
+        self,
+        *,
+        provider_safe: bool = False,
+        additional_candidate_paths: Iterable[Any] = (),
+    ) -> str:
+        return render_planner_source_materialization(
+            self,
+            provider_safe=provider_safe,
+            additional_candidate_paths=additional_candidate_paths,
+        )
+
+
+def observed_candidate_paths(observation: Any) -> tuple[str, ...]:
+    """Return only paths from one completed discovery observation."""
+
+    if observation is None or getattr(observation, "status", None) != "completed":
+        return ()
+    materialization_paths = getattr(observation, "materialization_paths", None)
+    if not callable(materialization_paths):
+        return ()
+    return tuple(dict.fromkeys(str(path) for path in materialization_paths() if path))
 
 
 def _safe_relative_path(value: Any) -> str:
@@ -1419,9 +1439,13 @@ def render_planner_source_materialization(
     materialization: PlannerSourceMaterialization | None,
     *,
     provider_safe: bool = False,
+    additional_candidate_paths: Iterable[Any] = (),
 ) -> str:
     if provider_safe:
-        return _render_provider_planner_source_materialization(materialization)
+        return _render_provider_planner_source_materialization(
+            materialization,
+            additional_candidate_paths=additional_candidate_paths,
+        )
     if materialization is None or not materialization.files:
         return ""
     lines = [
@@ -1481,6 +1505,8 @@ def render_planner_source_materialization(
 
 def provider_planning_contract_capabilities(
     materialization: PlannerSourceMaterialization | None,
+    *,
+    additional_candidate_paths: Iterable[Any] = (),
 ) -> tuple[bool, bool]:
     """Return ``(semantic_available, grounded_legacy_available)``.
 
@@ -1497,7 +1523,10 @@ def provider_planning_contract_capabilities(
         build_semantic_target_inventory,
     )
 
-    inventory = build_semantic_target_inventory(materialization)
+    inventory = build_semantic_target_inventory(
+        materialization,
+        additional_candidate_paths=additional_candidate_paths,
+    )
     grounded_legacy = any(
         item.status == SOURCE_STATUS_EXISTING
         and item.expected
@@ -1511,6 +1540,8 @@ def provider_planning_contract_capabilities(
 
 def _render_provider_planner_source_materialization(
     materialization: PlannerSourceMaterialization | None,
+    *,
+    additional_candidate_paths: Iterable[Any] = (),
 ) -> str:
     """Render only provider-safe source facts and opaque target handles."""
 
@@ -1520,7 +1551,10 @@ def _render_provider_planner_source_materialization(
         build_semantic_target_inventory,
     )
 
-    inventory = build_semantic_target_inventory(materialization)
+    inventory = build_semantic_target_inventory(
+        materialization,
+        additional_candidate_paths=additional_candidate_paths,
+    )
     grounded_legacy = any(
         item.status == SOURCE_STATUS_EXISTING
         and item.expected

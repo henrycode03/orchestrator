@@ -61,6 +61,9 @@ from app.services.orchestration.planning.planner_contract_registry import (
 from app.services.orchestration.planning.read_only_discovery import (
     render_discovery_observation,
 )
+from app.services.orchestration.planning.source_materialization import (
+    observed_candidate_paths,
+)
 from app.services.orchestration.planning.source_operation_verification import (
     verify_replace_in_file,
 )
@@ -1284,6 +1287,7 @@ class PlannerService:
         source_materialization: Any = None,
         read_only_observation: Any = None,
     ) -> str:
+        candidate_paths = observed_candidate_paths(read_only_observation)
         prompt = _build_minimal_planning_prompt(
             task_description,
             project_dir,
@@ -1298,11 +1302,13 @@ class PlannerService:
             workspace_identity=workspace_identity,
             planner_contract=planner_contract,
             source_materialization=source_materialization,
+            additional_candidate_paths=candidate_paths,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
         if source_materialization is not None:
             prompt += "\n\n" + source_materialization.to_prompt_block(
-                provider_safe=True
+                provider_safe=True,
+                additional_candidate_paths=candidate_paths,
             )
         discovery_block = render_discovery_observation(read_only_observation)
         if discovery_block:
@@ -1324,6 +1330,7 @@ class PlannerService:
         source_materialization: Any = None,
         read_only_observation: Any = None,
     ) -> str:
+        candidate_paths = observed_candidate_paths(read_only_observation)
         prompt = _build_ultra_minimal_planning_prompt(
             task_description,
             project_dir,
@@ -1336,11 +1343,13 @@ class PlannerService:
             workspace_identity=workspace_identity,
             planner_contract=planner_contract,
             source_materialization=source_materialization,
+            additional_candidate_paths=candidate_paths,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
         if source_materialization is not None:
             prompt += "\n\n" + source_materialization.to_prompt_block(
-                provider_safe=True
+                provider_safe=True,
+                additional_candidate_paths=candidate_paths,
             )
         discovery_block = render_discovery_observation(read_only_observation)
         if discovery_block:

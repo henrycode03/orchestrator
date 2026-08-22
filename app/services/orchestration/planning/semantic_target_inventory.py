@@ -140,7 +140,11 @@ def _primary_spans(item: Any) -> tuple[MaterializedSourceSpan, ...]:
     )
 
 
-def _scope_paths(task_scope: Iterable[Any], materialization: Any) -> set[str]:
+def _scope_paths(
+    task_scope: Iterable[Any],
+    materialization: Any,
+    additional_candidate_paths: Iterable[Any] = (),
+) -> set[str]:
     values = list(task_scope or ())
     if not values:
         values = [
@@ -148,6 +152,7 @@ def _scope_paths(task_scope: Iterable[Any], materialization: Any) -> set[str]:
             for item in getattr(materialization, "files", ()) or ()
             if bool(getattr(item, "expected", False))
         ]
+        values.extend(additional_candidate_paths or ())
     result: set[str] = set()
     for value in values:
         try:
@@ -257,8 +262,14 @@ def _target_id_for_record(item: Any, path: CanonicalPath) -> str:
 def build_semantic_target_inventory(
     source_materialization: PlannerSourceMaterialization,
     task_scope: Iterable[Any] = (),
+    additional_candidate_paths: Iterable[Any] = (),
 ) -> SemanticTargetInventory:
-    """Build provider-safe handles from one bounded materialization only."""
+    """Build provider-safe handles from one bounded materialization only.
+
+    ``additional_candidate_paths`` is request-local provenance supplied by one
+    bounded observation.  It widens consideration for those paths only; it
+    never changes a source record's ``expected`` or authority semantics.
+    """
 
     if not isinstance(source_materialization, PlannerSourceMaterialization):
         raise SemanticTargetInventoryError(
@@ -266,7 +277,12 @@ def build_semantic_target_inventory(
         )
     workspace_root = Path(source_materialization.workspace_identity)
     scope_values = list(task_scope or ())
-    scope_paths = _scope_paths(scope_values, source_materialization)
+    additional_values = list(additional_candidate_paths or ())
+    scope_paths = _scope_paths(
+        scope_values,
+        source_materialization,
+        additional_candidate_paths=additional_values,
+    )
     handles: list[SemanticTargetHandle] = []
     seen_ids: dict[str, str] = {}
     for item in sorted(
@@ -276,7 +292,7 @@ def build_semantic_target_inventory(
         path = _record_is_eligible(
             item,
             scope_paths=scope_paths,
-            explicit_scope=bool(scope_values),
+            explicit_scope=bool(scope_values or additional_values),
             workspace_root=workspace_root,
         )
         if path is None:

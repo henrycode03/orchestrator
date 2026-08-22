@@ -940,6 +940,7 @@ Examples:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
+        additional_candidate_paths: Any = (),
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -1000,7 +1001,10 @@ Examples:
             )
 
             semantic_mode_available, legacy_replace_available = (
-                provider_planning_contract_capabilities(source_materialization)
+                provider_planning_contract_capabilities(
+                    source_materialization,
+                    additional_candidate_paths=additional_candidate_paths,
+                )
             )
 
         context = {

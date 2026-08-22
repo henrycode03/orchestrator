@@ -43,7 +43,6 @@ from app.services.orchestration.planning.read_only_discovery import (
 from app.services.orchestration.planning.semantic_target_inventory import (
     SemanticTargetContractError,
     SemanticTargetInventoryError,
-    build_semantic_target_inventory,
     normalize_provider_semantic_intents,
 )
 from app.services.orchestration.planning.normalization import (
@@ -121,6 +120,7 @@ from app.services.orchestration.phases.planning_support import (
     _abort_root_cause_oscillation_repair_loop,
     _build_reasoning_artifact,
     _build_repair_rejection_reasons,
+    build_context_semantic_target_inventory as _build_context_semantic_target_inventory,
     _classify_planning_timeout_failure,
     classify_planning_failure_taxonomy,
     _compress_project_context_for_planning,
@@ -263,9 +263,7 @@ def execute_planning_phase(
             finalize_failure=_finalize_planning_terminal_failure,
         )
     try:
-        semantic_target_inventory = build_semantic_target_inventory(
-            ctx.planner_source_materialization
-        )
+        semantic_target_inventory = _build_context_semantic_target_inventory(ctx)
     except SemanticTargetInventoryError as exc:
         failure_type = "planning_semantic_target_inventory_invalid"
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED

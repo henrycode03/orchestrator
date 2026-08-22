@@ -161,6 +161,7 @@ def build_minimal_planning_prompt(
     workspace_identity: PlannerWorkspaceIdentity | None = None,
     planner_contract: dict[str, Any] | None = None,
     source_materialization: Any = None,
+    additional_candidate_paths: Any = (),
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:1200]
@@ -176,7 +177,10 @@ def build_minimal_planning_prompt(
     legacy_replace_available = True
     if source_materialization is not None:
         semantic_mode_available, legacy_replace_available = (
-            provider_planning_contract_capabilities(source_materialization)
+            provider_planning_contract_capabilities(
+                source_materialization,
+                additional_candidate_paths=additional_candidate_paths,
+            )
         )
     ops_contract = _render_ops_first_contract(
         semantic_mode_available=semantic_mode_available,
@@ -282,6 +286,7 @@ def build_ultra_minimal_planning_prompt(
     workspace_identity: PlannerWorkspaceIdentity | None = None,
     planner_contract: dict[str, Any] | None = None,
     source_materialization: Any = None,
+    additional_candidate_paths: Any = (),
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:700]
@@ -297,7 +302,10 @@ def build_ultra_minimal_planning_prompt(
     legacy_replace_available = True
     if source_materialization is not None:
         semantic_mode_available, legacy_replace_available = (
-            provider_planning_contract_capabilities(source_materialization)
+            provider_planning_contract_capabilities(
+                source_materialization,
+                additional_candidate_paths=additional_candidate_paths,
+            )
         )
     ops_contract = _render_ops_first_contract(
         semantic_mode_available=semantic_mode_available,

@@ -23,8 +23,12 @@ from app.services.orchestration.planning.planner import (
 )
 from app.services.orchestration.planning.source_materialization import (
     materialized_source_file,
+    observed_candidate_paths,
     plan_has_concrete_source_materialization,
     repair_context_requires_source_materialization,
+)
+from app.services.orchestration.planning.semantic_target_inventory import (
+    build_semantic_target_inventory,
 )
 from app.services.orchestration.planning.planner_contract_registry import (
     planner_contract_source_paths,
@@ -97,6 +101,14 @@ def _planner_workspace_identity(
     ctx: OrchestrationRunContext,
 ) -> PlannerWorkspaceIdentity:
     return planner_workspace_identity_for_context(ctx)
+
+
+def build_context_semantic_target_inventory(ctx: OrchestrationRunContext):
+    observation = getattr(ctx, "read_only_observation", None)
+    return build_semantic_target_inventory(
+        ctx.planner_source_materialization,
+        additional_candidate_paths=observed_candidate_paths(observation),
+    )
 
 
 # Qwen3.5-35B has a 128 k context window; 2200 tokens is far too conservative.

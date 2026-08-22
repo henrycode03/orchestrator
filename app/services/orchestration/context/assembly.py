@@ -35,6 +35,7 @@ from app.services.orchestration.planning.workspace_identity import (
 from app.services.orchestration.planning.source_materialization import (
     PlannerSourceMaterialization,
     materialize_planner_source_context,
+    observed_candidate_paths,
 )
 from app.services.orchestration.planning.read_only_discovery import (
     render_discovery_observation,
@@ -879,6 +880,8 @@ def assemble_planning_prompt(
         ),
         max_chars=800,
     )
+    observation = getattr(ctx, "read_only_observation", None)
+    candidate_paths = observed_candidate_paths(observation)
     raw_prompt = PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,
         project_context=project_context,
@@ -892,6 +895,7 @@ def assemble_planning_prompt(
         workspace_identity=planner_workspace_identity,
         planner_contract=getattr(ctx, "planner_contract", None),
         source_materialization=planner_source_materialization,
+        additional_candidate_paths=candidate_paths,
     )
     artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
     if artifact_supplement:
@@ -912,7 +916,8 @@ def assemble_planning_prompt(
     if read_only_observation_context:
         raw_prompt = raw_prompt + "\n\n" + read_only_observation_context
     source_materialization_context = planner_source_materialization.to_prompt_block(
-        provider_safe=True
+        provider_safe=True,
+        additional_candidate_paths=candidate_paths,
     )
     if source_materialization_context:
         raw_prompt = raw_prompt + "\n\n" + source_materialization_context
