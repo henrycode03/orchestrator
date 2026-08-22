@@ -11,7 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.agents.openclaw_service import OpenClawSessionError
+from app.services.agents.openclaw_service import (
+    OpenClawSessionError,
+    OpenClawSessionService,
+)
 from app.services.orchestration.execution.executor_workspace_binding import (
     bind_openclaw_workspace,
 )
@@ -157,6 +160,69 @@ def test_current_openclaw_parser_accepts_defaults_bootstrap_control(
         assert all("skipBootstrap" not in agent for agent in bound["agents"]["list"])
         assert not tuple(runtime_workspace.iterdir())
         assert Path(binding.environment["OPENCLAW_STATE_DIR"]).joinpath("logs").is_dir()
+    finally:
+        binding.release()
+    assert config_path.read_bytes() == original_config
+
+
+def test_discovery_tool_suppression_is_ephemeral_and_openclaw_validated(
+    tmp_path: Path,
+):
+    project_workspace = tmp_path / "project"
+    runtime_workspace = tmp_path / "runtime"
+    project_workspace.mkdir()
+    runtime_workspace.mkdir()
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {},
+                    "list": [
+                        {
+                            "id": "orchestrator",
+                            "model": "ollama/qwen3-coder:30b",
+                            "workspace": str(project_workspace),
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_config = config_path.read_bytes()
+    binding = bind_openclaw_workspace(
+        _binding_context(project_workspace, runtime_workspace),
+        real_config_path=config_path,
+    )
+    service = object.__new__(OpenClawSessionService)
+    service._workspace_binding = binding
+    service._openclaw_config_path_override = binding.config_path
+    try:
+        service._apply_discovery_tool_suppression("PLANNING")
+        normal_bound = json.loads(binding.config_path.read_text(encoding="utf-8"))
+        assert "tools" not in normal_bound["agents"]["list"][0]
+
+        service._apply_discovery_tool_suppression("PLANNING_DISCOVERY")
+        bound = json.loads(binding.config_path.read_text(encoding="utf-8"))
+        agent = bound["agents"]["list"][0]
+        assert agent["tools"]["deny"] == ["*"]
+        assert agent["model"] == "ollama/qwen3-coder:30b"
+        assert agent["workspace"] == str(runtime_workspace)
+
+        env = os.environ.copy()
+        env.update(binding.environment)
+        result = subprocess.run(
+            [shutil.which("openclaw") or "openclaw", "config", "validate", "--json"],
+            cwd=runtime_workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(result.stdout)["valid"] is True
     finally:
         binding.release()
     assert config_path.read_bytes() == original_config

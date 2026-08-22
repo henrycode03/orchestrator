@@ -648,6 +648,54 @@ class OpenClawSessionService:
             raise OpenClawAgentSelectionError(error)
         return full_cmd
 
+    def _apply_discovery_tool_suppression(
+        self, diagnostic_label: Optional[str]
+    ) -> None:
+        """Deny OpenClaw tools for the one bounded discovery invocation.
+
+        OpenClaw's supported per-agent ``tools.deny`` policy is applied only
+        to the existing ephemeral workspace binding.  Never write the
+        persistent config, and fail closed if discovery is not bound to that
+        ephemeral copy.
+        """
+
+        if diagnostic_label != "PLANNING_DISCOVERY":
+            return
+        binding = getattr(self, "_workspace_binding", None)
+        config_path = getattr(self, "_openclaw_config_path_override", None)
+        if binding is None or config_path != binding.config_path:
+            raise OpenClawSessionError(
+                "Bounded discovery requires an ephemeral OpenClaw config before "
+                "native tools can be suppressed"
+            )
+        try:
+            config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise OpenClawSessionError(
+                "Unable to read the ephemeral OpenClaw config for discovery"
+            ) from exc
+        agents = (config.get("agents") or {}).get("list") or []
+        selected = next(
+            (
+                agent
+                for agent in agents
+                if isinstance(agent, dict)
+                and str(agent.get("id") or "").strip() == binding.agent_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise OpenClawSessionError(
+                "The ephemeral OpenClaw config lost the selected discovery agent"
+            )
+        existing_tools = selected.get("tools")
+        if existing_tools is not None and not isinstance(existing_tools, dict):
+            raise OpenClawSessionError(
+                "The selected discovery agent has an invalid OpenClaw tool policy"
+            )
+        selected["tools"] = {**dict(existing_tools or {}), "deny": ["*"]}
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
     def bind_runtime_workspace(self, context: Optional[Any]) -> None:
         """Bind this session's OpenClaw execution to a Runtime Executor
         Context (Phase 23D, Goal 3).
@@ -2701,6 +2749,7 @@ class OpenClawSessionService:
             full_cmd = self._build_openclaw_agent_command(
                 openclaw_command, cwd=execution_cwd
             )
+            self._apply_discovery_tool_suppression(diagnostic_label)
             self._validate_runtime_invocation_boundary(execution_cwd)
 
             # Phase 22C-0 containment setup: resolve the identity this run is
