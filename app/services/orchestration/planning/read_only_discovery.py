@@ -18,6 +18,11 @@ from app.services.orchestration.planning.source_materialization import (
     PlannerSourceMaterialization,
     extract_source_target_hints,
 )
+from app.services.orchestration.planning.repository_orientation import (
+    RepositoryOrientation,
+    derive_repository_orientation,
+    render_repository_orientation,
+)
 from app.services.workspace.workspace_paths import (
     HYDRATION_EXCLUDED_NAMES,
     is_hydration_excluded_path,
@@ -31,6 +36,7 @@ MAX_OBSERVATION_BYTES = 8192
 MAX_FILE_BYTES = 4096
 MAX_FILE_LINES = 200
 MAX_SNIPPET_CHARS = 240
+MAX_ORIENTATION_BLOCK_BYTES = 4096
 DISCOVERY_PROVIDER_TIMEOUT_SECONDS = 120
 
 DISCOVERY_ADMISSION_SKIPPED = "SKIPPED_SUFFICIENT_GROUNDING"
@@ -246,6 +252,12 @@ def prepare_discovery_context(
             extract_structured_text=extract_structured_text,
             planner_service=planner_service,
             emit_phase_event=emit_phase_event,
+            explicit_paths=tuple(
+                str(getattr(item, "relative_path", ""))
+                for item in materialization.files
+                if bool(getattr(item, "expected", False))
+                and getattr(item, "relative_path", None)
+            ),
         )
         materialization = materialize_observation_source_context(
             project_dir=Path(ctx.orchestration_state.project_dir),
@@ -258,9 +270,18 @@ def prepare_discovery_context(
     ctx.planner_source_materialization = materialization
 
 
-def build_discovery_prompt(task_description: str, project_context: str = "") -> str:
+def build_discovery_prompt(
+    task_description: str,
+    project_context: str = "",
+    orientation: RepositoryOrientation | None = None,
+) -> str:
     task = _bounded_text(task_description, 1800)
     context = _bounded_text(project_context, 700)
+    # The orientation block carries its own explicit budget so it can never be
+    # silently displaced by the 700-char planning-context field.
+    orientation_block = _bounded_text(
+        render_repository_orientation(orientation), MAX_ORIENTATION_BLOCK_BYTES
+    )
     return (
         "READ-ONLY DISCOVERY ONLY. Return exactly one JSON object and no prose.\n"
         'Allowed: {"action":"search_text","query":"...","paths":["..."]}, '
@@ -268,11 +289,13 @@ def build_discovery_prompt(task_description: str, project_context: str = "") -> 
         "For search_text, query is a bounded ripgrep-compatible text/regex "
         "pattern; spaces are literal, and use `|` for alternatives when useful.\n"
         "Use relative paths in the admitted workspace; search_text paths may "
-        "name existing files or directories, while read_file requires one "
+        f"name existing files or directories (at most {MAX_DISCOVERY_PATHS}), "
+        "while read_file requires one "
         "existing regular file. Return no plan, shell "
         "command, mutation, old/new, target ID, selector, offsets, or tests.\n"
         "Choose at most one action; it executes once, then Planning resumes.\n"
         f"TASK:\n{task}\nCURRENT PLANNING CONTEXT:\n{context}"
+        + (f"\n{orientation_block}" if orientation_block else "")
     )
 
 
@@ -338,14 +361,20 @@ def run_discovery_stage(
     extract_structured_text: Callable[[Any], str],
     planner_service: Any,
     emit_phase_event: Callable[..., Any],
+    explicit_paths: tuple[str, ...] = (),
 ) -> DiscoveryObservation:
     if getattr(ctx, "read_only_discovery_completed", False):
         raise DiscoveryContractError("discovery_turn_already_used")
     if ctx.runtime_service is None:
         raise DiscoveryContractError("read_only_discovery_runtime_unavailable")
     ctx.read_only_discovery_completed = True
+    orientation = derive_repository_orientation(
+        Path(ctx.orchestration_state.project_dir),
+        ctx.prompt,
+        explicit_paths=explicit_paths,
+    )
     prompt = build_discovery_prompt(
-        ctx.prompt, ctx.orchestration_state.project_context or ""
+        ctx.prompt, ctx.orchestration_state.project_context or "", orientation
     )
     emit_phase_event(
         ctx.orchestration_state,
@@ -357,6 +386,7 @@ def run_discovery_stage(
             "stage": "read_only_discovery",
             "max_discovery_turns": 1,
             "prompt_chars": len(prompt),
+            **orientation.as_details(),
         },
     )
     try:
