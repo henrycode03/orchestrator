@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from scripts.evals import model2_discovery_ab as harness
 from app.services.orchestration.planning.read_only_discovery import (
     execute_discovery_request,
@@ -47,6 +51,16 @@ def test_model2_ephemeral_identity_and_pl18_do_not_mutate_product_state(tmp_path
     assert harness._product_state() == before
 
 
+def test_model2_product_state_handles_uninitialized_database(monkeypatch):
+    test_engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr(harness, "SessionLocal", sessionmaker(bind=test_engine))
+
+    state = harness._product_state()
+
+    assert state
+    assert all(value == 0 for value in state.values())
+
+
 def test_model2_response_injection_uses_production_replay_chain():
     request = parse_discovery_request(
         '{"action":"search_text","query":"rate","paths":["app/services/tasks/tool_tracking.py"]}'
@@ -71,10 +85,15 @@ def test_model2_order_budget_and_raw_response_artifacts_are_bounded():
     assert harness.PROVIDER_CALL_BUDGET == 9
     assert len(harness.CALL_ORDER) == 9
     assert len(set(harness.CALL_ORDER)) == 9
+    cells_root = harness.EVIDENCE_ROOT / "cells"
+    if not cells_root.exists():
+        pytest.skip(
+            "MODEL2 raw response evidence is generated-only and is not checked in"
+        )
     for packet, arm in harness.CALL_ORDER:
         cell = next(
             path
-            for path in (harness.EVIDENCE_ROOT / "cells").iterdir()
+            for path in cells_root.iterdir()
             if f"-{packet}-" in path.name
             and path.name.endswith(harness.ARMS[arm]["name"])
         )

@@ -27,12 +27,16 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.request import Request, urlopen
 
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.orm import sessionmaker
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from app.database import SessionLocal
 from app.models import (
+    Base,
     ExecutionPlan,
     ExecutionTask,
     ExecutionTaskAttempt,
@@ -74,6 +78,19 @@ EVIDENCE_ROOT = REPOSITORY_ROOT / "docs/roadmap/reports/evidence/post33-model2"
 PERSISTENT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 PROVIDER_CALL_BUDGET = 9
 DISCOVERY_TIMEOUT_SECONDS = 120
+
+# The evaluation seam must not depend on the application database being
+# initialized, and it must never create or mutate product rows.  The service
+# constructor performs read-only session lookups even when no lifecycle IDs
+# are supplied, so provide it a private in-memory schema instead of the
+# production SessionLocal binding.
+_EVALUATION_DB_ENGINE = create_engine(
+    "sqlite:///:memory:", connect_args={"check_same_thread": False}
+)
+Base.metadata.create_all(bind=_EVALUATION_DB_ENGINE)
+EvaluationSessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=_EVALUATION_DB_ENGINE
+)
 
 TASKS: dict[str, dict[str, Any]] = {
     "T222": {
@@ -287,7 +304,15 @@ def _product_state() -> dict[str, Any]:
     }
     db = SessionLocal()
     try:
-        return {name: db.query(model).count() for name, model in classes.items()}
+        inspector = inspect(db.get_bind())
+        return {
+            name: (
+                db.query(model).count()
+                if inspector.has_table(model.__table__.name)
+                else 0
+            )
+            for name, model in classes.items()
+        }
     finally:
         db.close()
 
@@ -333,7 +358,7 @@ def _preflight() -> dict[str, Any]:
     persistent = _persistent_config()
     selected = _agent_for_project(persistent)
     catalogs = _provider_catalogs(persistent)
-    command_db = SessionLocal()
+    command_db = EvaluationSessionLocal()
     command_service = OpenClawSessionService(
         command_db,
         None,
@@ -415,7 +440,7 @@ def _configure_ephemeral_service(
         model_family=arm["model_family"],
         adaptation_profile=arm["profile"],
     )
-    service_db = SessionLocal()
+    service_db = EvaluationSessionLocal()
     service = OpenClawSessionService(
         service_db,
         None,
