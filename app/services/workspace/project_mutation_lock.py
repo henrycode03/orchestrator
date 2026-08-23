@@ -32,6 +32,27 @@ def _lock_path_for_project_root(project_root: Path) -> Path:
     )
 
 
+def _ensure_lock_dir(lock_dir: Path) -> None:
+    """Create the lock directory while tolerating concurrent empty-dir cleanup.
+
+    A releasing writer removes empty ``.agent/locks`` directories.  Another
+    writer can therefore observe ``FileExistsError`` from ``Path.mkdir`` and
+    then lose the directory before ``pathlib`` checks ``exist_ok``.  Retry
+    only when the path disappeared; a real non-directory collision remains an
+    error.
+    """
+    for attempt in range(8):
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            return
+        except FileExistsError:
+            if lock_dir.is_dir():
+                return
+            if lock_dir.exists() or attempt == 7:
+                raise
+            time.sleep(0)
+
+
 def _pid_is_alive(pid: object) -> bool:
     try:
         value = int(pid)
@@ -84,7 +105,7 @@ def project_mutation_lock(
     project_root = project_root.resolve()
     lock_path = _lock_path_for_project_root(project_root)
     lock_dir = lock_path.parent
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_lock_dir(lock_dir)
     try:
         lock_dir.chmod(0o777)
     except (PermissionError, FileNotFoundError):
@@ -118,7 +139,7 @@ def project_mutation_lock(
             fd = os.open(lock_path, flags, 0o666)
             break
         except FileNotFoundError:
-            lock_dir.mkdir(parents=True, exist_ok=True)
+            _ensure_lock_dir(lock_dir)
         except FileExistsError as exc:
             if time.monotonic() >= deadline:
                 raise ProjectMutationLockError(

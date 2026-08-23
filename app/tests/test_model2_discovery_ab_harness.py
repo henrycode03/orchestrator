@@ -32,6 +32,10 @@ def test_model2_packets_reuse_production_prompt_and_isolate_profile_envelope():
 
 
 def test_model2_ephemeral_identity_and_pl18_do_not_mutate_product_state(tmp_path):
+    if not harness.PERSISTENT_OPENCLAW_CONFIG.is_file():
+        pytest.skip(
+            "OpenClaw persistent configuration is unavailable in this CI environment"
+        )
     before = harness._product_state()
     before_config = harness._persistent_config_fingerprint()
     runtime_workspace = tmp_path / "runtime"
