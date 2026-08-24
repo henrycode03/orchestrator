@@ -469,6 +469,15 @@ def _run_cell(
         parsed_runtime = service.parse_cli_response(
             proc, expected_session_id=None, strict_provider_result=False
         )
+        identity_proof = model2._verify_runtime_identity(
+            arm,
+            identity=identity,
+            diagnostics=diagnostics,
+            parsed_runtime=parsed_runtime,
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            prompt_hash=model2._sha256_text(prompt),
+        )
         extracted = discovery_output_text(parsed_runtime, extract_structured_text)
         (cell_dir / "extracted-response.txt").write_text(extracted, encoding="utf-8")
         result: dict[str, Any] = {
@@ -482,6 +491,7 @@ def _run_cell(
             "provider": arm["provider"],
             "profile": arm["profile"],
             "identity": identity,
+            "identity_proof": identity_proof,
             "latency_seconds": round(time.monotonic() - started, 3),
             "runtime_diagnostics": diagnostics,
             "provider_result": {
@@ -611,6 +621,16 @@ def _run_cell(
             "model_identity_drift": bool("provider reported model" in str(exc)),
             "classification": "CONTRACT_FAILURE",
         }
+        if isinstance(exc, model2.IdentityDriftError):
+            result.update(
+                {
+                    "model_identity_drift": exc.proof["status"]
+                    == "INVALID_IDENTITY_DRIFT",
+                    "identity_failure": True,
+                    "identity_proof": exc.proof,
+                    "comparison_valid": False,
+                }
+            )
         _write_json(cell_dir / "result.json", result)
         return result
     finally:
@@ -885,8 +905,8 @@ def run(*, execute: bool) -> int:
         results.append(result)
         after_cell_config = model2._persistent_config_fingerprint()
         result["persistent_config_after_cell"] = after_cell_config
-        if result.get("model_identity_drift"):
-            identity_drift = True
+        if result.get("model_identity_drift") or result.get("identity_failure"):
+            identity_drift = bool(result.get("model_identity_drift"))
             aborted = True
         if after_cell_config != config_before:
             persistence_drift = True

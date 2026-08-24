@@ -103,3 +103,140 @@ def test_model2_order_budget_and_raw_response_artifacts_are_bounded():
         )
         assert (cell / "raw-provider.stdout").exists()
         assert (cell / "raw-provider.stderr").exists()
+
+
+def test_model_identity_guard_rejects_openclaw_fallback_before_scoring():
+    identity = {
+        "agent_id": "orchestrator",
+        "model": "openai/qwen-local",
+        "provider_endpoint": "http://ai-gateway:8000/v1",
+        "profile": "openclaw_default",
+        "config_sha256": "ephemeral-config",
+        "tools": {"deny": ["*"]},
+    }
+    with pytest.raises(harness.IdentityDriftError) as exc_info:
+        harness._verify_runtime_identity(
+            harness.ARMS["A"],
+            identity=identity,
+            diagnostics={"invocation": {"selected_agent": "orchestrator"}},
+            parsed_runtime={"output_channel_used": "stderr"},
+            raw_stdout="",
+            raw_stderr=(
+                "model fallback decision: decision=candidate_failed "
+                "requested=openai/qwen-local candidate=openai/qwen-local "
+                "reason=auth next=ollama/qwen3-coder:30b\n"
+                "model fallback decision: decision=candidate_succeeded "
+                "requested=openai/qwen-local candidate=ollama/qwen3-coder:30b "
+                "reason=unknown next=none"
+            ),
+            prompt_hash="prompt-hash",
+        )
+
+    assert exc_info.value.proof["status"] == "INVALID_IDENTITY_DRIFT"
+    assert exc_info.value.proof["effective_provider_model_ref"] == (
+        "ollama/qwen3-coder:30b"
+    )
+    assert exc_info.value.proof["fallback_diagnostics"]
+
+
+def test_model_identity_guard_fails_closed_when_effective_identity_is_missing():
+    with pytest.raises(harness.IdentityDriftError) as exc_info:
+        harness._verify_runtime_identity(
+            harness.ARMS["A"],
+            identity={
+                "agent_id": "orchestrator",
+                "provider_endpoint": "http://ai-gateway:8000/v1",
+                "profile": "openclaw_default",
+                "config_sha256": "ephemeral-config",
+                "tools": {"deny": ["*"]},
+            },
+            diagnostics={},
+            parsed_runtime={},
+            raw_stdout="",
+            raw_stderr="provider initialization failed",
+            prompt_hash="prompt-hash",
+        )
+
+    assert exc_info.value.proof["status"] == "IDENTITY_UNVERIFIED"
+
+
+def test_model_identity_guard_accepts_matching_runtime_provider_model():
+    proof = harness._verify_runtime_identity(
+        harness.ARMS["B"],
+        identity={
+            "agent_id": "orchestrator",
+            "provider_endpoint": "http://host.docker.internal:11434",
+            "profile": "openclaw_default",
+            "config_sha256": "ephemeral-config",
+            "tools": {"deny": ["*"]},
+        },
+        diagnostics={},
+        parsed_runtime={"output_channel_used": "stderr"},
+        raw_stdout="",
+        raw_stderr=(
+            '"agentMeta": {"provider": "ollama", ' '"model": "qwen3-coder:30b"}'
+        ),
+        prompt_hash="prompt-hash",
+    )
+
+    assert proof["status"] == "PASS"
+    assert proof["effective_provider_model_ref"] == "ollama/qwen3-coder:30b"
+
+
+def test_model_identity_guard_rejects_provider_metadata_from_failed_generation():
+    with pytest.raises(harness.IdentityDriftError) as exc_info:
+        harness._verify_runtime_identity(
+            harness.ARMS["A"],
+            identity={
+                "agent_id": "orchestrator",
+                "provider_endpoint": "http://ai-gateway:8000/v1",
+                "profile": "openclaw_default",
+                "config_sha256": "ephemeral-config",
+                "tools": {"deny": ["*"]},
+            },
+            diagnostics={},
+            parsed_runtime={"output_channel_used": "stderr"},
+            raw_stdout='"isError": true',
+            raw_stderr=('"agentMeta": {"provider": "openai", "model": "qwen-local"}'),
+            prompt_hash="prompt-hash",
+        )
+
+    assert exc_info.value.proof["status"] == "IDENTITY_UNVERIFIED"
+    assert exc_info.value.proof["generation_success"] is False
+
+
+def test_model2_ephemeral_baseline_binding_adds_placeholder_and_disables_fallback(
+    tmp_path,
+):
+    if not harness.PERSISTENT_OPENCLAW_CONFIG.is_file():
+        pytest.skip(
+            "OpenClaw persistent configuration is unavailable in this CI environment"
+        )
+    before_config = harness._persistent_config_fingerprint()
+    runtime_workspace = tmp_path / "runtime"
+    runtime_workspace.mkdir()
+    service, identity = harness._configure_ephemeral_service(
+        harness.ARMS["A"], runtime_workspace
+    )
+    try:
+        bound_config = json.loads(
+            service._openclaw_config_path().read_text(encoding="utf-8")
+        )
+        selected = next(
+            agent
+            for agent in bound_config["agents"]["list"]
+            if agent["id"] == identity["agent_id"]
+        )
+        provider = bound_config["models"]["providers"]["openai"]
+        assert selected["model"]["primary"] == "openai/qwen-local"
+        assert selected["model"]["fallbacks"] == []
+        assert provider["apiKey"] not in {"", "ollama-local"}
+        assert identity["ephemeral_credential_source"] == (
+            "ephemeral_config_placeholder"
+        )
+        assert identity["fallbacks"] == []
+    finally:
+        service.release_runtime_workspace_binding()
+        service._evaluation_db.close()
+
+    assert harness._persistent_config_fingerprint() == before_config

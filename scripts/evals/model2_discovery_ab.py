@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -78,6 +79,7 @@ EVIDENCE_ROOT = REPOSITORY_ROOT / "docs/roadmap/reports/evidence/post33-model2"
 PERSISTENT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 PROVIDER_CALL_BUDGET = 9
 DISCOVERY_TIMEOUT_SECONDS = 120
+EPHEMERAL_LOCAL_GATEWAY_CREDENTIAL = "post33-runtime1-local-placeholder"
 
 # The evaluation seam must not depend on the application database being
 # initialized, and it must never create or mutate product rows.  The service
@@ -175,6 +177,141 @@ CALL_ORDER = (
     ("T222", "B"),
     ("T218", "C"),
 )
+
+
+class IdentityDriftError(RuntimeError):
+    """Raised when a provider call cannot prove the requested runtime identity."""
+
+    def __init__(self, proof: dict[str, Any]):
+        self.proof = proof
+        super().__init__(proof["failure_reason"])
+
+
+def _fallback_diagnostics(raw_text: str) -> list[dict[str, str]]:
+    pattern = re.compile(
+        r"model fallback decision: decision=(?P<decision>\S+) "
+        r"requested=(?P<requested>\S+) candidate=(?P<candidate>\S+) "
+        r"reason=(?P<reason>\S+)(?: next=(?P<next>\S+))?"
+    )
+    return [match.groupdict(default="none") for match in pattern.finditer(raw_text)]
+
+
+def _runtime_provider_model(
+    raw_text: str, parsed_runtime: dict[str, Any], diagnostics: dict[str, Any]
+) -> str | None:
+    agent_meta = re.search(
+        r'"agentMeta"\s*:\s*\{.*?"provider"\s*:\s*"([^"]+)"'
+        r'.*?"model"\s*:\s*"([^"]+)"',
+        raw_text,
+        re.DOTALL,
+    )
+    if agent_meta:
+        return f"{agent_meta.group(1)}/{agent_meta.group(2)}"
+    provider = parsed_runtime.get("provider") or diagnostics.get("provider")
+    model = parsed_runtime.get("model") or diagnostics.get("model")
+    if provider and model:
+        return f"{provider}/{model}"
+    return None
+
+
+def _verify_runtime_identity(
+    arm: dict[str, Any],
+    *,
+    identity: dict[str, Any],
+    diagnostics: dict[str, Any],
+    parsed_runtime: dict[str, Any],
+    raw_stdout: str,
+    raw_stderr: str,
+    prompt_hash: str,
+) -> dict[str, Any]:
+    """Prove provider identity immediately after a generation call.
+
+    The proof is deliberately based on runtime diagnostics/raw provider output,
+    not on the harness's requested arm metadata.  Missing or contradictory
+    runtime identity fails closed before response extraction or scoring.
+    """
+
+    raw_text = f"{raw_stdout}\n{raw_stderr}"
+    fallback_diagnostics = _fallback_diagnostics(raw_text)
+    effective_ref = None
+    if fallback_diagnostics:
+        effective_ref = fallback_diagnostics[-1]["candidate"]
+    else:
+        effective_ref = _runtime_provider_model(raw_text, parsed_runtime, diagnostics)
+    requested_ref = arm["provider_model_ref"]
+    generation_error_signals = [
+        bool(re.search(r"\bisError\s*=\s*true", raw_text)),
+        bool(re.search(r'"isError"\s*:\s*true', raw_text)),
+        "rawError=" in raw_text,
+        bool(parsed_runtime.get("error")),
+    ]
+    generation_success = not any(generation_error_signals)
+    proof: dict[str, Any] = {
+        "status": "PASS",
+        "requested_agent": identity.get("agent_id"),
+        "requested_provider_model_ref": requested_ref,
+        "effective_provider_model_ref": effective_ref,
+        "provider_endpoint": identity.get("provider_endpoint"),
+        "profile": identity.get("profile"),
+        "config_fingerprint": identity.get("config_sha256"),
+        "prompt_hash": prompt_hash,
+        "openclaw_runtime_diagnostics": diagnostics,
+        "fallback_diagnostics": fallback_diagnostics,
+        "response_extraction_source": parsed_runtime.get("output_channel_used"),
+        "tool_telemetry": identity.get("tools"),
+        "generation_success": generation_success,
+        "failure_reason": None,
+    }
+    if not generation_success:
+        proof.update(
+            {
+                "status": "IDENTITY_UNVERIFIED",
+                "failure_reason": (
+                    "OpenClaw exposed provider/model metadata but the generation "
+                    "ended with an error; effective identity is not valid evidence"
+                ),
+            }
+        )
+    elif fallback_diagnostics:
+        proof.update(
+            {
+                "status": "INVALID_IDENTITY_DRIFT",
+                "failure_reason": (
+                    "OpenClaw emitted a model fallback decision for the requested "
+                    f"identity {requested_ref}"
+                ),
+            }
+        )
+    elif not effective_ref:
+        proof.update(
+            {
+                "status": "IDENTITY_UNVERIFIED",
+                "failure_reason": (
+                    "OpenClaw runtime output did not expose an effective provider "
+                    "and model identity"
+                ),
+            }
+        )
+    elif effective_ref != requested_ref:
+        proof.update(
+            {
+                "status": "INVALID_IDENTITY_DRIFT",
+                "failure_reason": (
+                    f"effective identity {effective_ref} did not match "
+                    f"requested identity {requested_ref}"
+                ),
+            }
+        )
+    elif not identity.get("provider_endpoint"):
+        proof.update(
+            {
+                "status": "IDENTITY_UNVERIFIED",
+                "failure_reason": "provider endpoint was not captured",
+            }
+        )
+    if proof["status"] != "PASS":
+        raise IdentityDriftError(proof)
+    return proof
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -433,6 +570,9 @@ def _preflight() -> dict[str, Any]:
 def _configure_ephemeral_service(
     arm: dict[str, Any],
     runtime_workspace: Path,
+    *,
+    inject_ephemeral_local_credential: bool = True,
+    disable_fallback: bool = True,
 ) -> tuple[OpenClawSessionService, dict[str, Any]]:
     configuration = RoleRuntimeConfiguration(
         role=BackendRole.PLANNING,
@@ -465,7 +605,22 @@ def _configure_ephemeral_service(
         if isinstance(agent, dict)
         and str(agent.get("id") or "").strip() == service._workspace_binding.agent_id
     )
-    selected["model"] = arm["provider_model_ref"]
+    if disable_fallback:
+        selected["model"] = {
+            "primary": arm["provider_model_ref"],
+            "fallbacks": [],
+        }
+    else:
+        selected["model"] = arm["provider_model_ref"]
+    provider_name = arm["provider_model_ref"].split("/", 1)[0]
+    providers = (config.setdefault("models", {})).setdefault("providers", {})
+    provider_config = providers.get(provider_name)
+    if (
+        inject_ephemeral_local_credential
+        and provider_name == "openai"
+        and isinstance(provider_config, dict)
+    ):
+        provider_config["apiKey"] = EPHEMERAL_LOCAL_GATEWAY_CREDENTIAL
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     service._apply_discovery_tool_suppression("PLANNING_DISCOVERY")
     final_config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -479,14 +634,33 @@ def _configure_ephemeral_service(
         raise RuntimeError(
             "PL18 deny-all suppression was not present in ephemeral config"
         )
-    if final_selected.get("model") != arm["provider_model_ref"]:
+    final_model = final_selected.get("model")
+    final_model_ref = (
+        final_model.get("primary") if isinstance(final_model, dict) else final_model
+    )
+    if final_model_ref != arm["provider_model_ref"]:
         raise RuntimeError("ephemeral selected-agent model override was not retained")
+    final_fallbacks = (
+        final_model.get("fallbacks") if isinstance(final_model, dict) else None
+    )
     service._evaluation_db = service_db
     return service, {
         "agent_id": service._workspace_binding.agent_id,
         "config_path": str(config_path),
         "config_sha256": _sha256_bytes(config_path.read_bytes()),
-        "model": final_selected.get("model"),
+        "model": final_model_ref,
+        "fallbacks": final_fallbacks,
+        "provider_endpoint": (
+            provider_config.get("baseUrl")
+            if isinstance(provider_config, dict)
+            else None
+        ),
+        "profile": arm["profile"],
+        "ephemeral_credential_source": (
+            "ephemeral_config_placeholder"
+            if inject_ephemeral_local_credential and provider_name == "openai"
+            else "none"
+        ),
         "tools": final_selected.get("tools"),
         "environment": dict(service._workspace_binding.environment),
         "runtime_workspace": str(runtime_workspace),
@@ -623,6 +797,15 @@ def _run_cell(
         parsed_runtime = service.parse_cli_response(
             proc, expected_session_id=None, strict_provider_result=False
         )
+        identity_proof = _verify_runtime_identity(
+            arm,
+            identity=identity,
+            diagnostics=diagnostics,
+            parsed_runtime=parsed_runtime,
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            prompt_hash=_sha256_text(wire_prompt),
+        )
         extracted = discovery_output_text(parsed_runtime, extract_structured_text)
         (cell_dir / "extracted-response.txt").write_text(extracted, encoding="utf-8")
         result: dict[str, Any] = {
@@ -636,6 +819,7 @@ def _run_cell(
             "provider": arm["provider"],
             "profile": arm["profile"],
             "identity": identity,
+            "identity_proof": identity_proof,
             "latency_seconds": round(time.monotonic() - started, 3),
             "runtime_diagnostics": diagnostics,
             "provider_result": {
@@ -727,6 +911,16 @@ def _run_cell(
             "failure_type": type(exc).__name__,
             "failure_reason": str(exc)[:1000],
         }
+        if isinstance(exc, IdentityDriftError):
+            result.update(
+                {
+                    "model_identity_drift": exc.proof["status"]
+                    == "INVALID_IDENTITY_DRIFT",
+                    "identity_failure": True,
+                    "identity_proof": exc.proof,
+                    "comparison_valid": False,
+                }
+            )
         _write_json(cell_dir / "result.json", result)
         return result
     finally:
@@ -814,8 +1008,8 @@ def run(*, execute: bool) -> int:
             EVIDENCE_ROOT / "cells",
         )
         results.append(result)
-        if result.get("model_identity_drift"):
-            identity_drift = True
+        if result.get("model_identity_drift") or result.get("identity_failure"):
+            identity_drift = bool(result.get("model_identity_drift"))
             aborted = True
     config_after = _persistent_config_fingerprint()
     state_after = _product_state()
