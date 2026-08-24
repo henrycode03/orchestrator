@@ -29,6 +29,8 @@ harness layout remains stable.
 ## Current Contents
 
 - `_runner_common.py` - shared helper imports for runner scripts.
+- `apply_openclaw_c1_patch.py` - version-pinned, reversible OpenClaw/pi-ai
+  empty-tools compatibility patch applier for the deployed runtime.
 - `check_openai_compatible_endpoint.py` - reusable endpoint diagnostic.
 - `planning_contract_report.py` - reusable report, imported by `app/tests/`.
 - `reflection_replay.py` - reusable offline reflection-quality diagnostic.
