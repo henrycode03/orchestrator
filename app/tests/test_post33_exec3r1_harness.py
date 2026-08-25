@@ -288,6 +288,12 @@ def provider_free_harness(db_session_factory, isolated_workspace_root, monkeypat
     monkeypatch.setattr(settings, "AGENT_MODEL", "qwen-local")
     monkeypatch.setattr(settings, "PLANNING_ADAPTATION_PROFILE", "ollama_default")
     monkeypatch.setattr(settings, "EXECUTION_ADAPTATION_PROFILE", "ollama_default")
+    # CI intentionally runs without the developer .env. The provider-free
+    # execution stub has no provider catalog from which to derive capacity, so
+    # the harness must declare the same verified execution-context contract
+    # that production dispatch requires.
+    monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", 64_000)
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_CONTEXT_TOKENS", 64_000)
     monkeypatch.setattr(settings, "PLANNING_REPAIR_ENABLED", False)
     monkeypatch.setattr(settings, "RUNTIME_WORKSPACE_ENABLED", False)
     monkeypatch.setattr(settings, "DEMO_MODE", False)
@@ -458,6 +464,8 @@ def live_harness(db_session_factory, isolated_workspace_root, monkeypatch):
     monkeypatch.setattr(settings, "AGENT_MODEL", "qwen-local")
     monkeypatch.setattr(settings, "PLANNING_ADAPTATION_PROFILE", "ollama_default")
     monkeypatch.setattr(settings, "EXECUTION_ADAPTATION_PROFILE", "ollama_default")
+    monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", 64_000)
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_CONTEXT_TOKENS", 64_000)
     monkeypatch.setattr(settings, "RUNTIME_WORKSPACE_ENABLED", True)
     monkeypatch.setattr(
         settings,
