@@ -18,10 +18,13 @@ is made.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from app.config import settings
 from app.services.agents.agent_backends import (
+    BackendHealth,
     EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES,
     ExecutionTopology,
     get_backend_descriptor,
@@ -38,12 +41,12 @@ DIRECT_BACKENDS = ("direct_ollama", "openai_chat_completions")
 AMPLE_CONTEXT = 200_000
 
 
-def _validate(backend: str, **kwargs):
+def _validate(backend: str, *, dispatch: bool = False, **kwargs):
     return validate_runtime_capabilities(
         get_backend_descriptor(backend),
         BackendRole.EXECUTION,
         effective_context_tokens=AMPLE_CONTEXT,
-        dispatch=True,
+        dispatch=dispatch,
         **kwargs,
     )
 
@@ -114,7 +117,11 @@ def test_structured_orchestrator_is_the_default_execution_topology():
 @pytest.mark.parametrize("backend", DIRECT_BACKENDS)
 def test_direct_backend_rejected_for_agent_runtime_execution(backend):
     with pytest.raises(RuntimeCapabilityError) as excinfo:
-        _validate(backend, execution_topology=ExecutionTopology.AGENT_RUNTIME)
+        _validate(
+            backend,
+            dispatch=True,
+            execution_topology=ExecutionTopology.AGENT_RUNTIME,
+        )
     assert excinfo.value.code == "provider_endpoint_incompatible"
     message = str(excinfo.value)
     assert ExecutionTopology.AGENT_RUNTIME.value in message
@@ -137,7 +144,7 @@ def test_openai_responses_api_has_no_execution_step_contract():
     capabilities = get_backend_descriptor("openai_responses_api").capabilities
     assert capabilities.supports_step_reasoning is False
     with pytest.raises(RuntimeCapabilityError):
-        _validate("openai_responses_api")
+        _validate("openai_responses_api", dispatch=True)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +185,7 @@ def test_non_execution_roles_report_no_execution_topology():
     readiness = validate_runtime_capabilities(
         get_backend_descriptor("openai_chat_completions"),
         BackendRole.PLANNING,
-        dispatch=True,
+        dispatch=False,
     )
     assert readiness["execution_topology"] is None
     assert readiness["required_execution_capabilities"] is None
@@ -294,5 +301,37 @@ def test_execution_context_floor_still_fails_closed(monkeypatch):
 def test_execution_model_requirement_still_fails_closed(monkeypatch):
     monkeypatch.setattr(settings, "EXECUTION_MODEL", "")
     with pytest.raises(RuntimeCapabilityError) as excinfo:
-        _validate("direct_ollama")
+        _validate("direct_ollama", dispatch=True)
     assert excinfo.value.code == "provider_model_unavailable"
+
+
+def test_role_contract_errors_precede_unavailable_backend_health(monkeypatch):
+    unavailable = BackendHealth(
+        available=False,
+        ready=False,
+        status="degraded",
+        errors=["synthetic backend health failure"],
+        warnings=[],
+    )
+    descriptor = replace(get_backend_descriptor("direct_ollama"), health=unavailable)
+
+    monkeypatch.setattr(settings, "EXECUTION_MODEL", "")
+    with pytest.raises(RuntimeCapabilityError) as excinfo:
+        validate_runtime_capabilities(
+            descriptor,
+            BackendRole.EXECUTION,
+            effective_context_tokens=AMPLE_CONTEXT,
+            dispatch=True,
+        )
+    assert excinfo.value.code == "provider_model_unavailable"
+
+    monkeypatch.setattr(settings, "EXECUTION_MODEL", "capability-test-model")
+    with pytest.raises(RuntimeCapabilityError) as excinfo:
+        validate_runtime_capabilities(
+            descriptor,
+            BackendRole.EXECUTION,
+            effective_context_tokens=AMPLE_CONTEXT,
+            dispatch=True,
+            execution_topology=ExecutionTopology.AGENT_RUNTIME,
+        )
+    assert excinfo.value.code == "provider_endpoint_incompatible"

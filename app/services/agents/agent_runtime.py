@@ -189,13 +189,6 @@ def validate_runtime_capabilities(
                 code="provider_context_insufficient",
             )
 
-    if dispatch and (not descriptor.health.available or not descriptor.health.ready):
-        errors = "; ".join(descriptor.health.errors) or descriptor.health.status
-        raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}.",
-            code="provider_unavailable",
-        )
-
     missing_execution_capabilities: list[str] = []
     if role is BackendRole.EXECUTION:
         missing_execution_capabilities = (
@@ -234,6 +227,13 @@ def validate_runtime_capabilities(
                 if "endpoint" in " ".join(provider_errors)
                 else "provider_model_unavailable"
             ),
+        )
+
+    if dispatch and (not descriptor.health.available or not descriptor.health.ready):
+        errors = "; ".join(descriptor.health.errors) or descriptor.health.status
+        raise RuntimeCapabilityError(
+            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}.",
+            code="provider_unavailable",
         )
 
     return {
