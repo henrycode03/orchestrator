@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import shutil
 import shlex
 from dataclasses import asdict, dataclass, replace
@@ -10,6 +11,37 @@ from typing import Any, Dict, List, Optional
 
 from app.config import settings
 from app.services.agents.interfaces import BackendHealthCheck
+
+
+class ExecutionTopology(str, enum.Enum):
+    """How a runtime is expected to carry one accepted execution step.
+
+    POST33-EXEC1 separated two responsibilities that ``supports_step_execution``
+    had carried as one boolean.  The production execution loop applies the
+    accepted step's structured file operations, portable commands, and
+    verification itself (``ExecutorService.execute_file_ops`` /
+    ``execute_verification_command``) and only calls the runtime for the
+    residual reasoning turn.  That is ``STRUCTURED_ORCHESTRATOR``.  A runtime
+    that additionally owns native tools and its own workspace binding offers
+    ``AGENT_RUNTIME``.
+    """
+
+    STRUCTURED_ORCHESTRATOR = "structured_orchestrator_execution"
+    AGENT_RUNTIME = "agent_runtime_execution"
+
+
+# The capability set each execution topology requires of a backend, by
+# ``BackendCapabilities`` field name.  Provider-neutral: eligibility is derived
+# from declared capabilities only, never from a backend name.
+EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES: Dict[ExecutionTopology, tuple[str, ...]] = {
+    ExecutionTopology.STRUCTURED_ORCHESTRATOR: ("supports_step_reasoning",),
+    ExecutionTopology.AGENT_RUNTIME: (
+        "supports_step_reasoning",
+        "supports_step_execution",
+        "supports_tool_execution",
+        "supports_agent_workspace_binding",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -28,9 +60,38 @@ class BackendCapabilities:
     max_parallel_sessions: Optional[int] = None
     reliability_tier: str = "standard"
     latency_tier: str = "standard"
+    # POST33-EXEC1 decomposition.  Both default to False so an unmigrated or
+    # future descriptor fails closed on the execution boundary.
+    #
+    # supports_step_reasoning: the runtime accepts a rendered execution-step
+    # prompt under an execution system contract and returns a bounded textual
+    # step result within the caller's timeout.  This is the only capability
+    # the structured-orchestrator execution topology requires.
+    #
+    # supports_step_execution: the runtime drives an agent-style step
+    # lifecycle with provider-native tools.  Retained with its original
+    # meaning and its original position in ``to_dict()``.
+    #
+    # supports_agent_workspace_binding: the runtime binds and mutates a
+    # runtime workspace of its own (``bind_runtime_workspace`` /
+    # ``execution_cwd_override``), rather than leaving every mutation to the
+    # Orchestrator's own workspace-contained mechanics.
+    supports_step_reasoning: bool = False
+    supports_agent_workspace_binding: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def missing_execution_capabilities(
+        self, topology: "ExecutionTopology"
+    ) -> list[str]:
+        """Capability names this backend lacks for ``topology``."""
+
+        return [
+            name
+            for name in EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES[topology]
+            if not getattr(self, name, False)
+        ]
 
 
 @dataclass(frozen=True)
@@ -331,6 +392,10 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_parallel_sessions=1,
                 reliability_tier="standard",
                 latency_tier="local",
+                # OpenClaw owns both the reasoning turn and the native-tool
+                # step lifecycle, and binds its own runtime workspace.
+                supports_step_reasoning=True,
+                supports_agent_workspace_binding=True,
             ),
             lane_traits=BackendLaneTraits(
                 structured_output_reliability="variable",
@@ -374,6 +439,8 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_context_tokens=None,
                 reliability_tier="standard",
                 latency_tier="network",
+                supports_step_reasoning=True,
+                supports_agent_workspace_binding=True,
             ),
             lane_traits=BackendLaneTraits(
                 structured_output_reliability="standard",
@@ -417,6 +484,10 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_context_tokens=None,
                 reliability_tier="standard",
                 latency_tier="network",
+                # execute_task() delegates to invoke_prompt() with the generic
+                # contract; no execution-step system contract is selected.
+                supports_step_reasoning=False,
+                supports_agent_workspace_binding=False,
             ),
             lane_traits=BackendLaneTraits(
                 structured_output_reliability="high",
@@ -463,6 +534,10 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_context_tokens=4096,
                 reliability_tier="local",
                 latency_tier="local",
+                # execute_task() selects _STEP_SYSTEM and honours the caller's
+                # timeout; no native tools and no workspace of its own.
+                supports_step_reasoning=True,
+                supports_agent_workspace_binding=False,
             ),
             lane_traits=BackendLaneTraits(
                 structured_output_reliability="variable",
@@ -509,6 +584,11 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_context_tokens=None,
                 reliability_tier="local",
                 latency_tier="local",
+                # execute_task() selects _STEP_SYSTEM via
+                # _execute_task_system_prompt() and honours the caller's
+                # timeout; no native tools and no workspace of its own.
+                supports_step_reasoning=True,
+                supports_agent_workspace_binding=False,
             ),
             lane_traits=BackendLaneTraits(
                 structured_output_reliability="variable",

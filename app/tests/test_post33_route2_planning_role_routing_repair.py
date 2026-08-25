@@ -21,6 +21,7 @@ import pytest
 
 from app.config import settings
 from app.services.agents.agent_backends import (
+    ExecutionTopology,
     get_backend_descriptor,
     require_backend_descriptor,
 )
@@ -411,25 +412,39 @@ def test_planning_profile_backend_mismatch_still_fails_closed(db_session, monkey
 # ---------------------------------------------------------------------------
 
 
-def test_execution_remains_openclaw_only(monkeypatch):
+def test_agent_runtime_execution_remains_openclaw_only(monkeypatch):
+    """POST33-EXEC1 narrowed this: *agent* execution stays OpenClaw-only.
+
+    ROUTE2 asserted that ``openai_chat_completions`` could not own the
+    EXECUTION role at all, because ``supports_step_execution`` conflated
+    "can produce a bounded step result" with "is an agent runtime with native
+    tools".  EXEC1 split those.  The direct backend may now serve the
+    structured-orchestrator topology the execution loop actually runs; the
+    agent topology still fails closed, which is what this test guards.
+    """
+
     # Keep this capability assertion independent of the CI execution-model
     # setting; an incapable backend must fail closed on its role boundary.
-    monkeypatch.setattr(settings, "EXECUTION_MODEL", "")
+    monkeypatch.setattr(settings, "EXECUTION_MODEL", "capability-test-model")
     openclaw = get_backend_descriptor("local_openclaw").capabilities
+    assert openclaw.supports_step_reasoning is True
     assert openclaw.supports_step_execution is True
     assert openclaw.supports_tool_execution is True
+    assert openclaw.supports_agent_workspace_binding is True
     assert openclaw.supports_checkpoint_resume is True
     assert openclaw.supports_streaming is True
 
     chat = get_backend_descriptor("openai_chat_completions")
     assert chat.capabilities.supports_step_execution is False
     assert chat.capabilities.supports_tool_execution is False
+    assert chat.capabilities.supports_agent_workspace_binding is False
     with pytest.raises(RuntimeCapabilityError) as excinfo:
         validate_runtime_capabilities(
             chat,
             BackendRole.EXECUTION,
             effective_context_tokens=200_000,
             dispatch=True,
+            execution_topology=ExecutionTopology.AGENT_RUNTIME,
         )
     assert excinfo.value.code == "provider_endpoint_incompatible"
 

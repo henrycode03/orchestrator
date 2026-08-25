@@ -6,6 +6,7 @@ from .agent_backends import (
     BackendDescriptor,
     BackendHealth,
     BackendLaneTraits,
+    ExecutionTopology,
     UnsupportedAgentBackendError,
     get_backend_descriptor,
     list_supported_backends,
@@ -27,6 +28,7 @@ from .interfaces import (
 
 __all__ = [
     "BackendCapabilities",
+    "ExecutionTopology",
     "BackendConfigMetadata",
     "BackendDescriptor",
     "BackendHealth",

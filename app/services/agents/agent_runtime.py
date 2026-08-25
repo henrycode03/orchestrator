@@ -16,7 +16,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.services.agents.agent_backends import (
+    EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES,
     BackendDescriptor,
+    ExecutionTopology,
     UnsupportedAgentBackendError,
     require_backend_descriptor,
 )
@@ -127,12 +129,22 @@ def validate_runtime_capabilities(
     effective_context_tokens: Optional[int] = None,
     required_context_tokens: int = MIN_REPAIR_CONTEXT_TOKENS,
     dispatch: bool = True,
+    execution_topology: ExecutionTopology = ExecutionTopology.STRUCTURED_ORCHESTRATOR,
 ) -> dict[str, Any]:
     """Validate provider-neutral capabilities before explicit-role dispatch.
 
     Repair context is intentionally an explicit deployment fact.  A provider
     that does not report a limit cannot be assumed to satisfy the planning
     contract, even when its native model metadata is larger.
+
+    ``execution_topology`` selects the capability set the EXECUTION role is
+    validated against (POST33-EXEC1).  The default is the topology the
+    production execution loop actually runs: the Orchestrator applies the
+    accepted step's structured operations, commands, and verification itself
+    and calls the runtime only for the residual reasoning turn.  A caller that
+    genuinely needs provider-native tools or a runtime-owned workspace passes
+    ``ExecutionTopology.AGENT_RUNTIME`` and an incapable backend still fails
+    closed.
     """
 
     role = _coerce_backend_role(role)
@@ -184,16 +196,30 @@ def validate_runtime_capabilities(
             code="provider_unavailable",
         )
 
-    role_supported = {
-        BackendRole.PLANNING: descriptor.capabilities.supports_planning,
-        BackendRole.EXECUTION: descriptor.capabilities.supports_step_execution,
-        BackendRole.REPAIR: descriptor.capabilities.supports_planning,
-        BackendRole.DEBUG_REPAIR: descriptor.capabilities.supports_debug_repair,
-        BackendRole.COMPLETION_REPAIR: descriptor.capabilities.supports_planning,
-    }[role]
+    missing_execution_capabilities: list[str] = []
+    if role is BackendRole.EXECUTION:
+        missing_execution_capabilities = (
+            descriptor.capabilities.missing_execution_capabilities(execution_topology)
+        )
+        role_supported = not missing_execution_capabilities
+    else:
+        role_supported = {
+            BackendRole.PLANNING: descriptor.capabilities.supports_planning,
+            BackendRole.REPAIR: descriptor.capabilities.supports_planning,
+            BackendRole.DEBUG_REPAIR: descriptor.capabilities.supports_debug_repair,
+            BackendRole.COMPLETION_REPAIR: descriptor.capabilities.supports_planning,
+        }[role]
     if dispatch and not role_supported:
+        detail = ""
+        if missing_execution_capabilities:
+            detail = (
+                f" ({execution_topology.value} requires "
+                + ", ".join(missing_execution_capabilities)
+                + ")"
+            )
         raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' does not support the {role.value} role.",
+            f"Runtime backend '{descriptor.name}' does not support the "
+            f"{role.value} role{detail}.",
             code="provider_endpoint_incompatible",
         )
 
@@ -214,6 +240,14 @@ def validate_runtime_capabilities(
         "backend": descriptor.name,
         "role": role.value,
         "provider_ready": True,
+        "execution_topology": (
+            execution_topology.value if role is BackendRole.EXECUTION else None
+        ),
+        "required_execution_capabilities": (
+            list(EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES[execution_topology])
+            if role is BackendRole.EXECUTION
+            else None
+        ),
         "effective_context_tokens": resolved_context,
         "required_context_tokens": (
             MIN_EXECUTION_CONTEXT_TOKENS
