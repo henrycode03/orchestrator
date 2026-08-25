@@ -21,7 +21,10 @@ from app.services.agents.interfaces import (
     UnsupportedCapabilityError,
 )
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
-from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.agents.runtime_configuration import (
+    BackendRole,
+    RuntimeConfiguration,
+)
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
@@ -35,6 +38,18 @@ Do NOT invent steps that were not requested."""
 
 _GENERIC_SYSTEM = """You are a helpful AI assistant integrated into a development orchestrator.
 Answer concisely and accurately."""
+
+# ROUTE1-D1: role ownership -- not diagnostic prose -- decides which system
+# contract an execute_task() invocation receives.
+_PLANNING_ROLE = BackendRole.PLANNING.value
+_STEP_SHAPED_ROLES = frozenset(
+    {
+        BackendRole.EXECUTION.value,
+        BackendRole.REPAIR.value,
+        BackendRole.DEBUG_REPAIR.value,
+        BackendRole.COMPLETION_REPAIR.value,
+    }
+)
 
 
 def _normalize_chat_content_value(value: Any) -> str:
@@ -181,6 +196,8 @@ class OpenAIChatCompletionsRuntime:
                 role_url = settings.PLANNING_REPAIR_BASE_URL
             if role_url:
                 return role_url.rstrip("/")
+        if self.backend_role == _PLANNING_ROLE:
+            return self._planning_base_url()
         return (
             settings.OPENAI_CHAT_COMPLETIONS_BASE_URL
             or settings.OPENAI_BASE_URL
@@ -201,9 +218,42 @@ class OpenAIChatCompletionsRuntime:
                 role_key = settings.PLANNING_REPAIR_API_KEY
             if role_key:
                 return role_key.strip()
+        if self.backend_role == _PLANNING_ROLE:
+            return self._planning_api_key()
         return (
             settings.OPENAI_CHAT_COMPLETIONS_API_KEY or settings.OPENAI_API_KEY or ""
         ).strip()
+
+    def _planning_base_url(self) -> str:
+        """Resolve the planning role's own direct endpoint (ROUTE1-D2).
+
+        The planning role must never fall through to the generic ``OPENAI_*``
+        settings: a populated ``OPENAI_API_KEY`` would otherwise silently
+        address the public OpenAI API. ``PLANNING_DIRECT_BASE_URL`` is the
+        existing planning-owned direct endpoint field -- already used by the
+        Protocol v2 direct planning provider with the same
+        ``<base>/chat/completions`` shape -- so it is reused here instead of
+        introducing a second planning endpoint setting or borrowing a repair
+        setting.
+        """
+
+        base_url = str(getattr(settings, "PLANNING_DIRECT_BASE_URL", "") or "").strip()
+        if not base_url:
+            raise AgentRuntimeError(
+                "Planning role backend 'openai_chat_completions' requires "
+                "PLANNING_DIRECT_BASE_URL; refusing to fall back to the generic "
+                "OpenAI endpoint."
+            )
+        return base_url.rstrip("/")
+
+    def _planning_api_key(self) -> str:
+        """Return the planning-owned key only; never the generic OpenAI key.
+
+        An empty value is valid -- local gateways accept unauthenticated
+        requests -- and must not re-enable the generic fallback.
+        """
+
+        return str(getattr(settings, "PLANNING_DIRECT_API_KEY", "") or "").strip()
 
     def _invocation_base_url(self, options: RuntimeInvocationOptions | None) -> str:
         if options is not None and self.backend_role in {
@@ -401,6 +451,38 @@ class OpenAIChatCompletionsRuntime:
     ) -> str:
         return self.response_session_key
 
+    def _execute_task_system_prompt(
+        self,
+        diagnostic_label: Optional[str],
+        diagnostic_metadata: Optional[dict[str, Any]],
+    ) -> str:
+        """Select the system contract from role ownership (ROUTE1-D1).
+
+        The previous rule was ``diagnostic_label.endswith("PLANNING")``, which
+        made diagnostic prose the routing authority. ``PLANNING_DISCOVERY`` --
+        the label ``run_discovery_stage()`` sends -- is the one planning-family
+        label that fails that suffix test, so a direct-routed Discovery call
+        received the step contract in direct contradiction of the discovery
+        prompt ("Return exactly one JSON object and no prose").
+
+        The planning role owns a reasoning contract for *every* one of its
+        invocations. Execution and the three repair roles keep the step
+        contract they already use on this entrypoint: ``execute_task()`` is
+        reached by repair only to repair step-shaped output
+        (``step_support.py``, ``execution_loop.py``), while reasoning-shaped
+        repair goes through ``invoke_prompt()``, which is unconditionally
+        generic. Role-less legacy callers keep the historical label heuristic.
+        """
+
+        if self.backend_role == _PLANNING_ROLE:
+            return _GENERIC_SYSTEM
+        if self.backend_role in _STEP_SHAPED_ROLES:
+            return _STEP_SYSTEM
+        planning = str(diagnostic_label or "").upper().endswith("PLANNING")
+        if isinstance(diagnostic_metadata, dict):
+            planning = planning or bool(diagnostic_metadata.get("planning_attempt"))
+        return _GENERIC_SYSTEM if planning else _STEP_SYSTEM
+
     async def execute_task(
         self,
         prompt: str,
@@ -412,11 +494,10 @@ class OpenAIChatCompletionsRuntime:
         **kwargs,
     ) -> dict[str, Any]:
         del log_callback
-        planning = str(diagnostic_label or "").upper().endswith("PLANNING")
-        if isinstance(diagnostic_metadata, dict):
-            planning = planning or bool(diagnostic_metadata.get("planning_attempt"))
         output = await self._chat(
-            system=_GENERIC_SYSTEM if planning else _STEP_SYSTEM,
+            system=self._execute_task_system_prompt(
+                diagnostic_label, diagnostic_metadata
+            ),
             user=prompt,
             timeout_seconds=timeout_seconds,
         )

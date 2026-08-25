@@ -362,6 +362,43 @@ def validate_runtime_provider_contract(
             }
         )
 
+    if (
+        role is BackendRole.PLANNING
+        and configuration.backend_name == "openai_chat_completions"
+    ):
+        # ROUTE1-D2: the planning role owns its own direct endpoint. Without
+        # this check a missing PLANNING_DIRECT_BASE_URL would only surface at
+        # invocation time, and the pre-repair adapter silently addressed the
+        # generic OpenAI endpoint whenever OPENAI_API_KEY happened to be set.
+        base_url = (
+            str(getattr(settings, "PLANNING_DIRECT_BASE_URL", "") or "")
+            .strip()
+            .rstrip("/")
+        )
+        if not base_url:
+            raise RuntimeCapabilityError(
+                "Planning role backend 'openai_chat_completions' requires "
+                "PLANNING_DIRECT_BASE_URL.",
+                code="provider_endpoint_incompatible",
+            )
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeCapabilityError(
+                "Planning endpoint must be an absolute HTTP(S) base URL.",
+                code="provider_endpoint_incompatible",
+            )
+        if parsed.path.rstrip("/").endswith("/chat/completions"):
+            raise RuntimeCapabilityError(
+                "Planning endpoint must be a provider base URL, not a chat path.",
+                code="provider_endpoint_incompatible",
+            )
+        result.update(
+            {
+                "base_url": base_url,
+                "endpoint": f"{base_url}/chat/completions",
+            }
+        )
+
     if role is BackendRole.DEBUG_REPAIR:
         if configuration.backend_name == "openai_chat_completions":
             base_url = (
