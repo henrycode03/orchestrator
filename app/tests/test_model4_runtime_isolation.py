@@ -56,6 +56,12 @@ def test_model4_bootstrap_audit_is_provider_free_and_retains_runtime_finding():
     assert audit["OPENCLAW_DISCOVERY_SKIP_BOOTSTRAP"] is True
     assert audit["OPENCLAW_DISCOVERY_AGENTDIR_EPHEMERAL"] is True
     assert audit["OPENCLAW_DISCOVERY_SESSION_STORE_EPHEMERAL"] is True
+    if not audit["retained_runtime_source_available"]:
+        assert audit["retained_runtime_source_status"] == "UNAVAILABLE"
+        assert audit["retained_runtime_source_error"] == (
+            "generated-only artifact absent"
+        )
+        return
     assert audit["OPENCLAW_DISCOVERY_AGENTS_MD_VISIBLE"] is True
     assert audit["OPENCLAW_DISCOVERY_SOUL_MD_VISIBLE"] is True
     assert audit["OPENCLAW_DISCOVERY_TOOLS_MD_VISIBLE"] is True
@@ -63,6 +69,32 @@ def test_model4_bootstrap_audit_is_provider_free_and_retains_runtime_finding():
     assert audit["OPENCLAW_DISCOVERY_PRIOR_SESSION_CONTEXT_POSSIBLE"] is False
     assert audit["OPENCLAW_DISCOVERY_BOOTSTRAP_CONTAMINATION_CLASS"] == (
         "C. BOOTSTRAP_CONTEXT_PRESENT"
+    )
+
+
+def test_model4_bootstrap_audit_tolerates_absent_retained_runtime_artifact(
+    monkeypatch,
+):
+    retained_source = (
+        model4.REPOSITORY_ROOT
+        / "docs/roadmap/reports/evidence/post33-runtime3/probes/neutral-identity-probe.stderr"
+    )
+    original_is_file = model4.Path.is_file
+
+    def report_missing(path):
+        if path == retained_source:
+            return False
+        return original_is_file(path)
+
+    monkeypatch.setattr(model4.Path, "is_file", report_missing)
+
+    audit = model4._bootstrap_audit()
+
+    assert audit["retained_runtime_source_available"] is False
+    assert audit["retained_runtime_source_status"] == "UNAVAILABLE"
+    assert audit["retained_runtime_source_error"] == "generated-only artifact absent"
+    assert audit["OPENCLAW_DISCOVERY_BOOTSTRAP_CONTAMINATION_CLASS"] == (
+        "UNAVAILABLE. RETAINED_RUNTIME_TELEMETRY_ABSENT"
     )
 
 

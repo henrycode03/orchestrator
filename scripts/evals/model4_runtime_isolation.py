@@ -37,6 +37,10 @@ EVIDENCE_ROOT = (
     REPOSITORY_ROOT
     / "docs/roadmap/reports/evidence/post33-model4-runtime-isolation-20260825"
 )
+RETAINED_RUNTIME_SOURCE = (
+    REPOSITORY_ROOT
+    / "docs/roadmap/reports/evidence/post33-runtime3/probes/neutral-identity-probe.stderr"
+)
 PERSISTENT_OPENCLAW_CONFIG = retained.PERSISTENT_OPENCLAW_CONFIG
 PROVIDER_CALL_BUDGET = 6
 PROVIDER_RETRIES = 0
@@ -237,11 +241,21 @@ def _bootstrap_audit() -> dict[str, Any]:
     service_source = (
         REPOSITORY_ROOT / "app/services/agents/openclaw_service.py"
     ).read_text(encoding="utf-8")
-    retained_raw = (
-        REPOSITORY_ROOT
-        / "docs/roadmap/reports/evidence/post33-runtime3/probes/neutral-identity-probe.stderr"
-    ).read_text(encoding="utf-8")
-    retained_payload = _json_from_mixed_text(retained_raw) or {}
+    retained_runtime_source_available = RETAINED_RUNTIME_SOURCE.is_file()
+    retained_runtime_source_error = None
+    retained_payload: dict[str, Any] = {}
+    if retained_runtime_source_available:
+        try:
+            retained_raw = RETAINED_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        except OSError as exc:
+            retained_runtime_source_available = False
+            retained_runtime_source_error = (
+                f"retained runtime artifact unreadable: {type(exc).__name__}"
+            )
+        else:
+            retained_payload = _json_from_mixed_text(retained_raw) or {}
+    else:
+        retained_runtime_source_error = "generated-only artifact absent"
     report = (retained_payload.get("meta") or {}).get("systemPromptReport") or {}
     injected = {
         str(item.get("name")): item
@@ -250,6 +264,11 @@ def _bootstrap_audit() -> dict[str, Any]:
     }
     system_prompt = report.get("systemPrompt") or {}
     extra_chars = int(system_prompt.get("chars") or 0)
+    contamination_class = (
+        "C. BOOTSTRAP_CONTEXT_PRESENT"
+        if retained_runtime_source_available
+        else "UNAVAILABLE. RETAINED_RUNTIME_TELEMETRY_ABSENT"
+    )
     return {
         "OPENCLAW_DISCOVERY_SKIP_BOOTSTRAP": (
             'defaults["skipBootstrap"] = True' in binding_source
@@ -276,10 +295,12 @@ def _bootstrap_audit() -> dict[str, Any]:
         ),
         "OPENCLAW_DISCOVERY_PRIOR_SESSION_CONTEXT_POSSIBLE": False,
         "OPENCLAW_DISCOVERY_SYSTEM_PROMPT_EXTRA_CHARS": extra_chars,
-        "retained_runtime_source": str(
-            REPOSITORY_ROOT
-            / "docs/roadmap/reports/evidence/post33-runtime3/probes/neutral-identity-probe.stderr"
+        "retained_runtime_source": str(RETAINED_RUNTIME_SOURCE),
+        "retained_runtime_source_available": retained_runtime_source_available,
+        "retained_runtime_source_status": (
+            "AVAILABLE" if retained_runtime_source_available else "UNAVAILABLE"
         ),
+        "retained_runtime_source_error": retained_runtime_source_error,
         "retained_session_key": ((report.get("sessionKey")) or None),
         "retained_injected_workspace_files": injected,
         "retained_system_prompt": system_prompt,
@@ -289,7 +310,7 @@ def _bootstrap_audit() -> dict[str, Any]:
             "prior_history": "not possible under the fresh store; repeated session key alone does not import transcript",
             "bootstrap": "skipBootstrap is set, but retained telemetry still reports injected missing-file placeholders",
         },
-        "OPENCLAW_DISCOVERY_BOOTSTRAP_CONTAMINATION_CLASS": "C. BOOTSTRAP_CONTEXT_PRESENT",
+        "OPENCLAW_DISCOVERY_BOOTSTRAP_CONTAMINATION_CLASS": contamination_class,
     }
 
 
