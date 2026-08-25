@@ -1,5 +1,7 @@
 """Provider-free controls for the POST33-MODEL4 evaluation-only seam."""
 
+import pytest
+
 from scripts.evals import model4_discovery_ab as model4
 
 
@@ -48,11 +50,24 @@ def test_model4_scoring_contract_and_adoption_threshold_are_frozen():
 
 def test_model4_c1_check_rejects_unexpected_hashes_without_repair():
     observed = model4._c1_check()
+    if not observed["c1_available"]:
+        pytest.skip(observed["failure_reason"])
     assert observed["identity_match"] is True
     assert model4._c1_check({"hashes": observed["hashes"]})["identity_match"] is True
     mismatched = model4._c1_check({"hashes": {"openai-completions": "wrong"}})
     assert mismatched["identity_match"] is False
     assert "hash" in mismatched["failure_reason"]
+
+
+def test_model4_c1_check_reports_missing_openclaw_installation(monkeypatch, tmp_path):
+    monkeypatch.setattr(model4, "OPENCLAW_ROOT", tmp_path / "missing-openclaw")
+
+    observed = model4._c1_check()
+
+    assert observed["status"] == "UNAVAILABLE"
+    assert observed["c1_available"] is False
+    assert observed["identity_match"] is False
+    assert "OpenClaw C1 runtime unavailable" in observed["failure_reason"]
 
 
 def test_model4_prompt_packets_are_canonical_single_turn_inputs():

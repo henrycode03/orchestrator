@@ -54,6 +54,7 @@ from app.services.orchestration.validation.parsing import extract_structured_tex
 
 EVIDENCE_ROOT = REPOSITORY_ROOT / "docs/roadmap/reports/evidence/post33-model4"
 PATCH_CHECKER = REPOSITORY_ROOT / "scripts/maintenance/apply_openclaw_c1_patch.py"
+OPENCLAW_ROOT = Path("/usr/lib/node_modules/openclaw")
 PROVIDER_CALL_BUDGET = 14
 PROVIDER_RETRIES = 0
 DISCOVERY_TIMEOUT_SECONDS = base.DISCOVERY_TIMEOUT_SECONDS
@@ -231,19 +232,31 @@ def _c1_check(expected: dict[str, Any] | None = None) -> dict[str, Any]:
     hashes = {
         row.get("name"): row.get("sha256") for row in state[1:] if isinstance(row, dict)
     }
-    pi_package = Path(
-        "/usr/lib/node_modules/openclaw/node_modules/@mariozechner/pi-ai/package.json"
-    )
-    pi_ai_version = json.loads(pi_package.read_text(encoding="utf-8")).get("version")
+    openclaw_package = OPENCLAW_ROOT / "package.json"
+    pi_package = OPENCLAW_ROOT / "node_modules/@mariozechner/pi-ai/package.json"
+    c1_available = openclaw_package.is_file() and pi_package.is_file()
+    pi_ai_version = None
+    if c1_available:
+        try:
+            package = json.loads(pi_package.read_text(encoding="utf-8"))
+            if isinstance(package, dict):
+                pi_ai_version = package.get("version")
+            else:
+                c1_available = False
+        except (OSError, json.JSONDecodeError):
+            c1_available = False
     expected_hashes = (expected or {}).get("hashes")
     identity_match = (
-        proc.returncode == 0
+        c1_available
+        and proc.returncode == 0
         and openclaw_version == EXPECTED_OPENCLAW_VERSION
         and pi_ai_version == EXPECTED_PI_AI_VERSION
         and (expected_hashes is None or hashes == expected_hashes)
     )
     result = {
-        "status": "PASS" if identity_match else "INVALID",
+        "status": (
+            "PASS" if identity_match else "INVALID" if c1_available else "UNAVAILABLE"
+        ),
         "command": [sys.executable, str(PATCH_CHECKER), "check"],
         "return_code": proc.returncode,
         "duration_seconds": round(time.monotonic() - started, 3),
@@ -253,11 +266,16 @@ def _c1_check(expected: dict[str, Any] | None = None) -> dict[str, Any]:
         "expected_openclaw_version": EXPECTED_OPENCLAW_VERSION,
         "expected_pi_ai_version": EXPECTED_PI_AI_VERSION,
         "expected_hashes": expected_hashes,
+        "c1_available": c1_available,
         "identity_match": identity_match,
         "stdout": _redact(proc.stdout),
         "stderr": _redact(proc.stderr),
     }
-    if proc.returncode != 0:
+    if not c1_available:
+        result["failure_reason"] = (
+            "OpenClaw C1 runtime unavailable: expected package files are not installed"
+        )
+    elif proc.returncode != 0:
         result["failure_reason"] = "repository-managed C1 checker failed"
     elif openclaw_version != EXPECTED_OPENCLAW_VERSION:
         result["failure_reason"] = "OpenClaw version changed"
