@@ -411,7 +411,10 @@ def test_planning_profile_backend_mismatch_still_fails_closed(db_session, monkey
 # ---------------------------------------------------------------------------
 
 
-def test_execution_remains_openclaw_only():
+def test_execution_remains_openclaw_only(monkeypatch):
+    # Keep this capability assertion independent of the CI execution-model
+    # setting; an incapable backend must fail closed on its role boundary.
+    monkeypatch.setattr(settings, "EXECUTION_MODEL", "")
     openclaw = get_backend_descriptor("local_openclaw").capabilities
     assert openclaw.supports_step_execution is True
     assert openclaw.supports_tool_execution is True

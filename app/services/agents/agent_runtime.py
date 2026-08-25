@@ -183,18 +183,6 @@ def validate_runtime_capabilities(
             f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}.",
             code="provider_unavailable",
         )
-    provider_errors = _role_provider_configuration_errors(role)
-    if dispatch and provider_errors:
-        raise RuntimeCapabilityError(
-            f"Runtime role '{role.value}' is not provider-ready: "
-            + "; ".join(provider_errors)
-            + ".",
-            code=(
-                "provider_endpoint_incompatible"
-                if "endpoint" in " ".join(provider_errors)
-                else "provider_model_unavailable"
-            ),
-        )
 
     role_supported = {
         BackendRole.PLANNING: descriptor.capabilities.supports_planning,
@@ -207,6 +195,19 @@ def validate_runtime_capabilities(
         raise RuntimeCapabilityError(
             f"Runtime backend '{descriptor.name}' does not support the {role.value} role.",
             code="provider_endpoint_incompatible",
+        )
+
+    provider_errors = _role_provider_configuration_errors(role)
+    if dispatch and provider_errors:
+        raise RuntimeCapabilityError(
+            f"Runtime role '{role.value}' is not provider-ready: "
+            + "; ".join(provider_errors)
+            + ".",
+            code=(
+                "provider_endpoint_incompatible"
+                if "endpoint" in " ".join(provider_errors)
+                else "provider_model_unavailable"
+            ),
         )
 
     return {
