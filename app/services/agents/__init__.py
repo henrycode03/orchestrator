@@ -7,6 +7,7 @@ from .agent_backends import (
     BackendHealth,
     BackendLaneTraits,
     ExecutionTopology,
+    resolve_execution_topology,
     UnsupportedAgentBackendError,
     get_backend_descriptor,
     list_supported_backends,
@@ -17,6 +18,8 @@ from .agent_runtime import (
     create_agent_runtime,
     invoke_runtime_prompt,
     runtime_reports_context_overflow,
+    execution_topology_for_runtime,
+    resolve_execution_topology_for_role,
     validate_runtime_capabilities,
 )
 from .interfaces import (
@@ -29,6 +32,9 @@ from .interfaces import (
 __all__ = [
     "BackendCapabilities",
     "ExecutionTopology",
+    "resolve_execution_topology",
+    "execution_topology_for_runtime",
+    "resolve_execution_topology_for_role",
     "BackendConfigMetadata",
     "BackendDescriptor",
     "BackendHealth",

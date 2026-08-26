@@ -310,6 +310,7 @@ def _validate_planning_plan(
     plan: list[dict[str, Any]],
     output_text: str,
 ):
+    from app.services.agents.agent_runtime import resolve_execution_topology_for_role
     from app.services.orchestration.phases.planning_task1_bootstrap import (
         is_first_ordered_task as _is_first_ordered_task,
     )
@@ -329,6 +330,9 @@ def _validate_planning_plan(
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,
         source_materialization=getattr(ctx, "planner_source_materialization", None),
+        execution_topology=resolve_execution_topology_for_role(
+            getattr(ctx, "db", None)
+        ),
     )
 
 

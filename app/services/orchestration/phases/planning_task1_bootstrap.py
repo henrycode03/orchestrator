@@ -202,6 +202,8 @@ def reconcile_task1_bootstrap_plan(
     re-validate sequence at each call site.
     """
 
+    from app.services.agents.agent_runtime import resolve_execution_topology_for_role
+
     normalized_plan = normalize(ctx.orchestration_state.plan)
     if normalized_plan == ctx.orchestration_state.plan:
         return None
@@ -228,6 +230,9 @@ def reconcile_task1_bootstrap_plan(
         workflow_stage=ctx.workflow_stage,
         is_first_ordered_task=is_first_ordered_task(ctx.task),
         source_materialization=ctx.planner_source_materialization,
+        execution_topology=resolve_execution_topology_for_role(
+            getattr(ctx, "db", None)
+        ),
     )
 
 

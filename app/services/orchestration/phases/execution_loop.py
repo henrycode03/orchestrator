@@ -182,6 +182,18 @@ from app.services.workspace.control_state_paths import control_state_of
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
 
 
+def _execution_topology_for_runtime(runtime_service: Any) -> Any:
+    """Resolve the dispatching runtime's execution topology (deferred import).
+
+    ``agent_runtime`` imports the orchestration package, so this import stays
+    inside the call, as the other runtime imports in this module already do.
+    """
+
+    from app.services.agents.agent_runtime import execution_topology_for_runtime
+
+    return execution_topology_for_runtime(runtime_service)
+
+
 def _restore_authority_bound_step(
     plan: list[dict[str, Any]],
     accepted_plan: list[dict[str, Any]],
@@ -2986,6 +2998,7 @@ def execute_step_loop(
                     workflow_stage=getattr(ctx, "workflow_stage", None),
                     is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                     planner_contract=ctx.planner_contract,
+                    execution_topology=_execution_topology_for_runtime(runtime_service),
                 )
                 record_validation_verdict(
                     db,

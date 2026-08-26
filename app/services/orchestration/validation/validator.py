@@ -18,6 +18,7 @@ from ..types import (
     ValidationVerdict,
 )
 
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.operations.file_ops_contract import (
     ReplaceOperationMode,
     SemanticReplaceIntent,
@@ -161,6 +162,9 @@ from .rules.core_file_ops import (
     _read_only_stage_allows_report_write,
     _replace_in_file_has_repairable_old_text_issue,
     _step_is_readonly_inspection,
+)
+from .rules.core_execution_capability import (
+    plan_steps_without_execution_channel,
 )
 from .rules.core_paths import (
     _plan_contains_duplicated_path_roots,
@@ -901,6 +905,7 @@ class ValidatorService:
                 "expected_source_file_not_materialized"
             ),
             "unmaterialized_expected_files": "unmaterialized_expected_files",
+            "steps_without_execution_channel": "step_execution_channel_missing",
             "oversized_command_steps": "oversized_command_length",
             "brittle_command_subcodes": "brittle_command",
             "malformed_shell_quoting_steps": "malformed_shell_quoting",
@@ -1470,6 +1475,7 @@ class ValidatorService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Mapping[str, Any] | None = None,
         source_materialization: Any = None,
+        execution_topology: ExecutionTopology | None = None,
     ) -> PlanOutcome:
         # The Accepted Path Authority binds the plan the caller holds, which is
         # also what ``_completion_plan_identity`` hashes downstream.  The local
@@ -1786,6 +1792,30 @@ class ValidatorService:
                     f"scope ({out_of_scope[:8]})"
                 )
                 details["task_scope_violation_paths"] = out_of_scope[:20]
+
+        # Phase 34-A: ACCEPTED_STEP_EXECUTION_CAPABILITY_COMPLETE.  A mutating
+        # step is only admissible when a channel that can actually perform the
+        # mutation exists under the resolved execution topology.  Callers that
+        # have not resolved a topology are unchanged; the production planning
+        # path resolves it from the EXECUTION-role backend.
+        if execution_topology is not None:
+            unexecutable_steps = plan_steps_without_execution_channel(
+                plan,
+                project_dir=Path(project_dir) if project_dir is not None else None,
+                execution_topology=execution_topology,
+            )
+            if unexecutable_steps:
+                repairable.append(
+                    "Plan steps mutate the workspace through a shell command this "
+                    "execution topology cannot run; express the file change as "
+                    "`ops` file operations instead "
+                    f"(steps: {sorted(unexecutable_steps)[:5]})"
+                )
+                details["steps_without_execution_channel"] = {
+                    str(step_number): commands[:5]
+                    for step_number, commands in sorted(unexecutable_steps.items())
+                }
+                details["execution_topology"] = execution_topology.value
 
         command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
         details["step_count"] = command_budget["step_count"]

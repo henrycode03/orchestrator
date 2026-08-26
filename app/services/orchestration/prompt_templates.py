@@ -293,6 +293,19 @@ def estimate_token_count(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _is_structured_orchestrator_topology(execution_topology: Any) -> bool:
+    """True when the resolved topology leaves every mutation to the Orchestrator.
+
+    Compared by value so the prompt layer does not import the agents package
+    (which imports orchestration).
+    """
+
+    if execution_topology is None:
+        return False
+    value = getattr(execution_topology, "value", execution_topology)
+    return str(value) == "structured_orchestrator_execution"
+
+
 class PromptTemplates:
     """
     Collection of LLM prompt templates for OpenClaw orchestration.
@@ -464,6 +477,54 @@ Return only a JSON array matching this shape. No markdown. No prose.
 {execution_profile_rules}
 
 **Output:** status, output, verification_output, files_changed, error_message
+"""
+
+    # ── 2b. STEP EXECUTION — STRUCTURED_ORCHESTRATOR residual turn ────────────
+    #
+    # Phase 34-A: under ``ExecutionTopology.STRUCTURED_ORCHESTRATOR`` the
+    # Orchestrator has already applied this step's structured file operations,
+    # local commands, and verification through ExecutorService under the
+    # Accepted Path Authority.  The runtime receiving this prompt has no native
+    # mutation tools, no workspace binding, and no result-to-file-operation
+    # protocol, so it is never told to write files, to rely on a provider cwd,
+    # or that reported changed files constitute execution.  Its responsibility
+    # is advisory: explain, interpret, or report a blocker.
+
+    STEP_EXECUTION_STRUCTURED = """Report on this step.
+
+**Step:** {step_description}
+
+**Execution Profile:** {execution_profile}
+
+**Workspace (read-only context):** {project_dir}
+
+**Planned Commands:**
+{step_commands}
+
+**Verify:** {verification_command}
+**Expected Files:**
+{expected_files}
+
+**Previous:** {completed_steps_summary}
+
+**Context:** {project_context}
+
+**Execution Responsibility:**
+1. The Orchestrator owns this step's file operations, commands, and verification. It has already applied every mutation this step is authorized to make.
+2. You have no file-writing tools and no working directory here. Do NOT attempt to create, edit, move, or delete files, and do NOT emit shell commands to be run on your behalf.
+3. Reporting a file as changed does not change it. Do not claim a mutation you did not observe in the provided context.
+4. Your job is the residual reasoning turn only: describe what the step does, interpret the workspace evidence you were given, or state a blocker.
+
+**Reporting Rules:**
+1. Be specific and brief; ground every statement in the step, the planned commands, and the provided workspace context.
+2. If the step cannot be satisfied as described, set status to failed and explain the blocker in error_message.
+3. Do not invent verification output. If you were not shown verification evidence, say so.
+4. Do not propose new steps, new files, or documentation that the step did not request.
+
+**Execution Profile Rules:**
+{execution_profile_rules}
+
+**Output:** status, output, verification_output, error_message
 """
 
     # ── 3. DEBUGGING (Concise) ────────────────────────────────────────────────
@@ -888,6 +949,7 @@ Examples:
         templates = {
             "task_planning": cls.TASK_PLANNING,
             "step_execution": cls.STEP_EXECUTION,
+            "step_execution_structured": cls.STEP_EXECUTION_STRUCTURED,
             "debugging": cls.DEBUGGING_TASK,
             "plan_revision": cls.PLAN_REVISION,
             "task_summary": cls.TASK_SUMMARY,
@@ -1059,6 +1121,7 @@ Examples:
         completed_steps_summary: Optional[str] = None,
         project_context: Optional[str] = None,
         execution_profile: str = "full_lifecycle",
+        execution_topology: Any = None,
     ) -> str:
         """
         Build a prompt for step execution phase.
@@ -1104,6 +1167,14 @@ Examples:
             "project_context": project_context_text,
         }
 
+        # Phase 34-A: the execution semantics are selected from the resolved
+        # ExecutionTopology, not from the step or the backend name.  A runtime
+        # that cannot mutate the workspace is never handed toolful execution
+        # instructions.  ``None`` keeps the historical agent-runtime template
+        # for callers that have not resolved a topology.
+        if _is_structured_orchestrator_topology(execution_topology):
+            context.pop("rollback_command", None)
+            return cls.render("step_execution_structured", **context)
         return cls.render("step_execution", **context)
 
     @classmethod

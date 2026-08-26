@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from app.services.agents.agent_backends import get_backend_descriptor
 from app.services.orchestration.context import assembly
 from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
@@ -44,6 +45,13 @@ def _execution_context(runtime_workspace: Path) -> SimpleNamespace:
         execution_profile="full_lifecycle",
         workflow_profile="default",
         orchestration_state=state,
+        # Phase 34-A: the file-tool path contract below belongs to the toolful
+        # AGENT_RUNTIME execution prompt, so the context declares the topology
+        # it is contracting about.  A context with no runtime fails closed to
+        # STRUCTURED_ORCHESTRATOR, which is given no file-tool instructions.
+        runtime_service=SimpleNamespace(
+            backend_descriptor=get_backend_descriptor("local_openclaw")
+        ),
     )
 
 

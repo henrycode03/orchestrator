@@ -25,7 +25,12 @@ RULES_PACKAGE_DIR = (
     REPO_ROOT / "app" / "services" / "orchestration" / "validation" / "rules"
 )
 
-CORE_MODULES = {"core_schema", "core_paths", "core_file_ops"}
+CORE_MODULES = {
+    "core_schema",
+    "core_paths",
+    "core_file_ops",
+    "core_execution_capability",
+}
 CONTRACT_MODULES = {
     "contract_placeholders",
     "contract_python",

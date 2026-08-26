@@ -94,6 +94,23 @@ class BackendCapabilities:
         ]
 
 
+def resolve_execution_topology(
+    capabilities: "BackendCapabilities",
+) -> ExecutionTopology:
+    """Return the execution topology a backend's declared capabilities support.
+
+    Phase 34-A: the one place an ``ExecutionTopology`` is decided.  Derived from
+    declared capabilities only -- never from a backend name -- and fail-closed:
+    a backend that does not declare the full agent-runtime capability set is a
+    ``STRUCTURED_ORCHESTRATOR`` deployment, in which the Orchestrator owns every
+    workspace mutation and the runtime only carries the residual reasoning turn.
+    """
+
+    if not capabilities.missing_execution_capabilities(ExecutionTopology.AGENT_RUNTIME):
+        return ExecutionTopology.AGENT_RUNTIME
+    return ExecutionTopology.STRUCTURED_ORCHESTRATOR
+
+
 @dataclass(frozen=True)
 class BackendLaneTraits:
     """Provider-neutral planning/repair lane traits for governed escalation."""

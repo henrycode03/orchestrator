@@ -21,6 +21,7 @@ from app.services.agents.agent_backends import (
     ExecutionTopology,
     UnsupportedAgentBackendError,
     require_backend_descriptor,
+    resolve_execution_topology,
 )
 from app.services.agents.interfaces import AgentRuntime
 from app.services.agents.providers import get_runtime_factory
@@ -120,6 +121,42 @@ def _role_provider_configuration_errors(role: BackendRole) -> list[str]:
         )
         errors.append(f"{setting_name} is not configured")
     return errors
+
+
+def execution_topology_for_runtime(runtime_service: Any) -> ExecutionTopology:
+    """Resolve the execution topology of an already-constructed runtime.
+
+    Phase 34-A: execution-time consumers (prompt construction, dispatch
+    semantics) read the topology off the runtime that will actually receive the
+    call, so admission and rendering cannot disagree about a runtime's
+    abilities.  A runtime with no descriptor -- a stub, or an adapter that does
+    not publish one -- fails closed to ``STRUCTURED_ORCHESTRATOR``.
+    """
+
+    descriptor = getattr(runtime_service, "backend_descriptor", None)
+    capabilities = getattr(descriptor, "capabilities", None)
+    if capabilities is None:
+        return ExecutionTopology.STRUCTURED_ORCHESTRATOR
+    return resolve_execution_topology(capabilities)
+
+
+def resolve_execution_topology_for_role(
+    db: Session, role: BackendRole | str = BackendRole.EXECUTION
+) -> ExecutionTopology:
+    """Resolve the execution topology of the deployment's EXECUTION runtime.
+
+    Used by plan admission, which runs before an execution runtime exists.  It
+    reads the same resolved backend the execution loop will construct, so the
+    admitted plan and the runtime that must carry it are judged against one
+    topology fact.  Any resolution failure fails closed.
+    """
+
+    try:
+        configuration = resolve_runtime_configuration(db, _coerce_backend_role(role))
+        descriptor = require_backend_descriptor(configuration.backend_name)
+    except Exception:
+        return ExecutionTopology.STRUCTURED_ORCHESTRATOR
+    return resolve_execution_topology(descriptor.capabilities)
 
 
 def validate_runtime_capabilities(

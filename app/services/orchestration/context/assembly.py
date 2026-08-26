@@ -755,6 +755,19 @@ def _runtime_metadata(ctx: OrchestrationContext) -> Dict[str, Any]:
         return {}
 
 
+def _execution_topology(ctx: OrchestrationContext) -> Any:
+    """Resolve the execution topology of the runtime this prompt is built for.
+
+    Phase 34-A: prompt rendering and plan admission read the same topology fact,
+    so they cannot disagree about what the runtime is able to do.  Import is
+    deferred because ``agent_runtime`` imports the orchestration package.
+    """
+
+    from app.services.agents.agent_runtime import execution_topology_for_runtime
+
+    return execution_topology_for_runtime(getattr(ctx, "runtime_service", None))
+
+
 def _execution_guidance_target(ctx: OrchestrationContext) -> tuple[str, str]:
     """Return backend/model family for the runtime receiving execution prompts."""
     metadata = _runtime_metadata(ctx)
@@ -971,6 +984,11 @@ def assemble_execution_prompt(
         preserve_external_paths=get_effective_adaptation_profile(ctx.db)
         == "openai_responses_default",
     )
+    execution_topology = _execution_topology(ctx)
+    structured_orchestrator_topology = (
+        getattr(execution_topology, "value", execution_topology)
+        == "structured_orchestrator_execution"
+    )
     expected_files = step.get("expected_files", []) or []
     workspace_max_files = 18 if compact else 40
     project_context_max_chars = 700 if compact else 1500
@@ -979,8 +997,20 @@ def assemble_execution_prompt(
     validation_history_entries = 1 if compact else 2
     validation_history_chars = 180 if compact else 400
     instructions = [
-        "Treat the provided step commands as the primary implementation plan for this step.",
-        "Ground your work in the current workspace state.",
+        (
+            # Phase 34-A: under STRUCTURED_ORCHESTRATOR the Orchestrator has
+            # already applied this step's operations, commands, and
+            # verification; the runtime turn is advisory only.
+            "Treat the provided step commands as already-owned Orchestrator work "
+            "to reason about, not as work for you to perform."
+            if structured_orchestrator_topology
+            else "Treat the provided step commands as the primary implementation plan for this step."
+        ),
+        (
+            "Ground every statement in the provided workspace state."
+            if structured_orchestrator_topology
+            else "Ground your work in the current workspace state."
+        ),
         (
             "If you need human confirmation before continuing, output exactly one "
             "sentinel in this format and stop: "
@@ -1035,6 +1065,7 @@ def assemble_execution_prompt(
         ),
         project_context=project_context,
         execution_profile=ctx.execution_profile,
+        execution_topology=execution_topology,
     )
     execution_backend, execution_model_family = _execution_guidance_target(ctx)
     project = getattr(ctx, "project", None)
@@ -1080,8 +1111,13 @@ def assemble_execution_prompt(
             "Compact Retry": compact,
         },
         expected_output=(
-            "Structured step result describing status, output, verification_output, "
-            "files_changed, and any error details."
+            # Phase 34-A: the structured-orchestrator residual turn is advisory,
+            # so its result contract never asks for reported file changes.
+            "Structured step report describing status, output, verification_output, "
+            "and any error details."
+            if structured_orchestrator_topology
+            else "Structured step result describing status, output, "
+            "verification_output, files_changed, and any error details."
         ),
     )
 
