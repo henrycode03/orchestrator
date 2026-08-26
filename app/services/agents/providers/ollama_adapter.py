@@ -19,6 +19,10 @@ from app.services.agents.interfaces import (
 )
 from app.services.agents.runtime_configuration import RuntimeConfiguration
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
+from app.services.agents.single_model_deployment import (
+    canonical_generation_base_url,
+    low_resource_single_model_enabled,
+)
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
@@ -147,7 +151,13 @@ class OllamaRuntime:
         exact_contract = invocation_options is not None
         base_url = self._base_url
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if exact_contract and self.backend_role in {
+        if (
+            exact_contract
+            and low_resource_single_model_enabled()
+            and self.backend_descriptor.name == "direct_ollama"
+        ):
+            base_url = canonical_generation_base_url(self.backend_descriptor.name)
+        elif exact_contract and self.backend_role in {
             "repair",
             "debug_repair",
             "completion_repair",

@@ -25,6 +25,11 @@ from app.services.agents.runtime_configuration import (
     BackendRole,
     RuntimeConfiguration,
 )
+from app.services.agents.single_model_deployment import (
+    canonical_generation_api_key,
+    canonical_generation_base_url,
+    low_resource_single_model_enabled,
+)
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
@@ -183,6 +188,8 @@ class OpenAIChatCompletionsRuntime:
 
     @property
     def _base_url(self) -> str:
+        if low_resource_single_model_enabled():
+            return canonical_generation_base_url(self.backend_descriptor.name)
         if self.backend_role in {
             "repair",
             "debug_repair",
@@ -205,6 +212,8 @@ class OpenAIChatCompletionsRuntime:
         ).rstrip("/")
 
     def _api_key(self) -> str:
+        if low_resource_single_model_enabled():
+            return canonical_generation_api_key(self.backend_descriptor.name)
         if self.backend_role in {
             "repair",
             "debug_repair",
@@ -256,6 +265,8 @@ class OpenAIChatCompletionsRuntime:
         return str(getattr(settings, "PLANNING_DIRECT_API_KEY", "") or "").strip()
 
     def _invocation_base_url(self, options: RuntimeInvocationOptions | None) -> str:
+        if low_resource_single_model_enabled():
+            return canonical_generation_base_url(self.backend_descriptor.name)
         if options is not None and self.backend_role in {
             "repair",
             "debug_repair",
@@ -272,6 +283,8 @@ class OpenAIChatCompletionsRuntime:
         return self._base_url
 
     def _invocation_api_key(self, options: RuntimeInvocationOptions | None) -> str:
+        if low_resource_single_model_enabled():
+            return canonical_generation_api_key(self.backend_descriptor.name)
         if options is not None and self.backend_role in {
             "repair",
             "debug_repair",

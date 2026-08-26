@@ -29,6 +29,11 @@ from app.services.agents.runtime_configuration import (
     BackendRole,
     RoleRuntimeConfiguration,
 )
+from app.services.agents.single_model_deployment import (
+    canonical_generation_api_key,
+    canonical_generation_base_url,
+    low_resource_single_model_enabled,
+)
 from app.services.model_adaptation import (
     require_adaptation_profile,
     resolve_adaptation_profile,
@@ -69,6 +74,85 @@ class RuntimeCapabilityError(ValueError):
         self.code = code
 
 
+_LOW_RESOURCE_GENERATION_ROLES = frozenset(
+    {
+        BackendRole.PLANNING,
+        BackendRole.EXECUTION,
+        BackendRole.REPAIR,
+        BackendRole.DEBUG_REPAIR,
+        BackendRole.COMPLETION_REPAIR,
+    }
+)
+
+
+def _low_resource_core_backend(db: Session) -> str:
+    """Resolve and validate the one direct backend for low-resource mode."""
+
+    fallback = get_effective_agent_backend(settings.AGENT_BACKEND, db=db).strip()
+    planning_backend = str(getattr(settings, "PLANNING_BACKEND", None) or "").strip()
+    execution_backend = str(getattr(settings, "EXECUTION_BACKEND", None) or "").strip()
+    planning_backend = planning_backend or execution_backend or fallback
+    execution_backend = execution_backend or planning_backend or fallback
+    if planning_backend != execution_backend:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires PLANNING_BACKEND and "
+            "EXECUTION_BACKEND to resolve to the same backend.",
+            code="provider_configuration_invalid",
+        )
+    if planning_backend == "local_openclaw":
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL cannot require the local_openclaw backend.",
+            code="provider_endpoint_incompatible",
+        )
+    if not planning_backend:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires a configured direct backend.",
+            code="provider_configuration_invalid",
+        )
+    return planning_backend
+
+
+def _low_resource_canonical_model_family(
+    db: Session, backend_name: str | None = None
+) -> str:
+    """Resolve one generation model from the core Planning/Execution fields."""
+
+    canonical_backend = _low_resource_core_backend(db)
+    if backend_name and backend_name != canonical_backend:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL roles must use the canonical backend "
+            f"'{canonical_backend}'.",
+            code="provider_configuration_invalid",
+        )
+    global_model = _effective_global_model_family(db, canonical_backend)
+    if canonical_backend == "direct_ollama":
+        provider_model = str(getattr(settings, "OLLAMA_AGENT_MODEL", "") or "").strip()
+    elif canonical_backend == "openai_chat_completions":
+        provider_model = (
+            str(getattr(settings, "PLANNING_DIRECT_MODEL", "") or "").strip()
+            or str(getattr(settings, "OPENAI_CHAT_COMPLETIONS_MODEL", "") or "").strip()
+        )
+    else:
+        provider_model = ""
+    fallback_model = provider_model or global_model
+    planning_model = str(getattr(settings, "PLANNER_MODEL", "") or "").strip()
+    execution_model = str(getattr(settings, "EXECUTION_MODEL", "") or "").strip()
+    planning_model = planning_model or execution_model or fallback_model
+    execution_model = execution_model or planning_model or fallback_model
+    if planning_model != execution_model:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires PLANNER_MODEL and "
+            "EXECUTION_MODEL to resolve to the same model.",
+            code="provider_model_unavailable",
+        )
+    if not planning_model:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires a configured generation model.",
+            code="provider_model_unavailable",
+        )
+    return planning_model
+
+
 def _configured_context_tokens(role: BackendRole) -> Optional[int]:
     if role is BackendRole.EXECUTION:
         value = getattr(settings, "EXECUTION_CONTEXT_TOKENS", None)
@@ -90,9 +174,15 @@ def _configured_context_tokens(role: BackendRole) -> Optional[int]:
         ) from exc
 
 
-def _role_provider_configuration_errors(role: BackendRole) -> list[str]:
+def _role_provider_configuration_errors(
+    role: BackendRole, *, backend_name: str | None = None
+) -> list[str]:
     if role is BackendRole.EXECUTION:
         errors: list[str] = []
+        if low_resource_single_model_enabled():
+            if not canonical_generation_base_url(backend_name or ""):
+                errors.append("canonical generation endpoint is not configured")
+            return errors
         if not str(getattr(settings, "EXECUTION_MODEL", "") or "").strip():
             errors.append("execution model is not configured")
         return errors
@@ -101,6 +191,10 @@ def _role_provider_configuration_errors(role: BackendRole) -> list[str]:
         BackendRole.DEBUG_REPAIR,
         BackendRole.COMPLETION_REPAIR,
     }:
+        return []
+    if low_resource_single_model_enabled():
+        if not canonical_generation_base_url(backend_name or ""):
+            return ["canonical generation endpoint is not configured"]
         return []
     base_url = getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
     if role is BackendRole.COMPLETION_REPAIR:
@@ -253,7 +347,9 @@ def validate_runtime_capabilities(
             code="provider_endpoint_incompatible",
         )
 
-    provider_errors = _role_provider_configuration_errors(role)
+    provider_errors = _role_provider_configuration_errors(
+        role, backend_name=descriptor.name
+    )
     if dispatch and provider_errors:
         raise RuntimeCapabilityError(
             f"Runtime role '{role.value}' is not provider-ready: "
@@ -366,6 +462,39 @@ def _model_catalog_match(
     return None
 
 
+def _validate_low_resource_runtime_configuration(
+    db: Session, configuration: RoleRuntimeConfiguration
+) -> None:
+    """Fail closed if a low-resource role escapes the canonical identity."""
+
+    if not low_resource_single_model_enabled():
+        return
+    backend_name = _low_resource_core_backend(db)
+    model_family = _low_resource_canonical_model_family(db, backend_name)
+    profile = _low_resource_canonical_profile(db, backend_name)
+    endpoint = canonical_generation_base_url(backend_name)
+    if not endpoint:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires one configured generation endpoint.",
+            code="provider_endpoint_incompatible",
+        )
+    if configuration.backend_name != backend_name:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL resolved a role to a non-canonical backend.",
+            code="provider_configuration_invalid",
+        )
+    if configuration.model_family != model_family:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL resolved a role to a non-canonical model.",
+            code="provider_model_unavailable",
+        )
+    if configuration.adaptation_profile != profile:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL resolved a role to a non-canonical profile.",
+            code="provider_configuration_invalid",
+        )
+
+
 def validate_runtime_provider_contract(
     db: Session,
     role: BackendRole | str,
@@ -377,6 +506,7 @@ def validate_runtime_provider_contract(
 
     role = _coerce_backend_role(role)
     configuration = runtime_configuration or resolve_runtime_configuration(db, role)
+    _validate_low_resource_runtime_configuration(db, configuration)
     descriptor = require_backend_descriptor(configuration.backend_name)
     readiness = validate_runtime_capabilities(
         descriptor,
@@ -475,7 +605,9 @@ def validate_runtime_provider_contract(
         if configuration.backend_name == "openai_chat_completions":
             base_url = (
                 (
-                    getattr(settings, "DEBUG_REPAIR_BASE_URL", "")
+                    canonical_generation_base_url(configuration.backend_name)
+                    if low_resource_single_model_enabled()
+                    else getattr(settings, "DEBUG_REPAIR_BASE_URL", "")
                     or getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
                 )
                 .strip()
@@ -495,7 +627,9 @@ def validate_runtime_provider_contract(
             if (
                 parsed.hostname == "api.openai.com"
                 and not (
-                    getattr(settings, "DEBUG_REPAIR_API_KEY", "")
+                    canonical_generation_api_key(configuration.backend_name)
+                    if low_resource_single_model_enabled()
+                    else getattr(settings, "DEBUG_REPAIR_API_KEY", "")
                     or getattr(settings, "PLANNING_REPAIR_API_KEY", "")
                     or getattr(settings, "OPENAI_API_KEY", "")
                 ).strip()
@@ -536,6 +670,76 @@ def runtime_provider_role_matrix(db: Session) -> dict[str, dict[str, Any]]:
     return matrix
 
 
+def low_resource_single_model_runtime_matrix(db: Session) -> dict[str, Any]:
+    """Return provider-free proof of the opt-in one-runtime role contract."""
+
+    if not low_resource_single_model_enabled():
+        return {
+            "enabled": False,
+            "one_runtime": False,
+            "one_generation_model": False,
+            "one_profile": False,
+            "one_endpoint": False,
+            "errors": ["LOW_RESOURCE_SINGLE_MODEL is disabled"],
+        }
+
+    roles: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    configurations: dict[BackendRole, RoleRuntimeConfiguration] = {}
+    for role in _LOW_RESOURCE_GENERATION_ROLES:
+        try:
+            configuration = resolve_runtime_configuration(db, role)
+            configurations[role] = configuration
+            descriptor = require_backend_descriptor(configuration.backend_name)
+            validate_runtime_capabilities(
+                descriptor,
+                role,
+                effective_context_tokens=_configured_context_tokens(role),
+                dispatch=False,
+            )
+            _validate_low_resource_runtime_configuration(db, configuration)
+            roles[role.value] = configuration.to_dict()
+        except Exception as exc:
+            errors.append(f"{role.value}: {exc}")
+
+    backends = {configuration.backend_name for configuration in configurations.values()}
+    models = {configuration.model_family for configuration in configurations.values()}
+    profiles = {
+        configuration.adaptation_profile for configuration in configurations.values()
+    }
+    endpoints = {
+        canonical_generation_base_url(configuration.backend_name)
+        for configuration in configurations.values()
+    }
+    endpoints.discard("")
+    execution_configuration = configurations.get(BackendRole.EXECUTION)
+    execution_topology = None
+    if execution_configuration is not None:
+        execution_topology = resolve_execution_topology(
+            require_backend_descriptor(
+                execution_configuration.backend_name
+            ).capabilities
+        ).value
+    if len(configurations) != len(_LOW_RESOURCE_GENERATION_ROLES):
+        errors.append("not every generation role resolved")
+    return {
+        "enabled": True,
+        "roles": roles,
+        "generation_backends": sorted(backends),
+        "generation_models": sorted(models),
+        "generation_profiles": sorted(profiles),
+        "generation_endpoints": sorted(endpoints),
+        "one_runtime": len(backends) == 1,
+        "one_generation_model": len(models) == 1,
+        "one_profile": len(profiles) == 1,
+        "one_endpoint": len(endpoints) == 1,
+        "execution_topology": execution_topology,
+        "openclaw_required": "local_openclaw" in backends,
+        "second_provider_required": len(backends) > 1,
+        "errors": errors,
+    }
+
+
 def _test_runtime_backends_enabled() -> bool:
     return bool(getattr(settings, "ENABLE_TEST_RUNTIME_BACKENDS", False))
 
@@ -556,6 +760,8 @@ def _coerce_backend_role(role: BackendRole | str) -> BackendRole:
 def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
     """Return the configured backend name for role, falling back to AGENT_BACKEND."""
     role = _coerce_backend_role(role)
+    if low_resource_single_model_enabled() and role in _LOW_RESOURCE_GENERATION_ROLES:
+        return _low_resource_core_backend(db)
     role_setting = {
         BackendRole.PLANNING: getattr(settings, "PLANNING_BACKEND", None),
         BackendRole.EXECUTION: getattr(settings, "EXECUTION_BACKEND", None),
@@ -584,6 +790,9 @@ def _effective_global_model_family(db: Session, backend_name: str) -> str:
 
 def _role_model_family(db: Session, role: BackendRole, backend_name: str) -> str:
     """Resolve role model ownership using the current compatibility order."""
+
+    if low_resource_single_model_enabled() and role in _LOW_RESOURCE_GENERATION_ROLES:
+        return _low_resource_canonical_model_family(db, backend_name)
 
     global_model_family = _effective_global_model_family(db, backend_name)
     execution_model = str(getattr(settings, "EXECUTION_MODEL", "") or "").strip()
@@ -620,7 +829,51 @@ def _configured_profile_name(db: Session, key: str, setting_name: str) -> Option
     return normalized or None
 
 
+def _low_resource_canonical_profile(db: Session, backend_name: str) -> str:
+    """Resolve one compatible profile for every low-resource role."""
+
+    planning_profile = _configured_profile_name(
+        db, PLANNING_ADAPTATION_PROFILE_KEY, "PLANNING_ADAPTATION_PROFILE"
+    )
+    execution_profile = _configured_profile_name(
+        db, EXECUTION_ADAPTATION_PROFILE_KEY, "EXECUTION_ADAPTATION_PROFILE"
+    )
+    if planning_profile and execution_profile and planning_profile != execution_profile:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires Planning and Execution to "
+            "resolve to the same adaptation profile.",
+            code="provider_configuration_invalid",
+        )
+    candidate = execution_profile or planning_profile
+    descriptor = require_backend_descriptor(backend_name)
+    if candidate:
+        if not _profile_matches_backend(candidate, descriptor):
+            raise UnsupportedRuntimeProfileError(
+                f"Adaptation profile '{candidate}' is not supported by "
+                f"low-resource backend '{descriptor.name}'."
+            )
+        return require_adaptation_profile(candidate).name
+
+    global_profile = get_effective_adaptation_profile(db=db)
+    if _profile_matches_backend(global_profile, descriptor):
+        return require_adaptation_profile(global_profile).name
+    resolved_profile = resolve_adaptation_profile(
+        backend=descriptor.name,
+        model_family=_low_resource_canonical_model_family(db, backend_name),
+    )
+    if _profile_matches_backend(resolved_profile.name, descriptor):
+        return resolved_profile.name
+    for profile_name in descriptor.config.adaptation_profiles:
+        if _profile_matches_backend(profile_name, descriptor):
+            return require_adaptation_profile(profile_name).name
+    raise UnsupportedRuntimeProfileError(
+        f"Backend '{descriptor.name}' has no registered adaptation profile."
+    )
+
+
 def _profile_for_role(db: Session, role: BackendRole) -> Optional[str]:
+    if low_resource_single_model_enabled() and role in _LOW_RESOURCE_GENERATION_ROLES:
+        return _low_resource_canonical_profile(db, _low_resource_core_backend(db))
     profile_settings = {
         BackendRole.PLANNING: (
             PLANNING_ADAPTATION_PROFILE_KEY,
@@ -749,6 +1002,20 @@ def resolve_runtime_configuration(
 
     descriptor = require_backend_descriptor(backend_name)
     if (
+        low_resource_single_model_enabled()
+        and role in _LOW_RESOURCE_GENERATION_ROLES
+        and adaptation_profile_override is not _PROFILE_OVERRIDE_UNSET
+    ):
+        canonical_profile = _low_resource_canonical_profile(db, descriptor.name)
+        explicit_profile = str(adaptation_profile_override or "").strip()
+        if explicit_profile and explicit_profile != canonical_profile:
+            raise RuntimeCapabilityError(
+                "LOW_RESOURCE_SINGLE_MODEL adaptation profile override must "
+                "match the canonical profile.",
+                code="provider_configuration_invalid",
+            )
+        adaptation_profile = canonical_profile
+    elif (
         role is BackendRole.PLANNING
         and adaptation_profile_override is not _PROFILE_OVERRIDE_UNSET
     ):

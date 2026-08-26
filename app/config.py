@@ -172,6 +172,10 @@ class Settings(BaseSettings):
     PLANNING_DIRECT_TEMPERATURE: float = 0.0
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
+    # Opt-in deployment contract for machines that intentionally expose one
+    # direct inference runtime and one generation model to every lifecycle
+    # role.  False preserves the existing role-specific GX10 configuration.
+    LOW_RESOURCE_SINGLE_MODEL: bool = False
     DEBUG_REPAIR_BACKEND: Optional[str] = None
     # The historical repair lanes are OpenAI-compatible chat endpoints. An
     # explicit environment value still owns the backend choice; this default

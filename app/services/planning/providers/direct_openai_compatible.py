@@ -16,6 +16,11 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.config import settings
+from app.services.agents.single_model_deployment import (
+    canonical_generation_api_key,
+    canonical_generation_chat_base_url,
+    low_resource_single_model_enabled,
+)
 from app.services.planning.providers.base import (
     ExecutionMetadata,
     PlanningProviderExecutionError,
@@ -522,8 +527,27 @@ def build_application_owned_messages(
 
 
 def _load_configuration() -> _DirectConfiguration:
-    base_url = str(getattr(settings, "PLANNING_DIRECT_BASE_URL", "") or "").strip()
-    model = str(getattr(settings, "PLANNING_DIRECT_MODEL", "") or "").strip()
+    if low_resource_single_model_enabled():
+        backend_name = str(
+            getattr(settings, "PLANNING_BACKEND", None)
+            or getattr(settings, "EXECUTION_BACKEND", None)
+            or getattr(settings, "AGENT_BACKEND", "")
+        ).strip()
+        base_url = canonical_generation_chat_base_url(backend_name)
+        model = (
+            str(getattr(settings, "PLANNER_MODEL", "") or "").strip()
+            or str(getattr(settings, "EXECUTION_MODEL", "") or "").strip()
+            or (
+                str(getattr(settings, "OLLAMA_AGENT_MODEL", "") or "").strip()
+                if backend_name == "direct_ollama"
+                else str(getattr(settings, "PLANNING_DIRECT_MODEL", "") or "").strip()
+            )
+        )
+        api_key = canonical_generation_api_key(backend_name)
+    else:
+        base_url = str(getattr(settings, "PLANNING_DIRECT_BASE_URL", "") or "").strip()
+        model = str(getattr(settings, "PLANNING_DIRECT_MODEL", "") or "").strip()
+        api_key = str(getattr(settings, "PLANNING_DIRECT_API_KEY", "") or "").strip()
     if not base_url:
         raise DirectProviderConfigurationError("PLANNING_DIRECT_BASE_URL is required")
     if not model:
@@ -537,7 +561,6 @@ def _load_configuration() -> _DirectConfiguration:
         raise DirectProviderConfigurationError(
             "PLANNING_DIRECT_BASE_URL must not contain credentials or query data"
         )
-    api_key = str(getattr(settings, "PLANNING_DIRECT_API_KEY", "") or "").strip()
     if any(character in api_key for character in "\r\n"):
         raise DirectProviderConfigurationError("PLANNING_DIRECT_API_KEY is invalid")
     timeout = _positive_setting("PLANNING_DIRECT_TIMEOUT_SECONDS", 360, minimum=1)

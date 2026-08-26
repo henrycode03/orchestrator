@@ -30,6 +30,11 @@ from ..policy import (
 )
 from app.config import settings
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
+from app.services.agents.single_model_deployment import (
+    canonical_generation_api_key,
+    canonical_generation_chat_base_url,
+    low_resource_single_model_enabled,
+)
 from app.services.orchestration.operations.file_ops_contract import (
     ReplaceOperationMode,
     classify_replace_operation,
@@ -358,10 +363,6 @@ class PlannerService:
             return False
         if not settings.PLANNING_REPAIR_ENABLED:
             return False
-        if not settings.PLANNING_REPAIR_BASE_URL.strip():
-            return False
-        if not settings.PLANNING_REPAIR_MODEL.strip():
-            return False
         backend_metadata: Dict[str, Any] = {}
         get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
         if callable(get_backend_metadata):
@@ -370,6 +371,19 @@ class PlannerService:
             except Exception:
                 backend_metadata = {}
         backend_name = str(backend_metadata.get("backend") or "").strip()
+        if low_resource_single_model_enabled():
+            runtime_model = str(backend_metadata.get("model_family") or "").strip()
+            if not canonical_generation_chat_base_url(backend_name) or not (
+                runtime_model
+                or str(getattr(settings, "PLANNER_MODEL", "") or "").strip()
+                or str(getattr(settings, "EXECUTION_MODEL", "") or "").strip()
+            ):
+                return False
+        elif (
+            not settings.PLANNING_REPAIR_BASE_URL.strip()
+            or not settings.PLANNING_REPAIR_MODEL.strip()
+        ):
+            return False
         if prompt_chars > DIRECT_PLANNING_PROMPT_CHAR_CAP:
             _logger.info(
                 "[PLANNING_DIRECT] skip: prompt_chars=%d > cap=%d",
@@ -438,10 +452,6 @@ class PlannerService:
     ) -> Optional[Dict[str, Any]]:
         import time as _time
 
-        base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
-        model = cls._direct_no_thinking_model(runtime_service)
-        api_key = settings.PLANNING_REPAIR_API_KEY
-        configured_direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
         backend_metadata: Dict[str, Any] = {}
         get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
         if callable(get_backend_metadata):
@@ -450,6 +460,14 @@ class PlannerService:
             except Exception:
                 backend_metadata = {}
         backend_name = str(backend_metadata.get("backend") or "").strip()
+        if low_resource_single_model_enabled():
+            base_url = canonical_generation_chat_base_url(backend_name)
+            api_key = canonical_generation_api_key(backend_name)
+        else:
+            base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
+            api_key = settings.PLANNING_REPAIR_API_KEY
+        model = cls._direct_no_thinking_model(runtime_service)
+        configured_direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
         local_openclaw_timeout = int(
             getattr(settings, "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS", 0) or 0
         )
@@ -1859,6 +1877,20 @@ class PlannerService:
 
         backend_name = str(backend_metadata.get("backend") or "").strip()
         runtime_model = str(backend_metadata.get("model_family") or "").strip()
+        if low_resource_single_model_enabled():
+            if runtime_model:
+                return runtime_model
+            return (
+                str(getattr(settings, "PLANNER_MODEL", "") or "").strip()
+                or str(getattr(settings, "EXECUTION_MODEL", "") or "").strip()
+                or (
+                    str(getattr(settings, "OLLAMA_AGENT_MODEL", "") or "").strip()
+                    if backend_name == "direct_ollama"
+                    else str(
+                        getattr(settings, "PLANNING_DIRECT_MODEL", "") or ""
+                    ).strip()
+                )
+            )
         if (
             backend_name == "direct_ollama"
             and configured_model
