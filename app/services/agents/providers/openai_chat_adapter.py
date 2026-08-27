@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import replace
 from typing import Any, Optional
 
 import httpx
@@ -33,6 +34,9 @@ from app.services.agents.single_model_deployment import (
 from app.services.model_adaptation import (
     get_adaptation_profile,
     resolve_adaptation_profile,
+)
+from app.services.orchestration.planning.discovery_contract_capture import (
+    DiscoveryContractCapture,
 )
 
 
@@ -76,6 +80,19 @@ def _normalize_chat_content_value(value: Any) -> str:
 def _strip_thinking(text: Any) -> str:
     normalized = _normalize_chat_content_value(text)
     return re.sub(r"<think>.*?</think>", "", normalized, flags=re.DOTALL).strip()
+
+
+def _structured_response_format(schema: dict[str, Any]) -> dict[str, Any]:
+    """Translate the semantic schema into the standard JSON-schema shape."""
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "discovery_action",
+            "strict": True,
+            "schema": schema,
+        },
+    }
 
 
 def _response_shape_observability(body: Any, content: str) -> dict[str, Any]:
@@ -320,6 +337,8 @@ class OpenAIChatCompletionsRuntime:
         user: str,
         timeout_seconds: int,
         invocation_options: RuntimeInvocationOptions | None = None,
+        diagnostic_label: str | None = None,
+        diagnostic_metadata: Any = None,
     ) -> str:
         provider_diagnostics = _provider_bound_prompt_diagnostics(
             user,
@@ -373,6 +392,10 @@ class OpenAIChatCompletionsRuntime:
                         ]
                     ),
                 }
+            if invocation_options.response_schema is not None:
+                payload["response_format"] = _structured_response_format(
+                    dict(invocation_options.response_schema)
+                )
         else:
             payload = {
                 "model": self._model_name(),
@@ -397,12 +420,38 @@ class OpenAIChatCompletionsRuntime:
             else timeout_seconds
         )
 
+        request_url = (
+            f"{self._invocation_base_url(invocation_options)}" "/chat/completions"
+        )
+        capture = DiscoveryContractCapture.from_metadata(diagnostic_metadata)
+        adaptation_profile = (
+            self.runtime_configuration.adaptation_profile
+            if self.runtime_configuration is not None
+            else None
+        )
+        if not adaptation_profile:
+            try:
+                adaptation_profile = self._adaptation_profile(self._model_name()).name
+            except Exception:
+                adaptation_profile = None
+        if capture is not None:
+            capture.record_request(
+                endpoint=request_url,
+                model=str(payload.get("model") or ""),
+                backend_role=self.backend_role,
+                low_resource_single_model=low_resource_single_model_enabled(),
+                diagnostic_label=diagnostic_label,
+                user_prompt=user,
+                system_message=system,
+                body=payload,
+                headers=headers,
+                timeout_seconds=effective_timeout,
+                adaptation_profile=adaptation_profile,
+            )
+
         try:
             transport_timeout = (
                 effective_timeout if exact_contract else effective_timeout + 30
-            )
-            request_url = (
-                f"{self._invocation_base_url(invocation_options)}" "/chat/completions"
             )
             async with httpx.AsyncClient(timeout=transport_timeout) as client:
                 provider_diagnostics["provider_invocation_started"] = True
@@ -412,9 +461,54 @@ class OpenAIChatCompletionsRuntime:
                     json=payload,
                 )
                 provider_diagnostics["provider_response_received"] = True
+                if capture is not None:
+                    capture.record_http_response(
+                        status_code=response.status_code,
+                        raw_body=response.content,
+                        content_type=response.headers.get("content-type"),
+                    )
+                try:
+                    body = response.json()
+                except Exception as exc:
+                    if capture is not None:
+                        capture.record_response_decode_failure(str(exc))
+                    raise
+                if capture is not None:
+                    choices = body.get("choices") if isinstance(body, dict) else None
+                    first_choice = (
+                        choices[0]
+                        if isinstance(choices, list)
+                        and choices
+                        and isinstance(choices[0], dict)
+                        else {}
+                    )
+                    capture.record_response_metadata(
+                        response_model=(
+                            body.get("model") if isinstance(body, dict) else None
+                        ),
+                        finish_reason=(
+                            first_choice.get("finish_reason")
+                            if isinstance(first_choice, dict)
+                            else None
+                        ),
+                    )
                 response.raise_for_status()
-                body = response.json()
-                content = _extract_chat_completion_content(body)
+                raw_message_content = _raw_chat_completion_content(body)
+                if capture is not None:
+                    capture.record_message_content(raw_message_content)
+                try:
+                    content = _extract_chat_completion_content(body)
+                except Exception as exc:
+                    if capture is not None:
+                        capture.record_error(
+                            layer="content_extraction", reason=str(exc)
+                        )
+                    raise
+                if capture is not None:
+                    capture.record_extracted_content(content)
+                    capture.record_normalized_content(
+                        _normalize_chat_content_value(raw_message_content)
+                    )
         except httpx.TimeoutException as exc:
             error = AgentRuntimeError(
                 f"OpenAI-compatible chat request timed out after {effective_timeout}s."
@@ -504,15 +598,24 @@ class OpenAIChatCompletionsRuntime:
         *,
         diagnostic_label: Optional[str] = None,
         diagnostic_metadata: Optional[dict[str, Any]] = None,
+        invocation_options: RuntimeInvocationOptions | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         del log_callback
+        system = self._execute_task_system_prompt(diagnostic_label, diagnostic_metadata)
+        # ``execute_task`` historically builds its own role-owned system
+        # message. Preserve that contract while allowing one invocation to
+        # add a standard request option such as discovery JSON output.
+        effective_options = invocation_options
+        if effective_options is not None and effective_options.system_prompt is None:
+            effective_options = replace(effective_options, system_prompt=system)
         output = await self._chat(
-            system=self._execute_task_system_prompt(
-                diagnostic_label, diagnostic_metadata
-            ),
+            system=system,
             user=prompt,
             timeout_seconds=timeout_seconds,
+            invocation_options=effective_options,
+            diagnostic_label=diagnostic_label,
+            diagnostic_metadata=diagnostic_metadata,
         )
         return {
             "status": "completed",
@@ -677,6 +780,21 @@ class OpenAIChatCompletionsRuntime:
                 ):
                     return True
         return False
+
+
+def _raw_chat_completion_content(body: Any) -> Any:
+    if not isinstance(body, dict):
+        return None
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return None
+    return message.get("content")
 
 
 def _extract_chat_completion_content(body: Any) -> str:

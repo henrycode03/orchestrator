@@ -48,6 +48,11 @@ services:
       - qdrant
     volumes:
       - ./orchestrator.db:/app/orchestrator.db
+      # SQLite WAL sidecars must be shared by API and worker containers; the
+      # main database bind alone otherwise gives each container a private WAL
+      # and causes committed rows/schema changes to diverge.
+      - ./orchestrator.db-wal:/app/orchestrator.db-wal
+      - ./orchestrator.db-shm:/app/orchestrator.db-shm
       - ./data:/app/data
       - ./logs:/app/logs
       - ./checkpoints:/app/checkpoints
@@ -93,6 +98,8 @@ services:
       - qdrant
     volumes:
       - ./orchestrator.db:/app/orchestrator.db
+      - ./orchestrator.db-wal:/app/orchestrator.db-wal
+      - ./orchestrator.db-shm:/app/orchestrator.db-shm
       - ./data:/app/data
       - ./logs:/app/logs
       - ./checkpoints:/app/checkpoints

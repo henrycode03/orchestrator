@@ -11,6 +11,11 @@ import subprocess
 from typing import Any, Callable, Mapping
 
 from app.config import settings
+from app.services.agents.runtime_invocation import RuntimeInvocationOptions
+from app.services.orchestration.planning.discovery_contract_capture import (
+    DISCOVERY_ACTION_SCHEMA,
+    DiscoveryContractCapture,
+)
 from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_NEW,
@@ -362,6 +367,7 @@ def run_discovery_stage(
     planner_service: Any,
     emit_phase_event: Callable[..., Any],
     explicit_paths: tuple[str, ...] = (),
+    capture_path: str | Path | None = None,
 ) -> DiscoveryObservation:
     if getattr(ctx, "read_only_discovery_completed", False):
         raise DiscoveryContractError("discovery_turn_already_used")
@@ -389,6 +395,24 @@ def run_discovery_stage(
             **orientation.as_details(),
         },
     )
+    discovery_runtime_options: dict[str, Any] = {}
+    # C4's JSON constraint is specific to the active L1 single-model runtime.
+    # Legacy multi-model deployments retain their exact discovery wire
+    # contract.
+    if bool(getattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)):
+        discovery_runtime_options["invocation_options"] = RuntimeInvocationOptions(
+            extra_provider_options={"response_format": {"type": "json_object"}},
+            response_schema=DISCOVERY_ACTION_SCHEMA,
+        )
+    diagnostic_metadata = {
+        "session_id": ctx.session_id,
+        "task_id": ctx.task_id,
+        "task_execution_id": ctx.task_execution_id,
+        "stage": "read_only_discovery",
+        "max_discovery_turns": 1,
+    }
+    if capture_path is not None:
+        diagnostic_metadata["discovery_contract_capture_path"] = str(capture_path)
     try:
         result = asyncio.run(
             planner_service._execute_task_with_planning_lock(
@@ -400,13 +424,8 @@ def run_discovery_stage(
                 reuse_task_session=False,
                 direct_planning_state={"direct_unavailable": True},
                 diagnostic_label="PLANNING_DISCOVERY",
-                diagnostic_metadata={
-                    "session_id": ctx.session_id,
-                    "task_id": ctx.task_id,
-                    "task_execution_id": ctx.task_execution_id,
-                    "stage": "read_only_discovery",
-                    "max_discovery_turns": 1,
-                },
+                diagnostic_metadata=diagnostic_metadata,
+                **discovery_runtime_options,
             )
         )
     except DiscoveryContractError:
@@ -439,12 +458,47 @@ def run_discovery_stage(
             if provider_classification:
                 error.provider_failure_classification = provider_classification
         raise error
-    request = parse_discovery_request(
-        discovery_output_text(result, extract_structured_text)
+    capture = (
+        DiscoveryContractCapture.load(capture_path)
+        if capture_path is not None
+        else None
     )
-    observation = execute_discovery_request(
-        Path(ctx.orchestration_state.project_dir), request
-    )
+    try:
+        parser_input = discovery_output_text(result, extract_structured_text)
+        if capture is not None:
+            capture.record_parser_input(parser_input)
+        request = parse_discovery_request(parser_input)
+    except DiscoveryContractError as exc:
+        if capture is not None:
+            capture.record_parser_result(success=False, reason=str(exc))
+        raise
+    except Exception as exc:
+        if capture is not None:
+            capture.record_error(layer="content_extraction", reason=str(exc))
+            capture.record_parser_result(success=False, reason=str(exc))
+        raise
+    if capture is not None:
+        capture.record_parser_result(success=True, action=request.action)
+    try:
+        observation = execute_discovery_request(
+            Path(ctx.orchestration_state.project_dir), request
+        )
+    except Exception as exc:
+        if capture is not None:
+            capture.record_action_result(
+                validation_pass=True,
+                executable=False,
+                action=request.action,
+                reason=str(exc),
+            )
+        raise
+    if capture is not None:
+        capture.record_action_result(
+            validation_pass=True,
+            executable=True,
+            action=request.action,
+            reason=None,
+        )
     ctx.read_only_observation = observation
     return observation
 

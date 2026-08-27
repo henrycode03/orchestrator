@@ -122,6 +122,7 @@ class AgentRuntime(Protocol):
         *,
         diagnostic_label: Optional[str] = None,
         diagnostic_metadata: Optional[dict[str, Any]] = None,
+        invocation_options: Optional[RuntimeInvocationOptions] = None,
     ) -> dict[str, Any]: ...
 
     async def pause_session(self) -> None: ...

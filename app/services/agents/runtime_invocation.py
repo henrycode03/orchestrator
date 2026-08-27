@@ -7,7 +7,7 @@ contract at the provider adapter boundary.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Mapping
 
@@ -17,6 +17,7 @@ _ALLOWED_EXTRA_PROVIDER_OPTIONS = frozenset(
         "chat_template_kwargs",
         "enable_thinking",
         "num_ctx",
+        "response_format",
         "repeat_penalty",
         "think",
         "top_p",
@@ -44,6 +45,9 @@ class RuntimeInvocationOptions:
     stream: bool | None = None
     system_prompt: str | None = None
     extra_provider_options: Mapping[str, object] | None = None
+    # Semantic structured-output request. Provider adapters translate this
+    # into their supported wire representation; ordinary invocations omit it.
+    response_schema: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("timeout_seconds", "no_output_timeout_seconds"):
@@ -71,6 +75,30 @@ class RuntimeInvocationOptions:
                 "enable_thinking"
             }:
                 raise ValueError("chat_template_kwargs contains unsupported keys")
+        if "response_format" in raw_options:
+            response_format = raw_options["response_format"]
+            if not isinstance(response_format, Mapping) or dict(response_format) != {
+                "type": "json_object"
+            }:
+                raise ValueError(
+                    "response_format must be exactly {'type': 'json_object'}"
+                )
+        if self.response_schema is not None:
+            if (
+                not isinstance(self.response_schema, Mapping)
+                or not self.response_schema
+            ):
+                raise ValueError("response_schema must be a non-empty mapping")
+            normalized_schema = dict(self.response_schema)
+            try:
+                import json
+
+                json.dumps(normalized_schema)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("response_schema must be JSON serializable") from exc
+            object.__setattr__(
+                self, "response_schema", MappingProxyType(normalized_schema)
+            )
         object.__setattr__(
             self,
             "extra_provider_options",
@@ -80,9 +108,11 @@ class RuntimeInvocationOptions:
     def to_dict(self) -> dict[str, object]:
         """Return a secret-free diagnostic representation."""
 
-        payload = asdict(self)
+        payload = {field.name: getattr(self, field.name) for field in fields(self)}
         if self.extra_provider_options is not None:
             payload["extra_provider_options"] = dict(self.extra_provider_options)
+        if self.response_schema is not None:
+            payload["response_schema"] = dict(self.response_schema)
         return payload
 
     @property
@@ -98,5 +128,6 @@ class RuntimeInvocationOptions:
                 self.stream,
                 self.system_prompt,
                 self.extra_provider_options,
+                self.response_schema,
             )
         )
