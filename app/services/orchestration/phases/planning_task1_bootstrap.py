@@ -56,13 +56,78 @@ def task1_bootstrap_contract_passed(plan_verdict: Any) -> bool:
     return bool(contract and contract.get("passed"))
 
 
+def _task1_json_stability_conflicts_are_normalizable(plan_verdict: Any) -> bool:
+    """Return whether same-path conflicts will disappear with command removal.
+
+    Task 1 plans can contain both typed file operations and stale shell writes
+    from an older JSON projection.  The JSON-stability normalizer removes the
+    shell commands only when the corresponding typed operation is a
+    same-step ``write_file``/``append_file``.  Other mutation sequences must
+    remain visible to the temporal-authority validator.
+    """
+
+    details = getattr(plan_verdict, "details", None) or {}
+    conflicts = details.get("incompatible_same_path_mutation_sequence") or []
+    if not conflicts:
+        return False
+    for conflict in conflicts:
+        events = conflict.get("events") if isinstance(conflict, dict) else None
+        if not isinstance(events, list):
+            return False
+        structured = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("source") == "structured_op"
+        ]
+        commands = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("source") == "command"
+        ]
+        if (
+            len(structured) != 1
+            or not commands
+            or len(structured) + len(commands) != len(events)
+        ):
+            return False
+        if structured[0].get("operation") not in {"write_file", "append_file"}:
+            return False
+        if any(
+            event.get("step_number") != structured[0].get("step_number")
+            for event in commands
+        ):
+            return False
+    return True
+
+
 def task1_plan_failed_only_brittle_command_shape(plan_verdict: Any) -> bool:
     details = getattr(plan_verdict, "details", None) or {}
     reasons = list(getattr(plan_verdict, "reasons", None) or [])
-    if reasons != ["Plan contains brittle heredoc-heavy or malformed commands"]:
+    brittle_reason = "Plan contains brittle heredoc-heavy or malformed commands"
+    unexpected_reasons = [
+        reason
+        for reason in reasons
+        if reason not in {brittle_reason, "incompatible_same_path_mutation_sequence"}
+    ]
+    if brittle_reason not in reasons or unexpected_reasons:
+        return False
+    normalizable_conflicts = _task1_json_stability_conflicts_are_normalizable(
+        plan_verdict
+    )
+    if (
+        "incompatible_same_path_mutation_sequence" in reasons
+        and not normalizable_conflicts
+    ):
         return False
     semantic_codes = set(details.get("semantic_violation_codes") or [])
-    return not any(str(code).startswith("task1_bootstrap_") for code in semantic_codes)
+    return not any(
+        str(code).startswith("task1_bootstrap_")
+        or (
+            code == "incompatible_same_path_mutation_sequence"
+            and not normalizable_conflicts
+        )
+        for code in semantic_codes
+    )
 
 
 def normalize_task1_bootstrap_plan_for_json_stability(
