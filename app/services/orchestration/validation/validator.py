@@ -46,6 +46,7 @@ from .workspace_checks import (
 )
 from .workspace_guard import (
     TaskWorkspaceViolationError,
+    normalize_path_reference,
 )
 from .accepted_path_authority import (
     ACCEPTED_PLAN_STATUSES,
@@ -100,6 +101,7 @@ from app.services.orchestration.planning.workspace_identity import (
 )
 from app.services.workspace.workspace_paths import is_hydration_excluded_path
 from .rules.contract_placeholders import (
+    _command_write_targets,
     _plan_contains_placeholder_intent,
     _plan_fake_verification_artifact_steps,
     _plan_materialized_file_targets,
@@ -500,6 +502,99 @@ def _plan_creation_authorized_paths(
     return paths
 
 
+_STRUCTURED_MUTATION_OPS = frozenset(
+    {"write_file", "append_file", "replace_in_file", "create_file"}
+)
+
+
+def _shell_mutation_targets(command: Any) -> list[str]:
+    """Return targets written by the bounded shell-write shapes."""
+
+    rendered = str(command or "")
+    targets = list(_command_write_targets(rendered))
+    try:
+        tokens = shlex.split(rendered, posix=True)
+    except ValueError:
+        tokens = rendered.split()
+
+    for index, token in enumerate(tokens):
+        if token != "touch" or (
+            index > 0 and tokens[index - 1] not in {";", "&&", "||", "|"}
+        ):
+            continue
+        for candidate in tokens[index + 1 :]:
+            if not candidate.startswith("-"):
+                targets.append(candidate)
+    return list(dict.fromkeys(targets))
+
+
+def _plan_incompatible_same_path_mutation_sequences(
+    plan: List[Dict[str, Any]], project_dir: Path
+) -> list[Dict[str, Any]]:
+    """Find absent paths mutated more than once in accepted-plan order.
+
+    A creation grant is intentionally a one-time grant. Existing mutable
+    authority is available only when the path was already present at
+    admission. Keeping this rule at validation prevents the APA and the
+    Task.steps projection from accepting a deterministic create-then-mutate
+    dead end.
+    """
+
+    events_by_path: Dict[str, list[Dict[str, Any]]] = {}
+    for step_index, step in enumerate(plan or [], start=1):
+        if not isinstance(step, dict):
+            continue
+        step_number = step.get("step_number", step_index)
+        for operation_index, raw_operation in enumerate(step.get("ops") or [], start=1):
+            if not isinstance(raw_operation, dict):
+                continue
+            operation = normalize_file_op_shape(raw_operation)
+            if str(operation.get("op") or "").strip() not in _STRUCTURED_MUTATION_OPS:
+                continue
+            raw_path = str(operation.get("path") or "").strip()
+            if not raw_path:
+                continue
+            try:
+                relative_path = normalize_path_reference(raw_path, project_dir)
+            except TaskWorkspaceViolationError:
+                continue
+            if relative_path == ".":
+                continue
+            events_by_path.setdefault(relative_path, []).append(
+                {
+                    "step_number": step_number,
+                    "operation_index": operation_index,
+                    "operation": str(operation.get("op") or ""),
+                    "source": "structured_op",
+                }
+            )
+
+        for command_index, command in enumerate(step.get("commands") or [], start=1):
+            for target in _shell_mutation_targets(command):
+                try:
+                    relative_path = normalize_path_reference(str(target), project_dir)
+                except TaskWorkspaceViolationError:
+                    continue
+                if relative_path == ".":
+                    continue
+                events_by_path.setdefault(relative_path, []).append(
+                    {
+                        "step_number": step_number,
+                        "command_index": command_index,
+                        "operation": "shell_write",
+                        "source": "command",
+                    }
+                )
+
+    conflicts: list[Dict[str, Any]] = []
+    for relative_path, events in sorted(events_by_path.items()):
+        target = project_dir / relative_path
+        if len(events) < 2 or target.exists() or target.is_symlink():
+            continue
+        conflicts.append({"path": relative_path, "events": events})
+    return conflicts
+
+
 def _source_operation_contract_issues(
     plan: List[Dict[str, Any]],
     *,
@@ -723,6 +818,9 @@ class ValidatorService:
     _nested_file_op_issue = staticmethod(_nested_file_op_issue)
     _plan_invalid_file_ops_paths = staticmethod(_plan_invalid_file_ops_paths)
     _plan_replace_ops_missing_targets = staticmethod(_plan_replace_ops_missing_targets)
+    _plan_incompatible_same_path_mutation_sequences = staticmethod(
+        _plan_incompatible_same_path_mutation_sequences
+    )
     _replace_in_file_has_repairable_old_text_issue = staticmethod(
         _replace_in_file_has_repairable_old_text_issue
     )
@@ -1510,6 +1608,17 @@ class ValidatorService:
                 if hasattr(source_materialization, "to_metadata")
                 else {}
             )
+        if project_dir is not None:
+            same_path_mutation_conflicts = (
+                cls._plan_incompatible_same_path_mutation_sequences(
+                    accepted_plan, Path(project_dir)
+                )
+            )
+            if same_path_mutation_conflicts:
+                repairable.append("incompatible_same_path_mutation_sequence")
+                details["incompatible_same_path_mutation_sequence"] = (
+                    same_path_mutation_conflicts[:20]
+                )
         schema_validation = cls.validate_plan_schema(plan)
         details["plan_schema"] = schema_validation
         if not schema_validation["valid"]:
@@ -2332,6 +2441,8 @@ class ValidatorService:
             semantic_violation_codes.append("physical_src_import")
         if details.get("empty_replace_old_text_steps"):
             semantic_violation_codes.append("empty_replace_old_text")
+        if details.get("incompatible_same_path_mutation_sequence"):
+            semantic_violation_codes.append("incompatible_same_path_mutation_sequence")
         if details.get("unsafe_python_append_fragments"):
             semantic_violation_codes.append("unsafe_python_append_fragment")
         if details.get("python_source_syntax_invalid"):
