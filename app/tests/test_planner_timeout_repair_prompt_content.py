@@ -21,6 +21,41 @@ from app.services.orchestration.planning.planner import (
 from app.services.orchestration.validation.validator import ValidatorService
 
 
+def test_missing_verification_repair_contract_names_field_and_steps(tmp_path):
+    reasons = _build_repair_rejection_reasons(
+        [
+            "Plan is missing verification commands for implementation-heavy work "
+            "(steps: [2, 3])"
+        ],
+        {
+            "missing_verification_steps": [2, 3],
+            "semantic_violation_codes": ["missing_verification_command"],
+        },
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Create and verify a tiny Python module",
+        malformed_output=(
+            '[{"step_number": 2, "commands": ["python3 -m py_compile tiny_calc.py"], '
+            '"verification": null}]'
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=reasons,
+    )
+
+    assert reasons[0].startswith(
+        "validator_issue: code=missing_verification_command; field=verification;"
+    )
+    assert "steps=[2,3]" in reasons[0]
+    assert "require=nonempty project verification" in reasons[0]
+    assert "output=full_plan" in reasons[0]
+    assert (
+        "verification: non-empty command for executable/mutating steps" in prompt
+        or "verification: non-empty command for each executable/mutating step" in prompt
+    )
+    assert "null only for read-only inspection" in prompt
+
+
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
     prompt = PlannerService.build_planning_repair_prompt(
         "Build frontend and backend scaffolding",

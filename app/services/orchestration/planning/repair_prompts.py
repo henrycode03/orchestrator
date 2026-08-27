@@ -727,7 +727,7 @@ Rules:
 2b. {verification_contract}
 2c. {test_scaffold_contract}
 2d. {json_content_contract}
-3. verification: one shell string or null; optional rollback is one shell string or null.
+3. verification: non-empty command for executable/mutating steps; null only for read-only inspection.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute, .., ~, frontend/src/frontend/src, backend/src/backend/src; rooted exactly once.
 6. No nested project folder; use workspace.
@@ -2127,7 +2127,7 @@ Rules:
 - {verification_contract}
 - {test_scaffold_contract}
 - {json_content_contract}
-- verification: one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
+- verification: non-empty command for each executable/mutating step; null only for read-only inspection.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, pass, stubs, or placeholder-only implementation; write_file content must be behaviorally complete.
 - no heredocs, multiline shell file bodies, or nested python -c one-liners for file writes; use ops.write_file or ops.replace_in_file instead; prefer python3 -m pytest -q for verification.

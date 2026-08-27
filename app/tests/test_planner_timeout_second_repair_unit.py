@@ -93,6 +93,11 @@ def test_targeted_second_repair_reason_centralizes_validator_eligibility():
     assert reason.semantic_violation_code == "missing_verification_command"
     assert reason.cap_attribute == "post_repair_validation_second_repair_used"
     assert "implementation-heavy step" in reason.rejection_text
+    assert "code=missing_verification_command" in reason.rejection_text
+    assert "field=verification" in reason.rejection_text
+    assert "steps=[1]" in reason.rejection_text
+    assert "require=nonempty project verification" in reason.rejection_text
+    assert "output=full_plan" in reason.rejection_text
 
 
 def test_targeted_second_repair_reason_handles_missing_runnable_commands():

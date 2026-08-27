@@ -595,6 +595,20 @@ def _build_repair_rejection_reasons(
         details.get("missing_verification_steps") or []
     )
     if missing_verification_steps:
+        semantic_violation_codes = {
+            str(code or "").strip()
+            for code in details.get("semantic_violation_codes") or []
+            if str(code or "").strip()
+        }
+        if not semantic_violation_codes or semantic_violation_codes == {
+            "missing_verification_command"
+        }:
+            targeted_reasons.append(
+                "validator_issue: code=missing_verification_command; "
+                "field=verification; steps="
+                f"[{','.join(str(step) for step in missing_verification_steps)}]; "
+                "require=nonempty project verification; output=full_plan"
+            )
         targeted_reasons.append(
             "missing_verification_steps: steps "
             f"{missing_verification_steps} are missing verification commands; "
@@ -2245,10 +2259,12 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
         semantic_violation_code="missing_verification_command",
         cap_attribute="post_repair_validation_second_repair_used",
         rejection_template=(
-            "missing_verification_steps: steps {steps} are still missing "
-            "verification after repair; add pytest, python -m, npm run build, "
-            "or an equivalent project test command that proves behavior for "
-            "each implementation-heavy step"
+            "validator_issue: code=missing_verification_command; "
+            "field=verification; steps={steps}; require=nonempty project "
+            "verification; output=full_plan; missing_verification_steps: steps "
+            "{steps} are still missing verification after repair; add pytest, "
+            "python -m, npm run build, or an equivalent project test command "
+            "that proves behavior for each implementation-heavy step"
         ),
     ),
     "missing_commands_steps": _SecondRepairPolicy(

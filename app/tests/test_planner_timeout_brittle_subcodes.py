@@ -234,10 +234,16 @@ def test_repair_rejection_reasons_prepend_missing_verification_step_details():
 
     enriched = _build_repair_rejection_reasons(reasons, details)
 
-    assert enriched[0].startswith("missing_verification_steps:")
-    assert "steps [1]" in enriched[0]
-    assert "add pytest, python -m, npm run build" in enriched[0]
-    assert enriched[1:] == reasons
+    assert enriched[0].startswith(
+        "validator_issue: code=missing_verification_command; field=verification;"
+    )
+    assert "steps=[1]" in enriched[0]
+    assert "require=nonempty project verification" in enriched[0]
+    assert "output=full_plan" in enriched[0]
+    assert enriched[1].startswith("missing_verification_steps:")
+    assert "steps [1]" in enriched[1]
+    assert "add pytest, python -m, npm run build" in enriched[1]
+    assert enriched[2:] == reasons
 
 
 def test_repair_rejection_reasons_prepend_heredoc_shape_subcodes():
