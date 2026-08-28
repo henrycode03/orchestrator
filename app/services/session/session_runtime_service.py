@@ -53,6 +53,7 @@ from app.services.workspace.workspace_admission import (
     admit_project_openclaw_binding_for_dispatch,
 )
 from app.services.orchestration.prompt_templates import OrchestrationState
+from app.task_intent import normalize_task_intent
 from app.services.tasks.service import TaskService
 from app.services.tasks.execution import (
     ProjectExecutionSerializationConflict,
@@ -209,6 +210,7 @@ def ensure_task_workspace(
         project_name=project.name or "",
         task_id=task.id,
         project_id=project.id,
+        intent_mode=normalize_task_intent(getattr(task, "intent_mode", None)),
     )
 
     project_workspace_path = Path(

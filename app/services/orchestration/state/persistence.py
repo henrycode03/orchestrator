@@ -776,6 +776,7 @@ def build_orchestration_state_snapshot(
         "timestamp": datetime.now(UTC).isoformat(),
         "session_id": session_id,
         "task_id": task_id,
+        "intent_mode": getattr(orchestration_state, "intent_mode", "default"),
         "trigger": trigger,
         "checkpoint_name": checkpoint_name,
         "related_event_id": related_event_id,
@@ -1039,6 +1040,7 @@ def save_orchestration_checkpoint(
         },
         orchestration_state={
             "status": orchestration_state.status.value,
+            "intent_mode": getattr(orchestration_state, "intent_mode", "default"),
             "plan": orchestration_state.plan,
             "reasoning_artifact": orchestration_state.reasoning_artifact,
             "current_step_index": orchestration_state.current_step_index,

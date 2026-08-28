@@ -213,6 +213,7 @@ def _retry_with_minimal_prompt(
         planner_contract=ctx.planner_contract,
         source_materialization=getattr(ctx, "planner_source_materialization", None),
         read_only_observation=getattr(ctx, "read_only_observation", None),
+        intent_mode=getattr(ctx, "intent_mode", "default"),
     )
 
 
@@ -227,6 +228,16 @@ def _repair_planning_output(
     prompt_profile: str = "default",
     knowledge_context: Any | None = None,
 ) -> Dict[str, Any]:
+    from app.task_intent import render_create_only_guidance
+
+    guidance_block = _collect_repair_guidance(ctx)
+    intent_guidance = render_create_only_guidance(
+        getattr(ctx, "intent_mode", "default")
+    )
+    if intent_guidance:
+        guidance_block = "\n\n".join(
+            block for block in (guidance_block, intent_guidance) if block
+        )
     if retry_state and repair_context_requires_source_materialization(
         execution_profile=ctx.execution_profile,
         reason=reason,
@@ -252,7 +263,7 @@ def _repair_planning_output(
         knowledge_context=knowledge_context,
         session_id=ctx.session_id,
         task_id=ctx.task_id,
-        guidance_block=_collect_repair_guidance(ctx),
+        guidance_block=guidance_block,
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,
         source_materialization=getattr(ctx, "planner_source_materialization", None),
@@ -333,6 +344,7 @@ def _validate_planning_plan(
         execution_topology=resolve_execution_topology_for_role(
             getattr(ctx, "db", None)
         ),
+        intent_mode=getattr(ctx, "intent_mode", "default"),
     )
 
 

@@ -2999,6 +2999,7 @@ def execute_step_loop(
                     is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                     planner_contract=ctx.planner_contract,
                     execution_topology=_execution_topology_for_runtime(runtime_service),
+                    intent_mode=getattr(ctx, "intent_mode", "default"),
                 )
                 record_validation_verdict(
                     db,

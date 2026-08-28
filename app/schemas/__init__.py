@@ -12,6 +12,8 @@ from typing import Optional, Any, Dict, List, Literal
 from datetime import datetime
 from enum import Enum
 
+from app.task_intent import TaskIntentMode
+
 
 class TaskStatusEnum(str, Enum):
     PENDING = "pending"
@@ -109,6 +111,7 @@ class TaskBase(BaseModel):
     title: str
     description: Optional[str] = None
     execution_profile: Optional[str] = "full_lifecycle"
+    intent_mode: TaskIntentMode = TaskIntentMode.DEFAULT
     workflow_stage: Optional[str] = None
     priority: Optional[int] = 0
     plan_position: Optional[int] = None
@@ -125,6 +128,7 @@ class TaskUpdate(BaseModel):
     description: Optional[str] = None
     status: Optional[TaskStatusEnum] = None
     execution_profile: Optional[str] = None
+    intent_mode: Optional[TaskIntentMode] = None
     workflow_stage: Optional[str] = None
     priority: Optional[int] = None
     plan_position: Optional[int] = None
@@ -148,6 +152,11 @@ class TaskResponse(TaskBase):
     plan_id: Optional[int] = None
     status: TaskStatusEnum
     execution_profile: str = "full_lifecycle"
+
+    @field_validator("intent_mode", mode="before")
+    @classmethod
+    def coerce_intent_mode(cls, v: Any) -> TaskIntentMode:
+        return TaskIntentMode.DEFAULT if v is None else TaskIntentMode(v)
 
     @field_validator("execution_profile", mode="before")
     @classmethod

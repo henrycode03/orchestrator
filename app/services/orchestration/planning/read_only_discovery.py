@@ -32,6 +32,10 @@ from app.services.workspace.workspace_paths import (
     HYDRATION_EXCLUDED_NAMES,
     is_hydration_excluded_path,
 )
+from app.task_intent import (
+    TaskIntentMode,
+    normalize_task_intent,
+)
 
 MAX_DISCOVERY_QUERY_CHARS = 256
 MAX_DISCOVERY_PATHS = 4
@@ -122,8 +126,17 @@ def assess_discovery_admission(
     prompt: str,
     planner_contract: Mapping[str, Any] | None,
     materialization: PlannerSourceMaterialization,
+    intent_mode: str = TaskIntentMode.DEFAULT.value,
 ) -> DiscoveryAdmission:
     """Decide whether current bounded source facts justify one discovery call."""
+
+    if normalize_task_intent(intent_mode) == TaskIntentMode.CREATE_ONLY.value:
+        # CREATE_ONLY narrows the legal mutation set; it does not mint any
+        # path authority.  Plan validation still rejects edits/deletes of
+        # baseline-existing paths and APA still grants only accepted paths.
+        return DiscoveryAdmission(
+            DISCOVERY_ADMISSION_SKIPPED, "typed_create_only_intent"
+        )
 
     expected = tuple(
         item for item in materialization.files if bool(getattr(item, "expected", False))
@@ -231,6 +244,7 @@ def prepare_discovery_context(
     planner_service: Any,
     emit_phase_event: Callable[..., Any],
     materialize: Callable[..., Any],
+    intent_mode: str = TaskIntentMode.DEFAULT.value,
 ) -> None:
     """Materialize once before admission and refresh only after observation."""
 
@@ -246,6 +260,7 @@ def prepare_discovery_context(
         prompt=ctx.prompt,
         planner_contract=ctx.planner_contract,
         materialization=materialization,
+        intent_mode=intent_mode,
     )
     emit_discovery_admission(
         ctx=ctx, admission=admission, emit_phase_event=emit_phase_event

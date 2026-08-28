@@ -37,6 +37,7 @@ from app.services.orchestration.planning.source_materialization import (
     provider_planning_contract_capabilities,
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
+from app.task_intent import render_create_only_guidance
 
 PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
   {
@@ -164,6 +165,7 @@ def build_minimal_planning_prompt(
     source_materialization: Any = None,
     additional_candidate_paths: Any = (),
     apply_prompt_profile: Any = None,
+    intent_mode: str = "default",
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:1200]
     if str(validation_profile or "") == "verification":
@@ -214,6 +216,10 @@ def build_minimal_planning_prompt(
     )
     python_source_context = python_test_source_context_from_tests(project_dir)
     operator_guidance_block = _render_operator_guidance_prompt_block(project_context)
+    task_intent_guidance = render_create_only_guidance(intent_mode)
+    task_intent_guidance_block = (
+        f"{task_intent_guidance}\n\n" if task_intent_guidance else ""
+    )
     workspace_prefix_prohibition = _render_workspace_prefix_prohibition(
         project_dir, display_project_dir, workspace_identity
     )
@@ -224,7 +230,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 Task:
 {concise_task}
 
-{knowledge_block}
+{task_intent_guidance_block}{knowledge_block}
 
 Project structure:
 {structure_capsule or "No structural project index was available for this planning attempt."}
@@ -301,6 +307,7 @@ def build_ultra_minimal_planning_prompt(
     source_materialization: Any = None,
     additional_candidate_paths: Any = (),
     apply_prompt_profile: Any = None,
+    intent_mode: str = "default",
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:700]
     if str(validation_profile or "") == "verification":
@@ -344,6 +351,10 @@ def build_ultra_minimal_planning_prompt(
     verification_contract = _render_verification_contract()
     test_scaffold_contract = _render_test_scaffold_contract()
     operator_guidance_block = _render_operator_guidance_prompt_block(project_context)
+    task_intent_guidance = render_create_only_guidance(intent_mode)
+    task_intent_guidance_block = (
+        f"{task_intent_guidance}\n\n" if task_intent_guidance else ""
+    )
     workspace_prefix_prohibition = _render_workspace_prefix_prohibition(
         project_dir, display_project_dir, workspace_identity
     )
@@ -354,7 +365,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 Task:
 {concise_task}
 
-Working directory: {display_project_dir}
+{task_intent_guidance_block}Working directory: {display_project_dir}
 Workflow:
 {workflow_guidance or "No explicit workflow phases."}
 

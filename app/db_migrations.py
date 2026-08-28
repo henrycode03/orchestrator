@@ -4748,6 +4748,29 @@ def _migration_054_dogfood_queue_isolation(engine: Engine) -> None:
             )
 
 
+def _migration_055_task_intent_mode(engine: Engine) -> None:
+    """Add the optional, backward-compatible typed Task intent constraint."""
+
+    if "tasks" not in _table_names(engine):
+        return
+    if not _has_column(engine, "tasks", "intent_mode"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN intent_mode "
+                    "VARCHAR(20) NOT NULL DEFAULT 'default'"
+                )
+            )
+    else:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE tasks SET intent_mode = 'default' "
+                    "WHERE intent_mode IS NULL OR intent_mode = ''"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -5030,6 +5053,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="054_dogfood_queue_isolation",
         description="Persist bounded dogfood admission for historical queue isolation",
         upgrade=_migration_054_dogfood_queue_isolation,
+    ),
+    Migration(
+        version="055_task_intent_mode",
+        description="Add typed Task intent mode for bounded create-only planning",
+        upgrade=_migration_055_task_intent_mode,
     ),
 )
 

@@ -241,6 +241,7 @@ def execute_planning_phase(
             planner_service=PlannerService,
             emit_phase_event=emit_phase_event,
             materialize=materialize_planner_source_context,
+            intent_mode=getattr(ctx, "intent_mode", "default"),
         )
     except (DiscoveryContractError, TimeoutError, OSError) as exc:
         return fail_closed_discovery(

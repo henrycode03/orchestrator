@@ -90,6 +90,10 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     materialized_source_file,
 )
+from app.task_intent import (
+    TaskIntentMode,
+    normalize_task_intent,
+)
 from app.services.orchestration.planning.source_operation_verification import (
     FAILURE_STALE_OLD_TEXT,
     ResolvedSource,
@@ -528,6 +532,175 @@ def _shell_mutation_targets(command: Any) -> list[str]:
     return list(dict.fromkeys(targets))
 
 
+def _create_only_plan_violations(
+    plan: List[Dict[str, Any]],
+    project_dir: Path,
+    source_materialization: Any = None,
+) -> list[Dict[str, Any]]:
+    """Find plan operations that mutate baseline-existing project state."""
+
+    baseline_existing_paths = {
+        str(getattr(item, "relative_path", "")).replace("\\", "/").lstrip("./")
+        for item in (getattr(source_materialization, "files", ()) or ())
+        if getattr(item, "status", None) == SOURCE_STATUS_EXISTING
+    }
+
+    def normalize_candidate(raw_path: Any) -> str | None:
+        try:
+            relative = normalize_path_reference(str(raw_path or ""), project_dir)
+        except TaskWorkspaceViolationError:
+            return None
+        return None if relative == "." else relative
+
+    def is_baseline_existing(relative_path: str) -> bool:
+        return relative_path in baseline_existing_paths or (
+            (project_dir / relative_path).exists()
+            or (project_dir / relative_path).is_symlink()
+        )
+
+    def add_protected_violation(
+        relative_path: str | None, step_number: Any, operation: str
+    ) -> None:
+        if not relative_path:
+            return
+        try:
+            declare(relative_path)
+        except PathDeclarationError as exc:
+            if exc.code == "path_protected_root":
+                add_violation(
+                    "path_protected_root", relative_path, step_number, operation
+                )
+
+    def shell_command_targets(command: str, names: set[str]) -> list[str]:
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            tokens = command.split()
+        targets: list[str] = []
+        separators = {";", "&&", "||", "|"}
+        for index, token in enumerate(tokens):
+            previous = tokens[index - 1] if index else None
+            if token not in names or (index and previous not in separators):
+                continue
+            for candidate in tokens[index + 1 :]:
+                if candidate in separators:
+                    break
+                if not candidate.startswith("-"):
+                    targets.append(candidate)
+        return targets
+
+    violations: list[Dict[str, Any]] = []
+    seen: set[tuple[str, str, int, str]] = set()
+
+    def add_violation(
+        code: str, path: str | None, step_number: Any, operation: str
+    ) -> None:
+        key = (code, path or "", int(step_number), operation)
+        if key in seen:
+            return
+        seen.add(key)
+        violations.append(
+            {
+                "failure_code": code,
+                "path": path,
+                "step_number": int(step_number),
+                "operation": operation,
+            }
+        )
+
+    for step_index, step in enumerate(plan or [], start=1):
+        if not isinstance(step, dict):
+            continue
+        step_number = step.get("step_number", step_index)
+        for raw_operation in step.get("ops") or []:
+            if not isinstance(raw_operation, dict):
+                continue
+            operation = normalize_file_op_shape(raw_operation)
+            operation_name = str(operation.get("op") or "").strip()
+            relative_path = normalize_candidate(operation.get("path"))
+            add_protected_violation(
+                relative_path, step_number, operation_name or "file_operation"
+            )
+            if operation_name == "delete_file":
+                add_violation(
+                    "create_only_task_delete",
+                    relative_path,
+                    step_number,
+                    operation_name,
+                )
+            elif operation_name == "replace_in_file":
+                add_violation(
+                    "create_only_task_existing_path_mutation",
+                    relative_path,
+                    step_number,
+                    operation_name,
+                )
+            elif operation_name in {"write_file", "append_file", "create_file"}:
+                if relative_path and is_baseline_existing(relative_path):
+                    add_violation(
+                        "create_only_task_existing_path_mutation",
+                        relative_path,
+                        step_number,
+                        operation_name,
+                    )
+
+        for command in step.get("commands") or []:
+            rendered = str(command or "")
+            if not rendered.strip():
+                continue
+            shell_write = bool(
+                re.search(
+                    r"(?:>>?|\btee\b|\btouch\b|\bsed\s+-i\b|\bperl\s+-i\b|"
+                    r"\bwrite_(?:text|bytes)\b|\bopen\s*\([^)]*['\"](?:w|a))",
+                    rendered,
+                    flags=re.IGNORECASE,
+                )
+            )
+            shell_delete = bool(
+                re.search(
+                    r"(?:^|[;&|]\s*)(?:rm|unlink|rmdir)\b|"
+                    r"\.(?:unlink|remove)\s*\(|shutil\.(?:rmtree|remove)\s*\(",
+                    rendered,
+                    flags=re.IGNORECASE,
+                )
+            )
+            if shell_write:
+                targets = _shell_mutation_targets(rendered)
+                targets.extend(
+                    shell_command_targets(rendered, {"tee", "touch", "sed", "perl"})
+                )
+                targets.extend(extract_required_file_paths(rendered))
+                for raw_target in dict.fromkeys(targets):
+                    relative_path = normalize_candidate(raw_target)
+                    add_protected_violation(relative_path, step_number, "shell_write")
+                    if relative_path and is_baseline_existing(relative_path):
+                        add_violation(
+                            "create_only_task_existing_path_shell_write",
+                            relative_path,
+                            step_number,
+                            "shell_write",
+                        )
+            if shell_delete:
+                targets = extract_required_file_paths(rendered)
+                targets.extend(
+                    shell_command_targets(rendered, {"rm", "unlink", "rmdir"})
+                )
+                for raw_target in dict.fromkeys(targets):
+                    relative_path = normalize_candidate(raw_target)
+                    if relative_path:
+                        add_protected_violation(
+                            relative_path, step_number, "shell_delete"
+                        )
+                        add_violation(
+                            "create_only_task_delete",
+                            relative_path,
+                            step_number,
+                            "shell_delete",
+                        )
+
+    return violations
+
+
 def _plan_incompatible_same_path_mutation_sequences(
     plan: List[Dict[str, Any]], project_dir: Path
 ) -> list[Dict[str, Any]]:
@@ -821,6 +994,7 @@ class ValidatorService:
     _plan_incompatible_same_path_mutation_sequences = staticmethod(
         _plan_incompatible_same_path_mutation_sequences
     )
+    _create_only_plan_violations = staticmethod(_create_only_plan_violations)
     _replace_in_file_has_repairable_old_text_issue = staticmethod(
         _replace_in_file_has_repairable_old_text_issue
     )
@@ -1574,6 +1748,7 @@ class ValidatorService:
         planner_contract: Mapping[str, Any] | None = None,
         source_materialization: Any = None,
         execution_topology: ExecutionTopology | None = None,
+        intent_mode: str = TaskIntentMode.DEFAULT.value,
     ) -> PlanOutcome:
         # The Accepted Path Authority binds the plan the caller holds, which is
         # also what ``_completion_plan_identity`` hashes downstream.  The local
@@ -1596,11 +1771,27 @@ class ValidatorService:
         accepted_creation_paths: set[str] = set()
         accepted_existing_mutation_paths: set[str] = set()
         if source_materialization is None and project_dir is not None:
+            task_text_for_source = "\n".join(
+                [str(task_prompt or ""), str(title or ""), str(description or "")]
+            )
+            plan_creation_paths = _plan_creation_authorized_paths(plan)
+            mentioned_paths = {
+                str(path).replace("\\", "/").lstrip("./")
+                for path in extract_required_file_paths(task_text_for_source)
+            }
+            if re.search(
+                r"\b(update|edit|modify|replace|change|fix|delete|remove|rename|refactor)\b",
+                task_text_for_source,
+                flags=re.IGNORECASE,
+            ):
+                plan_creation_paths = {
+                    path for path in plan_creation_paths if path not in mentioned_paths
+                }
             source_materialization = materialize_planner_source_context(
                 Path(project_dir),
                 task_description=task_prompt,
                 expected_paths=_plan_target_paths(plan),
-                creation_authorized_paths=_plan_creation_authorized_paths(plan),
+                creation_authorized_paths=plan_creation_paths,
             )
         if source_materialization is not None:
             details["source_materialization"] = (
@@ -1888,6 +2079,110 @@ class ValidatorService:
                     source_contract_issues[
                         "new_file_write_without_creation_authorization"
                     ]
+                )
+
+            missing_alleged_existing_paths = {
+                str(getattr(item, "relative_path", "")).replace("\\", "/").lstrip("./")
+                for item in (getattr(source_materialization, "files", ()) or ())
+                if getattr(item, "status", None) != SOURCE_STATUS_EXISTING
+                and getattr(item, "status", None) != SOURCE_STATUS_NEW
+                and getattr(item, "expected", False)
+            }
+            if missing_alleged_existing_paths and re.search(
+                r"\b(update|edit|modify|replace|change|fix|delete|remove|rename|refactor)\b",
+                "\n".join(
+                    [str(task_prompt or ""), str(title or ""), str(description or "")]
+                ),
+                flags=re.IGNORECASE,
+            ):
+                missing_edit_targets = []
+                for step in plan or []:
+                    if not isinstance(step, dict):
+                        continue
+                    for raw_operation in step.get("ops") or []:
+                        if not isinstance(raw_operation, dict):
+                            continue
+                        operation = normalize_file_op_shape(raw_operation)
+                        if str(operation.get("op") or "").strip() not in {
+                            "write_file",
+                            "append_file",
+                            "create_file",
+                            "replace_in_file",
+                        }:
+                            continue
+                        relative_path = (
+                            str(operation.get("path") or "")
+                            .strip()
+                            .replace("\\", "/")
+                            .lstrip("./")
+                        )
+                        if (
+                            relative_path in missing_alleged_existing_paths
+                            and relative_path.lower()
+                            in "\n".join(
+                                [
+                                    str(task_prompt or ""),
+                                    str(title or ""),
+                                    str(description or ""),
+                                ]
+                            ).lower()
+                        ):
+                            missing_edit_targets.append(relative_path)
+                if missing_edit_targets:
+                    rejected.append("missing_existing_target_not_creation_authorized")
+                    details["missing_existing_target_not_creation_authorized"] = sorted(
+                        set(missing_edit_targets)
+                    )[:20]
+
+        if (
+            project_dir is not None
+            and normalize_task_intent(intent_mode) == TaskIntentMode.CREATE_ONLY.value
+        ):
+            declared_expected_files = cls._plan_declared_expected_files(plan)
+            create_only_violations = cls._create_only_plan_violations(
+                plan,
+                Path(project_dir),
+                source_materialization=source_materialization,
+            )
+            for step in plan or []:
+                if not isinstance(step, dict):
+                    continue
+                for raw_operation in step.get("ops") or []:
+                    if not isinstance(raw_operation, dict):
+                        continue
+                    operation = normalize_file_op_shape(raw_operation)
+                    operation_name = str(operation.get("op") or "").strip()
+                    if operation_name not in {
+                        "write_file",
+                        "append_file",
+                        "create_file",
+                    }:
+                        continue
+                    relative_path = (
+                        str(operation.get("path") or "")
+                        .strip()
+                        .replace("\\", "/")
+                        .lstrip("./")
+                    )
+                    if relative_path and relative_path not in declared_expected_files:
+                        create_only_violations.append(
+                            {
+                                "failure_code": (
+                                    "create_only_task_creation_requires_expected_files"
+                                ),
+                                "path": relative_path,
+                                "step_number": step.get("step_number"),
+                                "operation": operation_name,
+                            }
+                        )
+            if create_only_violations:
+                details["create_only_violations"] = create_only_violations[:20]
+                rejected.extend(
+                    dict.fromkeys(
+                        str(item["failure_code"])
+                        for item in create_only_violations
+                        if item.get("failure_code")
+                    )
                 )
 
         scope_paths = _explicit_task_scope_paths(task_prompt, title, description)

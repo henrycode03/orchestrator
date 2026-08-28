@@ -298,6 +298,7 @@ def reconcile_task1_bootstrap_plan(
         execution_topology=resolve_execution_topology_for_role(
             getattr(ctx, "db", None)
         ),
+        intent_mode=getattr(ctx, "intent_mode", "default"),
     )
 
 

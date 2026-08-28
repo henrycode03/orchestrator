@@ -1304,6 +1304,7 @@ class PlannerService:
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
         read_only_observation: Any = None,
+        intent_mode: str = "default",
     ) -> str:
         candidate_paths = observed_candidate_paths(read_only_observation)
         prompt = _build_minimal_planning_prompt(
@@ -1322,6 +1323,7 @@ class PlannerService:
             source_materialization=source_materialization,
             additional_candidate_paths=candidate_paths,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
+            intent_mode=intent_mode,
         )
         if source_materialization is not None:
             prompt += "\n\n" + source_materialization.to_prompt_block(
@@ -1347,6 +1349,7 @@ class PlannerService:
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
         read_only_observation: Any = None,
+        intent_mode: str = "default",
     ) -> str:
         candidate_paths = observed_candidate_paths(read_only_observation)
         prompt = _build_ultra_minimal_planning_prompt(
@@ -1363,6 +1366,7 @@ class PlannerService:
             source_materialization=source_materialization,
             additional_candidate_paths=candidate_paths,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
+            intent_mode=intent_mode,
         )
         if source_materialization is not None:
             prompt += "\n\n" + source_materialization.to_prompt_block(
@@ -2118,6 +2122,7 @@ class PlannerService:
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
         read_only_observation: Any = None,
+        intent_mode: str = "default",
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -2164,6 +2169,7 @@ class PlannerService:
             planner_contract=planner_contract,
             source_materialization=source_materialization,
             read_only_observation=read_only_observation,
+            intent_mode=intent_mode,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -2300,6 +2306,7 @@ class PlannerService:
                 planner_contract=planner_contract,
                 source_materialization=source_materialization,
                 read_only_observation=read_only_observation,
+                intent_mode=intent_mode,
             )
             ultra_minimal_prompt_diagnostics = {
                 "planning_prompt_builder": "ultra_minimal_planning_prompt",

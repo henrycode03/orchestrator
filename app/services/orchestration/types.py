@@ -358,6 +358,7 @@ class OrchestrationRunContext:
     guidance_model_name: str = "unknown"
     guidance_model_family: str = "all"
     runtime_workspace_used: bool = False
+    intent_mode: str = "default"
     planner_contract: Optional[Dict[str, Any]] = None
     planner_source_materialization: Any = None
     # Request-local advisory evidence; never persisted as planning authority.

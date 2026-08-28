@@ -43,6 +43,7 @@ from app.services.tasks.execution import (
     project_execution_serialization_admission,
 )
 from app.services.tasks.service import TaskService
+from app.task_intent import normalize_task_intent
 from app.services.tasks.task_deletion import delete_task_owned_graph
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
@@ -955,6 +956,7 @@ def create_task(
             )
 
     task_data = task.model_dump()
+    task_data["intent_mode"] = normalize_task_intent(task_data.get("intent_mode"))
     task_data["title"] = humanize_display_name(task_data.get("title", ""))
     task_service = TaskService(db)
     if task_data.get("plan_position") is None:
@@ -1843,6 +1845,7 @@ def update_task(
         "title",
         "description",
         "status",
+        "intent_mode",
         "priority",
         "steps",
         "current_step",
@@ -1855,6 +1858,23 @@ def update_task(
             status_code=400,
             detail=f"Unsupported fields: {unsupported_fields}",
         )
+
+    if "intent_mode" in update_data:
+        requested_intent = normalize_task_intent(update_data["intent_mode"])
+        current_intent = normalize_task_intent(getattr(task, "intent_mode", None))
+        if requested_intent != current_intent and (
+            getattr(task, "plan_id", None) is not None
+            or getattr(task, "started_at", None) is not None
+            or task.status == TaskStatus.RUNNING
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Task intent cannot change after an accepted Plan or execution "
+                    "has started"
+                ),
+            )
+        update_data["intent_mode"] = requested_intent
 
     if "current_step" in update_data and update_data["current_step"] is not None:
         requested_step = int(update_data["current_step"])

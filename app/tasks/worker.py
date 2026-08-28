@@ -144,6 +144,7 @@ from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
     ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
 )
+from app.task_intent import normalize_task_intent
 from app.services.orchestration.state.execution_states import TerminalReason
 from app.services.workspace.system_settings import get_effective_policy_profile
 from app.services.orchestration.validation.workspace_guard import (
@@ -410,6 +411,8 @@ def execute_orchestration_task(
 
         if not session or not task:
             raise ValueError("Session or task not found")
+
+        intent_mode = normalize_task_intent(getattr(task, "intent_mode", None))
 
         planner_contract = None
         if isinstance(context, dict) and isinstance(
@@ -740,6 +743,7 @@ def execute_orchestration_task(
             project_name=project.name if project else "",
             project_context=context.get("project_context", "") if context else "",
             task_id=task_id,  # Pass task ID for subfolder generation
+            intent_mode=intent_mode,
             planner_contract=planner_contract,
             project_id=project.id if project else None,
         )
@@ -1732,6 +1736,7 @@ def execute_orchestration_task(
                     workflow_stage=getattr(task, "workflow_stage", None),
                     is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                     planner_contract=planner_contract,
+                    intent_mode=intent_mode,
                 )
                 _record_validation_verdict(
                     db,
@@ -1843,6 +1848,7 @@ def execute_orchestration_task(
             guidance_model_name=guidance_model_name,
             guidance_model_family=guidance_model_family,
             runtime_workspace_used=_runtime_sandbox is not None,
+            intent_mode=intent_mode,
             planner_contract=planner_contract,
         )
 
@@ -1862,6 +1868,7 @@ def execute_orchestration_task(
                         "session_id": session_id,
                         "task_id": task_id,
                         "task_execution_id": task_execution_id,
+                        "intent_mode": intent_mode,
                         "project_context_available": bool(
                             orchestration_state.project_context
                         ),
@@ -1969,6 +1976,7 @@ def execute_orchestration_task(
                         workflow_stage=getattr(task, "workflow_stage", None),
                         is_first_ordered_task=getattr(task, "plan_position", None) == 1,
                         planner_contract=planner_contract,
+                        intent_mode=intent_mode,
                     )
                     _record_validation_verdict(
                         db,
@@ -2563,6 +2571,9 @@ def execute_orchestration_task(
                         task_execution_id=task_execution_id,
                         restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
                         runtime_workspace_used=_runtime_sandbox is not None,
+                        intent_mode=normalize_task_intent(
+                            getattr(task, "intent_mode", None)
+                        ),
                     )
                     if session and task
                     else None

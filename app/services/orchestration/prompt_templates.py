@@ -104,6 +104,7 @@ class OrchestrationState:
     # Durable Project.id. Identity of Orchestrator-owned control state; never
     # derived from project_name or from any workspace path.
     project_id: Optional[int] = None
+    intent_mode: str = "default"
     planner_contract: Optional[Dict[str, Any]] = None
     plan: List[Dict[str, Any]] = field(default_factory=list)
     current_step_index: int = 0
@@ -1003,6 +1004,7 @@ Examples:
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
         additional_candidate_paths: Any = (),
+        intent_mode: str = "default",
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -1101,6 +1103,11 @@ Examples:
         }
 
         prompt = cls.render("task_planning", **context)
+        from app.task_intent import render_create_only_guidance
+
+        intent_guidance = render_create_only_guidance(intent_mode)
+        if intent_guidance:
+            prompt = f"{prompt}\n\n{intent_guidance}"
         if planner_contract:
             from app.services.orchestration.planning.planner_contract_registry import (
                 render_planner_contract_context,

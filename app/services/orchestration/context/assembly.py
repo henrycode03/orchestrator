@@ -909,6 +909,7 @@ def assemble_planning_prompt(
         planner_contract=getattr(ctx, "planner_contract", None),
         source_materialization=planner_source_materialization,
         additional_candidate_paths=candidate_paths,
+        intent_mode=getattr(ctx, "intent_mode", "default"),
     )
     artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
     if artifact_supplement:

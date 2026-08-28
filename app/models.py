@@ -82,6 +82,12 @@ class Task(Base):
     description = Column(Text, nullable=True)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
     execution_profile = Column(String(30), default="full_lifecycle")
+    intent_mode = Column(
+        String(20),
+        nullable=False,
+        default="default",
+        server_default="default",
+    )
     workflow_stage = Column(String(30), nullable=True)
     priority = Column(Integer, default=0)  # Higher = more important
     plan_position = Column(Integer, nullable=True, index=True)

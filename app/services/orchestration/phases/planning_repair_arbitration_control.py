@@ -163,6 +163,7 @@ def arbitrate_planning_repair_candidate(
                     title=ctx.task.title if ctx.task else None,
                     task_type=getattr(ctx.task, "task_type", None),
                     planner_contract=getattr(ctx, "planner_contract", None),
+                    intent_mode=getattr(ctx, "intent_mode", "default"),
                 )
             except Exception as exc:
                 ctx.logger.debug(
@@ -278,6 +279,7 @@ def arbitrate_planning_repair_candidate(
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=True,
                     planner_contract=getattr(ctx, "planner_contract", None),
+                    intent_mode=getattr(ctx, "intent_mode", "default"),
                 )
             except Exception as exc:
                 ctx.logger.warning(
@@ -350,6 +352,7 @@ def arbitrate_planning_repair_candidate(
         workflow_stage=ctx.workflow_stage,
         is_first_ordered_task=_is_first_ordered_task(ctx.task),
         planner_contract=getattr(ctx, "planner_contract", None),
+        intent_mode=getattr(ctx, "intent_mode", "default"),
     )
     second_repair_reason = _get_targeted_second_repair_reason(
         retry_state=retry_state,

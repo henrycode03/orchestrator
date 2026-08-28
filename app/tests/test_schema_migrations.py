@@ -121,6 +121,7 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "workflow_stage",
         "task_subfolder",
         "template_id",
+        "intent_mode",
     } <= task_columns
     assert {
         "deleted_at",
