@@ -15,6 +15,7 @@ from typing import Any, Optional
 from app.config import settings
 from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract,
+    render_existing_file_mutation_contract,
     render_ops_first_contract,
     render_shell_fallback_limits,
     render_test_scaffold_contract,
@@ -636,6 +637,21 @@ def build_planning_repair_prompt_with_metadata(
     )
     ops_contract = render_ops_first_contract()
     operation_choice_contract = render_operation_choice_contract()
+    # Repair previously received this validator code as a bare string with no
+    # statement of the legal shape it demands, so the contract is attached to
+    # exactly the rejections that turn on it.
+    existing_file_mutation_contract = render_existing_file_mutation_contract(
+        legacy_replace_available=any(
+            "existing_file_write_requires_explicit_replace_authorization" in str(reason)
+            or "new_file_creation_not_authorized" in str(reason)
+            for reason in (rejection_reasons or ())
+        )
+    )
+    existing_file_mutation_rule = (
+        f"2y. {existing_file_mutation_contract}\n"
+        if existing_file_mutation_contract
+        else ""
+    )
     shell_fallback_limits = render_shell_fallback_limits()
     verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
@@ -723,7 +739,7 @@ Rules:
 1. Use 3 to 4 steps in array order.
 2. {ops_contract}
 2x. {operation_choice_contract}
-2a. Shell fallback limits: {shell_fallback_limits}
+{existing_file_mutation_rule}2a. Shell fallback limits: {shell_fallback_limits}
 2b. {verification_contract}
 2c. {test_scaffold_contract}
 2d. {json_content_contract}

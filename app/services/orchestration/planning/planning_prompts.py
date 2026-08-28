@@ -18,6 +18,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     OPERATOR_GUIDANCE_PRECEDENCE_LINE,
     extract_operator_guidance_block,
     render_operation_choice_contract as _render_operation_choice_contract,
+    render_existing_file_mutation_contract as _render_existing_file_mutation_contract,
     render_ops_first_contract as _render_ops_first_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
     render_test_scaffold_contract as _render_test_scaffold_contract,
@@ -175,6 +176,9 @@ def build_minimal_planning_prompt(
     )
     semantic_mode_available = True
     legacy_replace_available = True
+    # The existing-file mutation contract is only actionable when this prompt
+    # actually carries grounded existing source, so it stays off by default.
+    existing_source_available = False
     if source_materialization is not None:
         semantic_mode_available, legacy_replace_available = (
             provider_planning_contract_capabilities(
@@ -182,6 +186,7 @@ def build_minimal_planning_prompt(
                 additional_candidate_paths=additional_candidate_paths,
             )
         )
+        existing_source_available = legacy_replace_available
     ops_contract = _render_ops_first_contract(
         semantic_mode_available=semantic_mode_available,
         legacy_replace_available=legacy_replace_available,
@@ -189,6 +194,14 @@ def build_minimal_planning_prompt(
     operation_choice_contract = _render_operation_choice_contract(
         semantic_mode_available=semantic_mode_available,
         legacy_replace_available=legacy_replace_available,
+    )
+    existing_file_mutation_contract = _render_existing_file_mutation_contract(
+        legacy_replace_available=existing_source_available,
+    )
+    existing_file_mutation_rule = (
+        f"13b. {existing_file_mutation_contract}\n"
+        if existing_file_mutation_contract
+        else ""
     )
     shell_fallback_limits = _render_shell_fallback_limits()
     verification_contract = _render_verification_contract()
@@ -236,7 +249,7 @@ Rules:
 12. expected_files must be relative file paths or []
 13. {ops_contract}
 13a. {operation_choice_contract}
-14. Shell fallback limits: {shell_fallback_limits}
+{existing_file_mutation_rule}14. Shell fallback limits: {shell_fallback_limits}
 15. Do not join separate shell commands with commas
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. {verification_contract}
@@ -300,6 +313,9 @@ def build_ultra_minimal_planning_prompt(
     )
     semantic_mode_available = True
     legacy_replace_available = True
+    # The existing-file mutation contract is only actionable when this prompt
+    # actually carries grounded existing source, so it stays off by default.
+    existing_source_available = False
     if source_materialization is not None:
         semantic_mode_available, legacy_replace_available = (
             provider_planning_contract_capabilities(
@@ -307,6 +323,7 @@ def build_ultra_minimal_planning_prompt(
                 additional_candidate_paths=additional_candidate_paths,
             )
         )
+        existing_source_available = legacy_replace_available
     ops_contract = _render_ops_first_contract(
         semantic_mode_available=semantic_mode_available,
         legacy_replace_available=legacy_replace_available,
@@ -314,6 +331,14 @@ def build_ultra_minimal_planning_prompt(
     operation_choice_contract = _render_operation_choice_contract(
         semantic_mode_available=semantic_mode_available,
         legacy_replace_available=legacy_replace_available,
+    )
+    existing_file_mutation_contract = _render_existing_file_mutation_contract(
+        legacy_replace_available=existing_source_available,
+    )
+    existing_file_mutation_rule = (
+        f"4b. {existing_file_mutation_contract}\n"
+        if existing_file_mutation_contract
+        else ""
     )
     shell_fallback_limits = _render_shell_fallback_limits()
     verification_contract = _render_verification_contract()
@@ -339,7 +364,7 @@ Requirements:
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
 4. {ops_contract}
 4a. {operation_choice_contract}
-5. Shell fallback limits: {shell_fallback_limits}
+{existing_file_mutation_rule}5. Shell fallback limits: {shell_fallback_limits}
 6. {verification_contract}
 6a. {test_scaffold_contract}
 7. Each step must contain description, commands, verification, and expected_files; optional keys are step_number, rollback, and ops

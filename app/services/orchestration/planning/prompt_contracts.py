@@ -105,6 +105,28 @@ def render_operation_choice_contract(
     )
 
 
+def render_existing_file_mutation_contract(
+    *, legacy_replace_available: bool = True
+) -> str:
+    """Render the legal operation shapes for creating vs. mutating a file.
+
+    The validator authorizes a whole-file ``write_file`` against an already
+    existing path only when the step states that replacement intent, and
+    otherwise expects a grounded ``replace_in_file``.  Planning previously
+    received neither fact, so a correct edit could be rejected purely on the
+    verb chosen for the step description.
+    """
+
+    if not legacy_replace_available:
+        return ""
+    return (
+        "Existing file: no bare `write_file`. Either `replace_in_file` with exact "
+        "`old` from the supplied source, or `write_file` with one of replace/"
+        "rewrite/overwrite/rebuild/preserve stated in `description`. New file: "
+        "plain `write_file`, listed in that step's `expected_files`."
+    )
+
+
 def render_shell_fallback_limits() -> str:
     return (
         "Shell is only for installs, builds, tests, inspection, and small commands; "
