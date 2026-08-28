@@ -447,7 +447,7 @@ def test_exec5_one_live_residual_execution_turn(db_session, tmp_path, monkeypatc
     capture.write_text("system-prompt.txt", _STEP_SYSTEM)
     capture.write_text("user-prompt.txt", prompt)
 
-    # Process-local certification binding only.  This does not alter GX10 or
+    # Process-local certification binding only.  This does not alter
     # any persistent setting; it selects the already accepted direct gateway
     # identity for this isolated discriminator call.
     monkeypatch.setattr(settings, "EXECUTION_MODEL", "qwen-local")

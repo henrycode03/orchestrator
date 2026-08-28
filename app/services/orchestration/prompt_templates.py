@@ -896,7 +896,7 @@ Your job is to help the mobile user query Orchestrator status through the local 
 
 Architecture:
 - clawmobile talks to OpenClaw
-- OpenClaw runs on the GX10 host/container stack
+- OpenClaw runs on the host/container stack
 - Orchestrator is a separate backend/frontend service
 - To read Orchestrator state, use this helper script:
   `{script_path}`
