@@ -10,6 +10,7 @@ validators, and lifecycle services.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -92,6 +93,63 @@ def _completion_plan_identity(plan: Any) -> str:
 def _completion_candidate_scope(validation: Any) -> tuple[str, ...]:
     details = getattr(validation, "details", {}) or {}
     return tuple(sorted(str(path) for path in details.get("authorized_scope", [])))
+
+
+def _publication_validation_log_metadata(
+    verdict: Any,
+    *,
+    task_execution_id: int | None,
+    change_set_id: int | None = None,
+    preflight: bool,
+) -> dict[str, Any]:
+    """Retain bounded publication-validation evidence in the durable log.
+
+    The validator's full verdict is already stored in the validation checkpoint.
+    The terminal publication-failure log is the operator-facing durable seam, so
+    carry only the identity diagnostic and lifecycle references needed to
+    adjudicate a rejection.  Never copy candidate contents or unrestricted
+    validator details into the log.
+    """
+
+    metadata: dict[str, Any] = {
+        "phase": verdict.stage,
+        "validation_status": verdict.status,
+        "reasons": list(verdict.reasons[:10]),
+        "preflight": preflight,
+    }
+    if task_execution_id is not None:
+        metadata["task_execution_id"] = task_execution_id
+    if change_set_id is not None:
+        metadata["change_set_id"] = change_set_id
+    details = getattr(verdict, "details", {}) or {}
+    identity = details.get("publication_candidate_identity")
+    if isinstance(identity, Mapping):
+        metadata["publication_candidate_identity"] = {
+            "validated": identity.get("validated"),
+            "observed": identity.get("observed"),
+        }
+    return metadata
+
+
+def _resolve_change_set_id(
+    task_service: Any,
+    change_set: Any,
+    task_execution_id: int | None,
+) -> int | None:
+    """Resolve the existing persisted ChangeSet ID without creating a seam."""
+
+    if isinstance(change_set, Mapping) and change_set.get("change_set_id") is not None:
+        return change_set.get("change_set_id")
+    getter = getattr(task_service, "get_task_execution_change_set", None)
+    if not callable(getter) or task_execution_id is None:
+        return None
+    try:
+        payload = getter(task_execution_id=task_execution_id)
+    except Exception:
+        return None
+    if isinstance(payload, Mapping) and payload.get("change_set_id") is not None:
+        return payload.get("change_set_id")
+    return None
 
 
 def _retain_completion_repair_verification_evidence(
@@ -1224,12 +1282,16 @@ class CompletionCoordinator:
                     emit_live(
                         "ERROR",
                         "[ORCHESTRATION] Baseline publish preflight failed validation",
-                        metadata={
-                            "phase": "baseline_publish",
-                            "validation_status": baseline_publish_preflight.status,
-                            "reasons": baseline_publish_preflight.reasons[:10],
-                            "preflight": True,
-                        },
+                        metadata=_publication_validation_log_metadata(
+                            baseline_publish_preflight,
+                            task_execution_id=ctx.task_execution_id,
+                            change_set_id=_resolve_change_set_id(
+                                task_service,
+                                task_change_set,
+                                ctx.task_execution_id,
+                            ),
+                            preflight=True,
+                        ),
                     )
                     save_orchestration_checkpoint_fn(
                         db, session_id, task_id, prompt, orchestration_state
@@ -1360,11 +1422,16 @@ class CompletionCoordinator:
                     emit_live(
                         "ERROR",
                         "[ORCHESTRATION] Baseline publish failed validation",
-                        metadata={
-                            "phase": "baseline_publish",
-                            "validation_status": baseline_publish_validation.status,
-                            "reasons": baseline_publish_validation.reasons[:10],
-                        },
+                        metadata=_publication_validation_log_metadata(
+                            baseline_publish_validation,
+                            task_execution_id=ctx.task_execution_id,
+                            change_set_id=_resolve_change_set_id(
+                                task_service,
+                                task_change_set,
+                                ctx.task_execution_id,
+                            ),
+                            preflight=False,
+                        ),
                     )
                     save_orchestration_checkpoint_fn(
                         db, session_id, task_id, prompt, orchestration_state
