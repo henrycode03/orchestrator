@@ -309,6 +309,7 @@ class SessionBase(BaseModel):
 
 class SessionCreate(SessionBase):
     project_id: int
+    task_id: Optional[int] = None
     execution_mode: Optional[str] = "automatic"
     default_execution_profile: Optional[str] = "full_lifecycle"
     dogfood_admission: bool = False
@@ -330,6 +331,7 @@ class SessionResponse(SessionBase):
 
     id: int
     project_id: int
+    task_id: Optional[int] = None
     status: str
     execution_mode: str
     default_execution_profile: str = "full_lifecycle"

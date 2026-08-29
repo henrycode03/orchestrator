@@ -454,6 +454,7 @@ def queue_task_for_session(
     planning_backend_override: Optional[str] = None,
     planning_escalation_metadata: Optional[Dict[str, Any]] = None,
     planner_contract: Optional[Dict[str, Any]] = None,
+    isolated_retry: bool = False,
 ) -> Dict[str, Any]:
     from app.tasks.worker import execute_orchestration_task
 
@@ -497,6 +498,7 @@ def queue_task_for_session(
     blocking_tasks = TaskService(db).get_queue_blocking_tasks(
         task,
         session=session,
+        isolated_retry=isolated_retry,
     )
     if blocking_tasks:
         blocking_summary = ", ".join(

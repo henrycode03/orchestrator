@@ -153,6 +153,19 @@ router = APIRouter()
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 
 
+def _set_session_task_projection(db: Session, session: SessionModel) -> SessionModel:
+    """Expose the latest canonical SessionTask identity without a second FK."""
+
+    latest_link = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id)
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    session.task_id = latest_link.task_id if latest_link else None
+    return session
+
+
 @router.post(
     "/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED
 )
@@ -165,13 +178,28 @@ def create_session(
     # Verify project exists and is accessible to this user.
     project = get_project_for_user(db, session.project_id, current_user)
     assert_project_launch_eligible(project)
+    target_task = None
+    if session.task_id is not None:
+        target_task = db.query(Task).filter(Task.id == session.task_id).first()
+        if target_task is None or target_task.project_id != project.id:
+            raise HTTPException(
+                status_code=404, detail="Task not found for this session"
+            )
+        if target_task.status == TaskStatus.RUNNING:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Task is already running; active execution is in progress. "
+                    "Open the linked session to monitor it."
+                ),
+            )
     if session.dogfood_admission:
         try:
             admit_dogfood_workspace(db, project)
         except WorkspaceAdmissionError as exc:
             raise HTTPException(status_code=409, detail=exc.payload()) from exc
 
-    session_data = session.model_dump(exclude={"dogfood_admission"})
+    session_data = session.model_dump(exclude={"dogfood_admission", "task_id"})
     session_data["dogfood_admitted"] = bool(session.dogfood_admission)
     session_data["name"] = _ensure_unique_session_name(
         db,
@@ -188,6 +216,14 @@ def create_session(
     db_session.model_lane_metadata = lane
     db.add(db_session)
     db.flush()
+    if target_task is not None:
+        db.add(
+            SessionTask(
+                session_id=db_session.id,
+                task_id=target_task.id,
+                status=TaskStatus.PENDING,
+            )
+        )
 
     # Log session creation (single commit with session)
     db.add(
@@ -200,6 +236,7 @@ def create_session(
     )
     db.commit()
     db.refresh(db_session)
+    _set_session_task_projection(db, db_session)
 
     return db_session
 
@@ -269,13 +306,19 @@ def list_sessions(
             .all()
         )
         reconcile_terminal_running_sessions(db, sessions)
-        return [SessionResponse.model_validate(s) for s in sessions]
+        return [
+            SessionResponse.model_validate(_set_session_task_projection(db, s))
+            for s in sessions
+        ]
 
     # Paginated mode
     query = _apply_session_ordering(query, order_by=order_by, order_dir=order_dir)
     page_data = paginate(query, page, per_page)
     reconcile_terminal_running_sessions(db, page_data["items"])
-    page_data["items"] = [SessionResponse.model_validate(s) for s in page_data["items"]]
+    page_data["items"] = [
+        SessionResponse.model_validate(_set_session_task_projection(db, s))
+        for s in page_data["items"]
+    ]
     return page_data
 
 
@@ -418,13 +461,19 @@ def get_project_sessions(
             .all()
         )
         reconcile_terminal_running_sessions(db, sessions)
-        return [SessionResponse.model_validate(s) for s in sessions]
+        return [
+            SessionResponse.model_validate(_set_session_task_projection(db, s))
+            for s in sessions
+        ]
 
     # Paginated mode
     query = _apply_session_ordering(query, order_by=order_by, order_dir=order_dir)
     page_data = paginate(query, page, per_page)
     reconcile_terminal_running_sessions(db, page_data["items"])
-    page_data["items"] = [SessionResponse.model_validate(s) for s in page_data["items"]]
+    page_data["items"] = [
+        SessionResponse.model_validate(_set_session_task_projection(db, s))
+        for s in page_data["items"]
+    ]
     return page_data
 
 
@@ -470,6 +519,7 @@ def get_session(
     response.orchestration_state = _derive_orchestration_state_block(
         db, session, latest_task_execution=latest_execution
     )
+    _set_session_task_projection(db, response)
 
     return response
 

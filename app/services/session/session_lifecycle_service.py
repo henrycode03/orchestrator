@@ -281,6 +281,28 @@ def _explicit_task_id_from_session(session: SessionModel) -> int | None:
         return None
 
 
+def _durable_session_task_target(db: Session, session: SessionModel) -> Task | None:
+    """Resolve the latest durable SessionTask target, failing closed if stale."""
+
+    link = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id)
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    if link is None or link.status == TaskStatus.DONE:
+        return None
+
+    task = (
+        db.query(Task)
+        .filter(Task.id == link.task_id, Task.project_id == session.project_id)
+        .first()
+    )
+    if task is None:
+        raise HTTPException(status_code=409, detail="session_task_target_invalid")
+    return task
+
+
 def _recover_orphaned_running_session_if_needed(
     db: Session,
     *,
@@ -1263,6 +1285,16 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
     if not start_transition.allowed:
         raise HTTPException(status_code=400, detail="Session is not startable")
 
+    durable_target = _durable_session_task_target(db, session)
+    if durable_target is not None and durable_target.status == TaskStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Task is already running; active execution is in progress. "
+                "Open the linked session to monitor it."
+            ),
+        )
+
     try:
         session_instance_id = str(uuid.uuid4())
         session.instance_id = session_instance_id
@@ -1346,8 +1378,12 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             pending_tasks = task_service.get_project_tasks(session.project_id)
             queued_tasks = []
             if session.execution_mode == "automatic":
-                explicit_task_id = _explicit_task_id_from_session(session)
-                next_task = None
+                explicit_task_id = (
+                    None
+                    if durable_target is not None
+                    else _explicit_task_id_from_session(session)
+                )
+                next_task = durable_target
                 if explicit_task_id is not None:
                     next_task = next(
                         (
@@ -1389,14 +1425,15 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                     next_task = task_service.get_next_pending_task(session.project_id)
 
                 if next_task:
-                    queued_tasks.append(
-                        queue_task_for_session(
-                            db=db,
-                            session=session,
-                            task_id=next_task.id,
-                            timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
-                        )
-                    )
+                    queue_kwargs = {
+                        "db": db,
+                        "session": session,
+                        "task_id": next_task.id,
+                        "timeout_seconds": DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+                    }
+                    if durable_target is not None:
+                        queue_kwargs["isolated_retry"] = True
+                    queued_tasks.append(queue_task_for_session(**queue_kwargs))
                 else:
                     mark_session_stopped(session)
                     db.add(
