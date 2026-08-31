@@ -1,0 +1,56 @@
+{
+  "fixture_id": "D",
+  "plan": [
+    {
+      "commands": [],
+      "description": "Update tasks.py and api.py to support priority",
+      "expected_files": [
+        "tasks.py",
+        "api.py"
+      ],
+      "ops": [
+        {
+          "content": "\"\"\"Task data handling.\"\"\"\n\ndef make_task(title: str, priority=None) -> dict:\n    task = {\"title\": title}\n    if priority is not None:\n        task[\"priority\"] = priority\n    return task\n",
+          "op": "write_file",
+          "path": "tasks.py"
+        },
+        {
+          "content": "from tasks import make_task\n\n\ndef create_task(payload: dict) -> dict:\n    return make_task(payload[\"title\"], payload.get(\"priority\"))\n",
+          "op": "write_file",
+          "path": "api.py"
+        }
+      ],
+      "rollback": null,
+      "step_number": 1,
+      "verification": "python -c \"import pathlib,sys; files=[\\\"tasks.py\\\", \\\"api.py\\\"]; sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)\""
+    },
+    {
+      "commands": [],
+      "description": "Update test_tasks.py to include priority test",
+      "expected_files": [
+        "test_tasks.py"
+      ],
+      "ops": [
+        {
+          "content": "from api import create_task\n\n\ndef test_create_task():\n    assert create_task({\"title\": \"Write docs\"}) == {\"title\": \"Write docs\"}\n\ndef test_create_task_with_priority():\n    assert create_task({\"title\": \"Write docs\", \"priority\": \"high\"}) == {\"title\": \"Write docs\", \"priority\": \"high\"}\n",
+          "op": "write_file",
+          "path": "test_tasks.py"
+        }
+      ],
+      "rollback": null,
+      "step_number": 2,
+      "verification": "python -c \"import pathlib,sys; files=[\\\"test_tasks.py\\\"]; sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)\""
+    },
+    {
+      "commands": [
+        "python -m pytest test_tasks.py -v"
+      ],
+      "description": "Run automated tests to verify behavior",
+      "expected_files": [],
+      "ops": [],
+      "rollback": null,
+      "step_number": 3,
+      "verification": "python -m pytest test_tasks.py -v"
+    }
+  ]
+}

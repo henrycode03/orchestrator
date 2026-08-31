@@ -344,9 +344,7 @@ def test_reproduce_under_grant_a_expected_new_write_needs_creation_grant(tmp_pat
     assert grants[0]["grant_class"] == GrantClass.CREATION_AUTHORIZED.value
 
 
-def test_reproduce_under_grant_b_existing_authorized_write_needs_mutable_grant(
-    tmp_path,
-):
+def test_ungrounded_existing_write_is_rejected_before_authority_minting(tmp_path):
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "existing.py").write_text("VALUE = 1\n", encoding="utf-8")
     plan = _write_plan("app/existing.py", "VALUE = 2\n")
@@ -364,9 +362,13 @@ def test_reproduce_under_grant_b_existing_authorized_write_needs_mutable_grant(
 
     assert not outcome.accepted
     assert "accepted_path_authority" not in outcome.details
+    assert "accepted_path_authority_error" not in outcome.details
+    assert outcome.details["new_file_write_without_creation_authorization"] == [
+        "step 1 op 1 (app/existing.py)"
+    ]
     assert (
-        outcome.details["accepted_path_authority_error"]["code"]
-        == "existing_mutation_source_evidence_missing"
+        "new_file_creation_not_authorized: write_file may create only a classified "
+        "new expected file" in outcome.reasons
     )
 
 

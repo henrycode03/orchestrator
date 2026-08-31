@@ -1,10 +1,10 @@
 """PHASE34-LWA1 — structured whole-file intent replaces prose authorization.
 
-The two historical Fixture-D Plans are loaded verbatim from the durable S2A
-and S2A-R1 normalized evidence.  The tests below are intentionally written
-against the desired post-fix contract; the neutral-description and historical
-anchor tests reproduce the current lexical false positive before the validator
-change.
+The two historical Fixture-D Plans are kept as committed minimal fixtures
+because the generated evidence reports under ``docs/`` are intentionally
+ignored.  The tests below are intentionally written against the desired
+post-fix contract; the neutral-description and historical anchor tests
+reproduce the current lexical false positive before the validator change.
 """
 
 from __future__ import annotations
@@ -130,10 +130,20 @@ def _write_plan(
     ]
 
 
+_HISTORICAL_FIXTURES = {
+    "docs/roadmap/reports/evidence/phase34-s2a/current-results.json": (
+        ROOT / "app/tests/fixtures/phase34_lwa1_s2a_fixture_d.json"
+    ),
+    "docs/roadmap/reports/evidence/phase34-s2a-r1/current-results.json": (
+        ROOT / "app/tests/fixtures/phase34_lwa1_s2a_r1_fixture_d.json"
+    ),
+}
+
+
 def _historical_anchor(evidence_path: str) -> list[dict]:
-    evidence = json.loads((ROOT / evidence_path).read_text(encoding="utf-8"))
-    row = next(row for row in evidence["results"] if row["fixture_id"] == "D")
-    return row["plan"]
+    fixture_path = _HISTORICAL_FIXTURES[evidence_path]
+    evidence = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return evidence["plan"]
 
 
 def _historical_project(tmp_path: Path) -> Path:
