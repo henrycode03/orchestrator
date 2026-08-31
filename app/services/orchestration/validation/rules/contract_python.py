@@ -729,3 +729,311 @@ def _python_expression_root_name(node: ast.AST) -> Optional[str]:
     if isinstance(current, ast.Name):
         return current.id
     return None
+
+
+# --------------------------------------------------------------------------
+# PHASE34-VIC1 — Plan-internal verification contradiction.
+#
+# PHASE34-S2X proved a deterministic validator false negative: a Plan could
+# reach `accepted` while mutating an implementation so that an assertion in a
+# materialized test file can no longer hold, and then naming that same test file
+# as its own verification. Nothing here executes Plan code, imports user
+# modules, runs pytest, or evaluates a whole program. The reducer below decides
+# exactly one shape -- a function whose body is a single `return` of string
+# literals, bound parameters, f-strings and `+` concatenation -- and returns
+# None for everything else, so the rule stays silent unless the contradiction is
+# provable from evidence already on hand.
+# --------------------------------------------------------------------------
+
+_VIC1_MAX_TEST_BYTES = 200_000
+
+
+def _vic1_literal_value(node: ast.AST, binding: Dict[str, str]) -> Optional[str]:
+    """Reduce an expression to a string literal, or None when undecidable."""
+
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.Name):
+        return binding.get(node.id)
+    if isinstance(node, ast.JoinedStr):
+        parts: List[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant):
+                if not isinstance(value.value, str):
+                    return None
+                parts.append(value.value)
+                continue
+            if not isinstance(value, ast.FormattedValue):
+                return None
+            # A conversion (!r) or format spec is not reduced here.
+            if value.conversion not in (-1, None) or value.format_spec is not None:
+                return None
+            resolved = _vic1_literal_value(value.value, binding)
+            if resolved is None:
+                return None
+            parts.append(resolved)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _vic1_literal_value(node.left, binding)
+        right = _vic1_literal_value(node.right, binding)
+        if left is None or right is None:
+            return None
+        return left + right
+    return None
+
+
+def _vic1_single_return_value(
+    source_text: str, function_name: str, arguments: List[str]
+) -> Optional[str]:
+    """Value of ``function_name(*arguments)`` when it is a single literal return."""
+
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return None
+    target = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            if target is not None:
+                return None  # redefined; not decidable
+            target = node
+    if target is None:
+        return None
+    body = list(target.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]  # drop the docstring
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return None
+    if body[0].value is None:
+        return None
+    signature = target.args
+    if signature.vararg or signature.kwarg or signature.kwonlyargs:
+        return None
+    positional = [argument.arg for argument in signature.posonlyargs] + [
+        argument.arg for argument in signature.args
+    ]
+    if len(arguments) > len(positional):
+        return None
+    binding = dict(zip(positional, arguments))
+    return _vic1_literal_value(body[0].value, binding)
+
+
+def _vic1_apply_plan_ops(
+    current_text: str, operations: List[Dict[str, Any]]
+) -> Optional[str]:
+    """Text after the Plan's own ops, or None when not deterministically applicable."""
+
+    text = current_text
+    for operation in operations:
+        shape = normalize_file_op_shape(operation) or operation
+        op_name = str(shape.get("op") or "").strip()
+        if op_name == "write_file":
+            content = shape.get("content")
+            if not isinstance(content, str):
+                return None
+            text = content
+        elif op_name == "append_file":
+            content = shape.get("content")
+            if not isinstance(content, str):
+                return None
+            text = text + content
+        elif op_name == "replace_in_file":
+            old = shape.get("old")
+            new = shape.get("new")
+            if not isinstance(old, str) or not isinstance(new, str):
+                return None
+            if not old or text.count(old) != 1:
+                return None
+            text = text.replace(old, new, 1)
+        else:
+            return None
+    return text
+
+
+def _vic1_plan_ops_by_path(
+    plan: List[Dict[str, Any]], project_dir: Path
+) -> Dict[str, List[Dict]]:
+    ops_by_path: Dict[str, List[Dict[str, Any]]] = {}
+    for step in plan:
+        for operation in step.get("ops", []) or []:
+            if not isinstance(operation, dict):
+                continue
+            raw_path = str(operation.get("path") or "").strip()
+            if not raw_path:
+                continue
+            try:
+                path = normalize_path_reference(raw_path, project_dir)
+            except TaskWorkspaceViolationError:
+                continue
+            ops_by_path.setdefault(path, []).append(operation)
+    return ops_by_path
+
+
+def _vic1_verification_test_references(
+    plan: List[Dict[str, Any]]
+) -> List[tuple[str, str]]:
+    """(test_path, command) pairs a Plan's own verification explicitly names."""
+
+    references: List[tuple[str, str]] = []
+    for step in plan:
+        candidates = [step.get("verification")]
+        candidates.extend(step.get("commands", []) or [])
+        for candidate in candidates:
+            command = str(candidate or "").strip()
+            if not command:
+                continue
+            for token in re.findall(r"[\w./-]+\.py", command):
+                path = token.lstrip("./")
+                if is_python_test_path(path):
+                    references.append((path, command))
+    return references
+
+
+def _vic1_assertion_targets(
+    test_text: str,
+) -> List[tuple[str, List[str], str, str]]:
+    """(function, literal args, expected value, rendered assertion) tuples."""
+
+    try:
+        tree = ast.parse(test_text)
+    except SyntaxError:
+        return []
+    imported: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                if alias.name != "*":
+                    imported[alias.asname or alias.name] = node.module
+    targets: List[tuple[str, List[str], str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert) or node.msg is not None:
+            continue
+        test = node.test
+        if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+            continue
+        if not isinstance(test.ops[0], ast.Eq):
+            continue
+        left, right = test.left, test.comparators[0]
+        if isinstance(right, ast.Call) and isinstance(left, ast.Constant):
+            left, right = right, left
+        if not isinstance(left, ast.Call) or not isinstance(right, ast.Constant):
+            continue
+        if not isinstance(right.value, str):
+            continue
+        if not isinstance(left.func, ast.Name) or left.keywords:
+            continue
+        function_name = left.func.id
+        if function_name not in imported:
+            continue
+        arguments: List[str] = []
+        for argument in left.args:
+            if not isinstance(argument, ast.Constant) or not isinstance(
+                argument.value, str
+            ):
+                arguments = []
+                break
+            arguments.append(argument.value)
+        if len(arguments) != len(left.args):
+            continue
+        rendered = f"{function_name}({', '.join(repr(a) for a in arguments)})"
+        targets.append((function_name, arguments, right.value, rendered))
+    return targets
+
+
+def _plan_verification_internal_contradiction(
+    plan: List[Dict[str, Any]],
+    *,
+    project_dir: Optional[Path],
+) -> Optional[Dict[str, Any]]:
+    """Detect a Plan whose own mutation cannot pass its own verification."""
+
+    from app.services.project.source_imports import source_path_for_module
+
+    if project_dir is None or not project_dir.exists():
+        return None
+    ops_by_path = _vic1_plan_ops_by_path(plan, project_dir)
+    if not ops_by_path:
+        return None
+
+    for test_path, command in _vic1_verification_test_references(plan):
+        if test_path in ops_by_path:
+            continue  # the Plan updates the test as well -- nothing to contradict
+        test_file = project_dir / test_path
+        try:
+            if not test_file.is_file():
+                continue
+            if test_file.stat().st_size > _VIC1_MAX_TEST_BYTES:
+                continue
+            test_text = test_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        for function_name, arguments, expected, rendered in _vic1_assertion_targets(
+            test_text
+        ):
+            module = None
+            try:
+                tree = ast.parse(test_text)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    if any(
+                        (alias.asname or alias.name) == function_name
+                        for alias in node.names
+                    ):
+                        module = node.module
+            if not module:
+                continue
+            source_path = source_path_for_module(project_dir, module)
+            if source_path is None or not source_path.is_file():
+                continue
+            try:
+                relative = normalize_path_reference(
+                    str(source_path.relative_to(project_dir.resolve())),
+                    project_dir,
+                )
+            except (TaskWorkspaceViolationError, ValueError):
+                continue
+            operations = ops_by_path.get(relative)
+            if not operations:
+                continue
+            try:
+                current_text = source_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            current_value = _vic1_single_return_value(
+                current_text, function_name, arguments
+            )
+            # Only blame the Plan when the assertion holds before it runs.
+            if current_value is None or current_value != expected:
+                continue
+            planned_text = _vic1_apply_plan_ops(current_text, operations)
+            if planned_text is None:
+                continue
+            planned_value = _vic1_single_return_value(
+                planned_text, function_name, arguments
+            )
+            if planned_value is None or planned_value == expected:
+                continue
+            return {
+                "mutated_implementation_path": relative,
+                "unchanged_test_path": test_path,
+                "asserted_expression": rendered,
+                "expected_value": expected[:120],
+                "planned_value": planned_value[:120],
+                "verification_command": command[:200],
+                "contradiction_reason": (
+                    f"plan changes {relative} so {rendered} returns "
+                    f"{planned_value[:60]!r}, but {test_path} still asserts "
+                    f"{expected[:60]!r} and the plan runs that test as its own "
+                    "verification"
+                ),
+            }
+    return None

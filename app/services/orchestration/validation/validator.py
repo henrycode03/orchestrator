@@ -122,6 +122,7 @@ from .rules.contract_python import (
     _plan_writes_obvious_undefined_python_decorators,
     _plan_writes_obvious_undefined_python_test_names,
     _plan_writes_physical_src_python_imports,
+    _plan_verification_internal_contradiction,
     _python_package_root_contract_violation,
 )
 from .rules.contract_frontend import (
@@ -1076,6 +1077,9 @@ class ValidatorService:
     _python_package_root_contract_violation = staticmethod(
         _python_package_root_contract_violation
     )
+    _plan_verification_internal_contradiction = staticmethod(
+        _plan_verification_internal_contradiction
+    )
     _frontend_wrong_stack_materializations = staticmethod(
         _frontend_wrong_stack_materializations
     )
@@ -1198,6 +1202,9 @@ class ValidatorService:
                 "missing_materialization_for_implementation"
             ),
             "python_package_root_contract": "python_package_root_contract",
+            "plan_verification_internal_contradiction": (
+                "plan_verification_internal_contradiction"
+            ),
             "missing_verification_steps": "missing_verification_command",
             "weak_verification_steps": "weak_verification",
             "placeholder_only_implementation": "placeholder_implementation",
@@ -2490,6 +2497,23 @@ class ValidatorService:
                     "editing the existing package imported by tests"
                 )
                 details["python_package_root_contract"] = package_root_violation
+
+            # PHASE34-VIC1: a Plan must not knowingly break the verification it
+            # itself specifies. Repairable rather than rejected -- it matches how
+            # other recoverable contract inconsistencies are graded, keeps the
+            # blast radius of a new static rule small, and still escalates to
+            # rejected under high validation severity.
+            verification_contradiction = cls._plan_verification_internal_contradiction(
+                plan, project_dir=project_dir
+            )
+            if verification_contradiction:
+                repairable.append(
+                    "Plan mutation contradicts the verification the plan itself "
+                    f"runs ({verification_contradiction['contradiction_reason']})"
+                )
+                details["plan_verification_internal_contradiction"] = (
+                    verification_contradiction
+                )
 
             missing_verification_steps = cls._plan_missing_verification_steps(plan)
             if missing_verification_steps:
