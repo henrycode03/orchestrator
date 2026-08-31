@@ -589,7 +589,11 @@ def queue_task_for_session(
     )
     clear_session_alert(session)
 
-    event_project_dir = Path(task_workspace["workspace_path"])
+    event_project_dir = project_control_state_location(
+        Path(task_workspace["workspace_path"]),
+        session.project_id,
+        db=db,
+    )
 
     _maybe_compact_checkpoint_before_dispatch(db, session, task, event_project_dir)
 
@@ -814,8 +818,10 @@ def retry_session_with_stronger_planning_lane(
 
     project = db.query(Project).filter(Project.id == session.project_id).first()
     if project:
-        event_project_dir = resolve_project_workspace_path(
-            project.workspace_path, project.name, db=db
+        event_project_dir = project_control_state_location(
+            resolve_project_workspace_path(project.workspace_path, project.name, db=db),
+            project.id,
+            db=db,
         )
         try:
             append_orchestration_event(

@@ -18,6 +18,7 @@ from app.services.orchestration.lifecycle.worker_bootstrap import (
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.session.session_runtime_service import queue_task_for_session
+from app.services.workspace.control_state_paths import project_control_state_location
 
 
 def _configuration(
@@ -313,7 +314,11 @@ def test_task_queued_path_projects_the_new_task_execution_identity(
 
     queue_task_for_session(db_session, session, task.id)
 
-    events = read_orchestration_events(event_workspace, session.id, task.id)
+    events = read_orchestration_events(
+        project_control_state_location(event_workspace, project.id, db=db_session),
+        session.id,
+        task.id,
+    )
     queued = next(
         event for event in events if event["event_type"] == EventType.TASK_QUEUED
     )

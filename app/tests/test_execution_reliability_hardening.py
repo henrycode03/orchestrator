@@ -40,6 +40,9 @@ from app.services.session.session_runtime_service import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.control_state_paths import (
+    project_control_state_location,
+)
 from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.tasks import worker as worker_module
 from app.tasks.worker import _claim_queued_task_for_worker
@@ -156,7 +159,11 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     workspace_root = resolve_project_workspace_path(
         project.workspace_path, project.name
     )
-    events = read_orchestration_events(Path(workspace_root), session.id, task.id)
+    events = read_orchestration_events(
+        project_control_state_location(Path(workspace_root), project.id, db=db_session),
+        session.id,
+        task.id,
+    )
     assert events[-1]["event_type"] == EventType.TASK_QUEUED
     assert events[-1]["details"]["session_instance_id"] == session.instance_id
     assert captured_delay_kwargs["queued_event_id"] == events[-1]["event_id"]
@@ -226,7 +233,11 @@ def test_queue_task_for_session_forwards_planning_lane_override(
     workspace_root = resolve_project_workspace_path(
         project.workspace_path, project.name
     )
-    events = read_orchestration_events(Path(workspace_root), session.id, task.id)
+    events = read_orchestration_events(
+        project_control_state_location(Path(workspace_root), project.id, db=db_session),
+        session.id,
+        task.id,
+    )
     assert events[-1]["details"]["planning_backend_override"] == "direct_ollama"
     assert events[-1]["details"]["planning_escalation"] == metadata
 
