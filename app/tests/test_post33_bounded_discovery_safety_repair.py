@@ -40,24 +40,26 @@ from app.tests.test_phase14b2_failure_coordinator import (
 )
 
 
-def _binding_context(project_workspace: Path, runtime_workspace: Path):
+def _binding_context(
+    project_workspace: Path, runtime_workspace: Path, runtime_root: Path
+):
     return SimpleNamespace(
         project_workspace=project_workspace,
         runtime_workspace=runtime_workspace,
+        runtime_root=runtime_root,
         project_id=12,
         task_execution_id=302,
         is_sandboxed=True,
     )
 
 
-def test_runtime_binding_blocks_provider_bootstrap_scaffold(tmp_path: Path):
-    project_workspace = tmp_path / "project"
-    runtime_workspace = tmp_path / "runtime"
-    project_workspace.mkdir()
-    runtime_workspace.mkdir()
-    (runtime_workspace / "existing_task_source.py").write_text(
-        "def existing_task_source():\n    return 1\n", encoding="utf-8"
-    )
+def _runtime_binding_fixture(tmp_path: Path, project_workspace: Path):
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-orchestrator-runtime"
+    runtime_root.mkdir()
+    runtime_workspace = runtime_root / "tasks" / "302"
+    runtime_workspace.mkdir(parents=True)
+    runner_workspace = runtime_root / "openclaw" / "runner"
+    runner_workspace.mkdir(parents=True)
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(
         json.dumps(
@@ -65,18 +67,31 @@ def test_runtime_binding_blocks_provider_bootstrap_scaffold(tmp_path: Path):
                 "agents": {
                     "defaults": {},
                     "list": [
-                        {"id": "orchestrator", "workspace": str(project_workspace)}
+                        {"id": "orchestrator", "workspace": str(runner_workspace)}
                     ],
                 }
             }
         ),
         encoding="utf-8",
     )
+    return runtime_workspace, runtime_root, config_path
+
+
+def test_runtime_binding_blocks_provider_bootstrap_scaffold(tmp_path: Path):
+    project_workspace = tmp_path / "project"
+    project_workspace.mkdir()
+    runtime_workspace, runtime_root, config_path = _runtime_binding_fixture(
+        tmp_path, project_workspace
+    )
+    (runtime_workspace / "existing_task_source.py").write_text(
+        "def existing_task_source():\n    return 1\n", encoding="utf-8"
+    )
     original_config = config_path.read_bytes()
 
     binding = bind_openclaw_workspace(
-        _binding_context(project_workspace, runtime_workspace),
+        _binding_context(project_workspace, runtime_workspace, runtime_root),
         real_config_path=config_path,
+        runner_agent_id="orchestrator",
     )
     try:
         bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
@@ -119,27 +134,15 @@ def test_current_openclaw_parser_accepts_defaults_bootstrap_control(
         pytest.skip("OpenClaw CLI is not installed in this test environment")
 
     project_workspace = tmp_path / "project"
-    runtime_workspace = tmp_path / "runtime"
     project_workspace.mkdir()
-    runtime_workspace.mkdir()
-    config_path = tmp_path / "openclaw.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "agents": {
-                    "defaults": {},
-                    "list": [
-                        {"id": "orchestrator", "workspace": str(project_workspace)}
-                    ],
-                }
-            }
-        ),
-        encoding="utf-8",
+    runtime_workspace, runtime_root, config_path = _runtime_binding_fixture(
+        tmp_path, project_workspace
     )
     original_config = config_path.read_bytes()
     binding = bind_openclaw_workspace(
-        _binding_context(project_workspace, runtime_workspace),
+        _binding_context(project_workspace, runtime_workspace, runtime_root),
         real_config_path=config_path,
+        runner_agent_id="orchestrator",
     )
     try:
         env = os.environ.copy()
@@ -169,31 +172,18 @@ def test_discovery_tool_suppression_is_ephemeral_and_openclaw_validated(
     tmp_path: Path,
 ):
     project_workspace = tmp_path / "project"
-    runtime_workspace = tmp_path / "runtime"
     project_workspace.mkdir()
-    runtime_workspace.mkdir()
-    config_path = tmp_path / "openclaw.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "agents": {
-                    "defaults": {},
-                    "list": [
-                        {
-                            "id": "orchestrator",
-                            "model": "ollama/qwen3-coder:30b",
-                            "workspace": str(project_workspace),
-                        }
-                    ],
-                }
-            }
-        ),
-        encoding="utf-8",
+    runtime_workspace, runtime_root, config_path = _runtime_binding_fixture(
+        tmp_path, project_workspace
     )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["agents"]["list"][0]["model"] = "ollama/qwen3-coder:30b"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
     original_config = config_path.read_bytes()
     binding = bind_openclaw_workspace(
-        _binding_context(project_workspace, runtime_workspace),
+        _binding_context(project_workspace, runtime_workspace, runtime_root),
         real_config_path=config_path,
+        runner_agent_id="orchestrator",
     )
     service = object.__new__(OpenClawSessionService)
     service._workspace_binding = binding

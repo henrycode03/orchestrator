@@ -588,15 +588,33 @@ def _configure_ephemeral_service(
         runtime_configuration=configuration,
     )
     service._log_entry = lambda *args, **kwargs: None
+    runner_id = "post33-model2-runtime-runner"
+    template_dir = tempfile.TemporaryDirectory(
+        dir=runtime_workspace.parent, prefix="post33-model2-runner-"
+    )
+    runner_workspace = Path(template_dir.name) / "runner"
+    runner_workspace.mkdir(parents=True)
+    template_config_path = Path(template_dir.name) / "openclaw.json"
+    template_config = json.loads(PERSISTENT_OPENCLAW_CONFIG.read_text(encoding="utf-8"))
+    template_config.setdefault("agents", {}).setdefault("list", []).append(
+        {"id": runner_id, "workspace": str(runner_workspace)}
+    )
+    template_config_path.write_text(
+        json.dumps(template_config, indent=2), encoding="utf-8"
+    )
+    service._openclaw_config_path = lambda: (
+        getattr(service, "_openclaw_config_path_override", None) or template_config_path
+    )
     context = SimpleNamespace(
         executor="openclaw",
         runtime_workspace=runtime_workspace,
         project_workspace=REPOSITORY_ROOT.resolve(),
         project_id=None,
         task_execution_id=None,
+        runtime_root=runtime_workspace.parent,
         is_sandboxed=True,
     )
-    service.bind_runtime_workspace(context)
+    service.bind_runtime_workspace(context, runner_agent_id=runner_id)
     config_path = service._openclaw_config_path()
     config = json.loads(config_path.read_text(encoding="utf-8"))
     selected = next(
@@ -644,6 +662,13 @@ def _configure_ephemeral_service(
         final_model.get("fallbacks") if isinstance(final_model, dict) else None
     )
     service._evaluation_db = service_db
+    original_release = service.release_runtime_workspace_binding
+
+    def release() -> None:
+        original_release()
+        template_dir.cleanup()
+
+    service.release_runtime_workspace_binding = release
     return service, {
         "agent_id": service._workspace_binding.agent_id,
         "config_path": str(config_path),

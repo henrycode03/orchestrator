@@ -61,13 +61,16 @@ class RuntimeExecutorContext:
         runtime_root: Optional[Path] = None,
     ) -> "RuntimeExecutorContext":
         base_commit = sandbox.read_metadata().get("base_commit")
+        resolved_runtime_root = runtime_root
+        if resolved_runtime_root is None:
+            resolved_runtime_root = sandbox.path.parents[2]
         return cls(
             executor=sandbox.executor,
             runtime_workspace=sandbox.path,
             project_workspace=project_workspace,
             project_id=sandbox.project_id,
             task_execution_id=sandbox.task_execution_id,
-            runtime_root=runtime_root,
+            runtime_root=resolved_runtime_root,
             base_commit=base_commit,
             sandbox=sandbox,
         )

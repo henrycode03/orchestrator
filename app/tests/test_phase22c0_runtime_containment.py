@@ -18,6 +18,7 @@ from app.services.agents.openclaw_service import (
     OpenClawAgentSelectionError,
     OpenClawSessionService,
 )
+from app.services.orchestration.execution.runtime_context import RuntimeExecutorContext
 from app.services.orchestration.validation.git_containment_guard import (
     BLOCKED_GIT_MUTATION_SUBCOMMANDS,
     build_git_containment_env,
@@ -32,6 +33,28 @@ from app.services.orchestration.validation.runtime_pollution_guard import (
 from app.services.orchestration.validation.workspace_guard import (
     has_recent_file_activity,
 )
+
+
+def _runtime_command_context(tmp_path, *, task_execution_id=1):
+    project_root = tmp_path / "projects" / "product"
+    runtime_root = tmp_path / "orchestrator-runtime"
+    runtime_workspace = runtime_root / "tasks" / "111" / str(task_execution_id)
+    project_root.mkdir(parents=True)
+    runtime_workspace.mkdir(parents=True)
+    return (
+        project_root,
+        runtime_root,
+        runtime_workspace,
+        RuntimeExecutorContext(
+            executor="openclaw",
+            runtime_workspace=runtime_workspace,
+            project_workspace=project_root,
+            project_id=111,
+            task_execution_id=task_execution_id,
+            runtime_root=runtime_root,
+            sandbox=object(),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -66,20 +89,21 @@ def test_no_matching_agent_fails_closed(monkeypatch, tmp_path):
     with pytest.raises(OpenClawAgentSelectionError) as exc_info:
         service._build_openclaw_agent_command(["openclaw"], cwd=str(project_root))
 
-    assert str(project_root) in str(exc_info.value)
+    assert "Runtime Workspace" in str(exc_info.value)
     assert any(level == "ERROR" for level, _ in logged)
 
 
-def test_matching_agent_still_selected(monkeypatch, tmp_path):
-    project_root = tmp_path / "vault" / "projects" / "orchestrator"
-    project_root.mkdir(parents=True)
+def test_explicit_runtime_runner_still_selected(monkeypatch, tmp_path):
+    project_root, runtime_root, runtime_workspace, context = _runtime_command_context(
+        tmp_path
+    )
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(
         json.dumps(
             {
                 "agents": {
                     "list": [
-                        {"id": "orchestrator", "workspace": str(project_root)},
+                        {"id": "orchestrator", "workspace": str(runtime_workspace)},
                     ]
                 }
             }
@@ -87,26 +111,28 @@ def test_matching_agent_still_selected(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "orchestrator")
 
     service = object.__new__(OpenClawSessionService)
-    result = service._build_openclaw_agent_command(["openclaw"], cwd=str(project_root))
+    service._runtime_executor_context = context
+    service._workspace_binding = type("Binding", (), {"agent_id": "orchestrator"})()
+    result = service._build_openclaw_agent_command(
+        ["openclaw"], cwd=str(runtime_workspace)
+    )
 
     assert result == ["openclaw", "agent", "--agent", "orchestrator"]
     assert service._last_selected_openclaw_agent_id == "orchestrator"
 
 
-def test_no_cwd_does_not_fail_closed(monkeypatch, tmp_path):
-    """Planning-only calls with no resolved project cwd keep the old lenient
-    behavior -- there is no real workspace at stake to fail closed over."""
+def test_no_cwd_fails_closed_without_implicit_selection(monkeypatch, tmp_path):
 
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(json.dumps({"agents": {"list": []}}), encoding="utf-8")
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
 
     service = object.__new__(OpenClawSessionService)
-    result = service._build_openclaw_agent_command(["openclaw"], cwd=None)
-
-    assert result == ["openclaw", "agent"]
+    with pytest.raises(OpenClawAgentSelectionError):
+        service._build_openclaw_agent_command(["openclaw"], cwd=None)
 
 
 def test_strict_v2_no_cwd_fails_closed_before_default_agent(monkeypatch, tmp_path):
@@ -124,15 +150,16 @@ def test_strict_v2_no_cwd_fails_closed_before_default_agent(monkeypatch, tmp_pat
 
 
 def test_strict_v2_explicit_agent_is_selected(monkeypatch, tmp_path):
-    project_root = tmp_path / "planning-agent"
-    project_root.mkdir()
+    project_root, runtime_root, runtime_workspace, context = _runtime_command_context(
+        tmp_path
+    )
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(
         json.dumps(
             {
                 "agents": {
                     "list": [
-                        {"id": "planning", "workspace": str(project_root)},
+                        {"id": "planning", "workspace": str(runtime_workspace)},
                     ]
                 }
             }
@@ -140,10 +167,13 @@ def test_strict_v2_explicit_agent_is_selected(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "planning")
 
     service = object.__new__(OpenClawSessionService)
+    service._runtime_executor_context = context
+    service._workspace_binding = type("Binding", (), {"agent_id": "planning"})()
     result = service._build_openclaw_agent_command(
-        ["openclaw"], cwd=str(project_root), strict_provider_result=True
+        ["openclaw"], cwd=str(runtime_workspace), strict_provider_result=True
     )
 
     assert result == ["openclaw", "agent", "--agent", "planning"]
@@ -253,10 +283,6 @@ def test_explicit_dedicated_planning_agent_binds_without_project_match(
     runtime_workspace.mkdir()
     service._bind_dedicated_strict_planning_agent(runtime_workspace, "planning")
     try:
-        assert (
-            service._find_openclaw_agent_for_workspace(str(runtime_workspace))
-            == "planning"
-        )
         assert service._last_selected_openclaw_agent_id == "planning"
         assert service._openclaw_config_path_override != config_path
     finally:

@@ -46,16 +46,18 @@ from app.services.workspace.task_sandbox_allocator import (
 )
 
 
-def _write_config(path, project_workspace):
+def _write_config(path, project_workspace, runtime_root):
+    runner_workspace = runtime_root / "openclaw" / "runner"
+    runner_workspace.mkdir(parents=True)
     path.write_text(
         json.dumps(
             {
                 "agents": {
-                    "defaults": {"workspace": str(project_workspace)},
+                    "defaults": {"workspace": str(runner_workspace)},
                     "list": [
                         {
                             "id": "orchestrator",
-                            "workspace": str(project_workspace),
+                            "workspace": str(runner_workspace),
                             "agentDir": "/root/.openclaw/agents/orchestrator/agent",
                         }
                     ],
@@ -70,21 +72,25 @@ def _write_config(path, project_workspace):
 def test_runtime_binding_moves_all_provider_state_out_of_canonical_root(tmp_path):
     project_workspace = tmp_path / "canonical"
     project_workspace.mkdir()
-    runtime_workspace = tmp_path / "runtime"
-    runtime_workspace.mkdir()
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-orchestrator-runtime"
+    runtime_root.mkdir()
+    runtime_workspace = runtime_root / "tasks" / "245"
+    runtime_workspace.mkdir(parents=True)
     config_path = tmp_path / "openclaw.json"
-    _write_config(config_path, project_workspace)
+    _write_config(config_path, project_workspace, runtime_root)
     context = RuntimeExecutorContext(
         executor="openclaw",
         runtime_workspace=runtime_workspace,
         project_workspace=project_workspace,
         project_id=12,
         task_execution_id=245,
-        runtime_root=tmp_path,
+        runtime_root=runtime_root,
         sandbox=object(),
     )
 
-    binding = bind_openclaw_workspace(context, real_config_path=config_path)
+    binding = bind_openclaw_workspace(
+        context, real_config_path=config_path, runner_agent_id="orchestrator"
+    )
     try:
         bound = json.loads(binding.config_path.read_text(encoding="utf-8"))
         agent = bound["agents"]["list"][0]
@@ -130,9 +136,11 @@ def test_canonical_scaffold_fails_closed_while_runtime_scaffold_is_contained(
     tmp_path,
 ):
     canonical = tmp_path / "canonical"
-    runtime = tmp_path / "runtime"
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-orchestrator-runtime"
+    runtime_root.mkdir()
+    runtime = runtime_root / "tasks" / "249"
     canonical.mkdir()
-    runtime.mkdir()
+    runtime.mkdir(parents=True)
     service = object.__new__(OpenClawSessionService)
     service.execution_cwd_override = str(runtime)
     service._log_entry = lambda *args, **kwargs: None
@@ -172,12 +180,14 @@ def test_nested_step_debug_repair_keeps_runtime_binding_until_provider_returns(
     """
 
     canonical = tmp_path / "canonical"
-    runtime = tmp_path / "runtime"
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-orchestrator-runtime"
+    runtime_root.mkdir()
+    runtime = runtime_root / "tasks" / "249"
     canonical.mkdir()
-    runtime.mkdir()
+    runtime.mkdir(parents=True)
     (canonical / "tracked-source.py").write_text("sentinel\n", encoding="utf-8")
     config_path = tmp_path / "openclaw.json"
-    _write_config(config_path, canonical)
+    _write_config(config_path, canonical, runtime_root)
 
     project = Project(
         name="W1 nested repair project",
@@ -213,11 +223,11 @@ def test_nested_step_debug_repair_keeps_runtime_binding_until_provider_returns(
         project_workspace=canonical,
         project_id=project.id,
         task_execution_id=249,
-        runtime_root=tmp_path,
+        runtime_root=runtime_root,
         sandbox=object(),
     )
     primary.execution_cwd_override = str(runtime)
-    primary.bind_runtime_workspace(context)
+    primary.bind_runtime_workspace(context, runner_agent_id="orchestrator")
 
     canonical_before = snapshot_workspace_entry_evidence(canonical)
     observed = {}

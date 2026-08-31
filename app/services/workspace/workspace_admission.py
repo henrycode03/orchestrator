@@ -16,10 +16,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.models import Project
+from app.services.orchestration.execution.executor_workspace_binding import (
+    ExecutorWorkspaceBindingError,
+    resolve_openclaw_runner_agent_id,
+    validate_runtime_owned_openclaw_agent,
+)
 from app.services.project.lifecycle import assert_project_launch_eligible
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.system_settings import get_effective_runtime_root
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -166,12 +172,11 @@ def admit_openclaw_workspace_binding(
     openclaw_config_path: Path | None = None,
     configured_providers: dict[str, str] | None = None,
 ) -> OpenClawWorkspaceBindingAdmission:
-    """Require one existing OpenClaw agent for a project's canonical workspace.
+    """Require one explicit runtime-owned OpenClaw runner for dispatch.
 
-    This is the provider-specific dispatch gate. It validates only the
-    project/agent identity contract; Git cleanliness and runtime workspace
-    allocation remain owned by their existing layers. Matching uses the same
-    canonical realpath rule as the existing dogfood admission and F12 check.
+    This provider-specific dispatch gate validates the runner identity and
+    persistent runtime-owned template. Git cleanliness and per-invocation
+    workspace allocation remain owned by their existing layers.
     """
 
     workspace = project_workspace_realpath(project, db)
@@ -187,31 +192,47 @@ def admit_openclaw_workspace_binding(
     if configured_providers:
         metadata["configured_providers"] = dict(configured_providers)
 
-    try:
-        matches = _matching_openclaw_agent_ids(config_path, workspace)
-    except WorkspaceAdmissionError as exc:
+    if not metadata["workspace_exists"]:
         raise WorkspaceAdmissionError(
             "openclaw_workspace_binding_unavailable",
-            f"Could not inspect the OpenClaw workspace binding for Project "
-            f"{project.id}: {exc.detail}",
+            f"Project {project.id} workspace does not exist: {workspace}",
+            metadata=metadata,
+        )
+
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        selection = validate_runtime_owned_openclaw_agent(
+            config,
+            agent_id=resolve_openclaw_runner_agent_id(),
+            project_workspace=workspace,
+            runtime_root=get_effective_runtime_root(db),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise WorkspaceAdmissionError(
+            "openclaw_workspace_binding_unavailable",
+            f"Could not read OpenClaw config: {exc}",
+            metadata=metadata,
+        ) from exc
+    except ExecutorWorkspaceBindingError as exc:
+        raise WorkspaceAdmissionError(
+            "openclaw_workspace_binding_unavailable",
+            str(exc),
             metadata=metadata,
         ) from exc
 
-    metadata["matching_agent_count"] = len(matches)
-    if not metadata["workspace_exists"] or len(matches) != 1:
-        found = matches or "none"
+    metadata["matching_agent_count"] = 1
+    if not selection.agent_id:
         raise WorkspaceAdmissionError(
             "openclaw_workspace_binding_unavailable",
-            f"Project {project.id} requires exactly one OpenClaw agent for "
-            f"canonical workspace {workspace}; found {found}.",
+            f"Project {project.id} has no valid runtime-owned OpenClaw runner.",
             metadata=metadata,
         )
 
     return OpenClawWorkspaceBindingAdmission(
         project_id=project.id,
         workspace=str(workspace),
-        openclaw_agent_id=matches[0],
-        matching_agent_count=len(matches),
+        openclaw_agent_id=selection.agent_id,
+        matching_agent_count=1,
         configured_provider=configured_provider,
         admission_stage=admission_stage,
     )

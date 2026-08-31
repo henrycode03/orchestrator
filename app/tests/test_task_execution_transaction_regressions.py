@@ -470,18 +470,27 @@ def test_task_retry_reaches_dispatch_with_valid_openclaw_binding(
 ):
     project_workspace = tmp_path / "bound-project"
     project_workspace.mkdir()
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-orchestrator-runtime"
+    runtime_root.mkdir()
+    runner_workspace = runtime_root / "openclaw" / "runner"
+    runner_workspace.mkdir(parents=True)
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(
         json.dumps(
             {
                 "agents": {
-                    "list": [{"id": "bound-agent", "workspace": str(project_workspace)}]
+                    "list": [{"id": "bound-agent", "workspace": str(runner_workspace)}]
                 }
             }
         ),
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "bound-agent")
+    monkeypatch.setattr(
+        "app.services.workspace.workspace_admission.get_effective_runtime_root",
+        lambda _db: runtime_root,
+    )
 
     project = Project(
         name="Bound OpenClaw Project",

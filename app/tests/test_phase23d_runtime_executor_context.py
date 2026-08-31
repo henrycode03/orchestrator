@@ -89,6 +89,11 @@ def _write_openclaw_config(path, *, agent_id: str, workspace) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _explicit_runtime_runner(monkeypatch):
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "orchestrator")
+
+
 class TestRuntimeExecutorContext:
     """Goal 1: single execution-authority object."""
 
@@ -212,8 +217,10 @@ class TestExecutorWorkspaceBindingLayer:
         real_config_path = tmp_path / "openclaw.json"
         project_workspace = tmp_path / "project"
         project_workspace.mkdir()
+        runner_workspace = tmp_path / "runtime" / "openclaw" / "runner"
+        runner_workspace.mkdir(parents=True)
         _write_openclaw_config(
-            real_config_path, agent_id="orchestrator", workspace=project_workspace
+            real_config_path, agent_id="orchestrator", workspace=runner_workspace
         )
         real_config_before = real_config_path.read_text(encoding="utf-8")
 
@@ -234,7 +241,7 @@ class TestExecutorWorkspaceBindingLayer:
             assert real_config_path.read_text(encoding="utf-8") == real_config_before
             real_config_after = json.loads(real_config_path.read_text(encoding="utf-8"))
             assert real_config_after["agents"]["list"][0]["workspace"] == str(
-                project_workspace
+                runner_workspace
             )
         finally:
             binding.release()
@@ -261,8 +268,10 @@ class TestExecutorWorkspaceBindingLayer:
         real_config_path = tmp_path / "openclaw.json"
         project_workspace = tmp_path / "project"
         project_workspace.mkdir()
+        runner_workspace = tmp_path / "runtime" / "openclaw" / "runner"
+        runner_workspace.mkdir(parents=True)
         _write_openclaw_config(
-            real_config_path, agent_id="orchestrator", workspace=project_workspace
+            real_config_path, agent_id="orchestrator", workspace=runner_workspace
         )
         sandbox = _fake_sandbox(tmp_path)
         context = RuntimeExecutorContext.for_sandbox(
@@ -311,8 +320,10 @@ class TestOpenClawSessionServiceRuntimeWorkspaceBinding:
         real_config_path = tmp_path / "openclaw.json"
         project_workspace = tmp_path / "project"
         project_workspace.mkdir()
+        runner_workspace = tmp_path / "runtime" / "openclaw" / "runner"
+        runner_workspace.mkdir(parents=True)
         _write_openclaw_config(
-            real_config_path, agent_id="orchestrator", workspace=project_workspace
+            real_config_path, agent_id="orchestrator", workspace=runner_workspace
         )
         monkeypatch.setattr(service, "_openclaw_config_path", lambda: real_config_path)
 
@@ -369,8 +380,10 @@ class TestConcurrentRuntimeWorkspaceBinding:
         real_config_path = tmp_path / "openclaw.json"
         project_workspace = tmp_path / "project"
         project_workspace.mkdir()
+        runner_workspace = tmp_path / "runtime" / "openclaw" / "runner"
+        runner_workspace.mkdir(parents=True)
         _write_openclaw_config(
-            real_config_path, agent_id="orchestrator", workspace=project_workspace
+            real_config_path, agent_id="orchestrator", workspace=runner_workspace
         )
 
         results = {}
@@ -422,7 +435,7 @@ class TestConcurrentRuntimeWorkspaceBinding:
         # Real config never mutated by either concurrent binder.
         real_config_after = json.loads(real_config_path.read_text(encoding="utf-8"))
         assert real_config_after["agents"]["list"][0]["workspace"] == str(
-            project_workspace
+            runner_workspace
         )
 
 

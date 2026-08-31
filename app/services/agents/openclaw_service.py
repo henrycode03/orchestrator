@@ -72,6 +72,7 @@ from app.services.orchestration.execution.executor_workspace_binding import (
     ExecutorWorkspaceBinding,
     ExecutorWorkspaceBindingError,
     bind_openclaw_workspace,
+    select_runtime_owned_openclaw_template,
 )
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
@@ -369,6 +370,7 @@ class OpenClawSessionService:
         self._openclaw_config_path_override: Optional[Path] = None
         self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
         self._runtime_executor_context: Optional[Any] = None
+        self._runtime_runner_agent_id: Optional[str] = None
         self._runtime_workspace_previous_cwd_override: Optional[str] = None
         self._strict_planning_config_dir: tempfile.TemporaryDirectory | None = None
         self.runtime_configuration = runtime_configuration
@@ -583,25 +585,6 @@ class OpenClawSessionService:
         except Exception:
             return False
 
-    def _find_openclaw_agent_for_workspace(self, cwd: Optional[str]) -> Optional[str]:
-        if not cwd:
-            return None
-        config_path = self._openclaw_config_path()
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-
-        agents = (config.get("agents") or {}).get("list") or []
-        for agent in agents:
-            if not isinstance(agent, dict):
-                continue
-            agent_id = str(agent.get("id") or "").strip()
-            workspace = str(agent.get("workspace") or "").strip()
-            if agent_id and workspace and self._paths_same(workspace, cwd):
-                return agent_id
-        return None
-
     def _build_openclaw_agent_command(
         self,
         base_command: List[str],
@@ -609,43 +592,95 @@ class OpenClawSessionService:
         cwd: Optional[str],
         strict_provider_result: bool = False,
     ) -> List[str]:
-        """Select the OpenClaw agent whose configured workspace matches ``cwd``.
+        """Select the explicit runner for the declared Runtime Workspace.
 
-        Phase 22C-0: when ``cwd`` resolves to a real project directory but no
-        configured OpenClaw agent's workspace matches it, this used to
-        silently omit ``--agent`` and let OpenClaw fall back to its default
-        agent/workspace -- the exact mechanism behind the Phase 22A wrong-
-        workspace S1 (a task marked DONE while its artifact landed under
-        OpenClaw's own default workspace instead of the project). Refuse to
-        dispatch instead.
+        The runner template is selected by configured identity and validated
+        as runtime-owned. Its ephemeral config must point that identity at
+        ``cwd`` exactly, preserving Phase 22C-0's fail-closed containment
+        against default, ProjectRoot, or generic-workspace dispatch.
         """
 
         full_cmd = [*base_command, "agent"]
-        agent_id = self._find_openclaw_agent_for_workspace(cwd)
-        if agent_id:
-            full_cmd.extend(["--agent", agent_id])
-            self._last_selected_openclaw_agent_id = agent_id
-            return full_cmd
 
-        self._last_selected_openclaw_agent_id = None
-        if strict_provider_result:
-            error = (
-                "Strict Protocol v2 planning requires an explicitly selected "
-                "project-scoped OpenClaw agent. The resolved cwd is null, so "
-                "refusing OpenClaw's default main agent/workspace."
+        def _fail(message: str) -> None:
+            self._last_selected_openclaw_agent_id = None
+            try:
+                self._log_entry("ERROR", f"[OPENCLAW] {message}", commit=True)
+            except AttributeError:
+                pass
+            raise OpenClawAgentSelectionError(message)
+
+        if not cwd:
+            _fail(
+                "OpenClaw invocation has no Runtime Workspace cwd; refusing "
+                "default or implicit agent selection."
             )
-            self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
-            raise OpenClawAgentSelectionError(error)
-        if cwd:
-            error = (
-                "No OpenClaw agent is configured with a workspace matching the "
-                f"resolved project directory: {cwd}. Refusing to fall back to "
-                "OpenClaw's default agent/workspace (Phase 22C-0 fail-closed "
-                "containment). Register an OpenClaw agent whose `workspace` "
-                "equals this path, or route this task to a different backend."
+
+        try:
+            config = json.loads(
+                self._openclaw_config_path().read_text(encoding="utf-8")
             )
-            self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
-            raise OpenClawAgentSelectionError(error)
+        except (OSError, TypeError, ValueError) as exc:
+            _fail(f"Unable to read OpenClaw configuration for runner selection: {exc}")
+
+        runtime_context = getattr(self, "_runtime_executor_context", None)
+        strict_binding = getattr(self, "_strict_planning_config_dir", None) is not None
+        if runtime_context is None and not strict_binding:
+            _fail(
+                "OpenClaw invocation has no Runtime Workspace binding; refusing "
+                "direct ProjectRoot or default-agent execution."
+            )
+
+        if runtime_context is not None:
+            try:
+                selection = select_runtime_owned_openclaw_template(
+                    config,
+                    runtime_context,
+                    configured_agent_id=getattr(self, "_runtime_runner_agent_id", None),
+                )
+            except ExecutorWorkspaceBindingError as exc:
+                _fail(str(exc))
+            agent_id = selection.agent_id
+        else:
+            agent_id = str(
+                getattr(self, "_last_selected_openclaw_agent_id", "") or ""
+            ).strip()
+            if not agent_id:
+                _fail(
+                    "Strict OpenClaw planning has no explicitly selected agent; "
+                    "refusing fallback selection."
+                )
+
+        selected_agent = next(
+            (
+                agent
+                for agent in (config.get("agents") or {}).get("list") or []
+                if isinstance(agent, dict)
+                and str(agent.get("id") or "").strip() == agent_id
+            ),
+            None,
+        )
+        if selected_agent is None:
+            _fail(
+                f"Explicit OpenClaw runner agent {agent_id!r} is not present in "
+                "the active configuration; refusing fallback selection."
+            )
+        if not self._paths_same(str(selected_agent.get("workspace") or ""), cwd):
+            _fail(
+                "Selected OpenClaw runner workspace does not match the declared "
+                f"Runtime Workspace: expected {cwd}, got "
+                f"{selected_agent.get('workspace')}"
+            )
+        binding_agent_id = str(
+            getattr(getattr(self, "_workspace_binding", None), "agent_id", "") or ""
+        ).strip()
+        if binding_agent_id and binding_agent_id != agent_id:
+            _fail(
+                f"Ephemeral binding selected agent {binding_agent_id!r}, but "
+                f"explicit runner selection resolved {agent_id!r}"
+            )
+        self._last_selected_openclaw_agent_id = agent_id
+        full_cmd.extend(["--agent", agent_id])
         return full_cmd
 
     def _apply_discovery_tool_suppression(
@@ -696,26 +731,28 @@ class OpenClawSessionService:
         selected["tools"] = {**dict(existing_tools or {}), "deny": ["*"]}
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
-    def bind_runtime_workspace(self, context: Optional[Any]) -> None:
+    def bind_runtime_workspace(
+        self, context: Optional[Any], *, runner_agent_id: Optional[str] = None
+    ) -> None:
         """Bind this session's OpenClaw execution to a Runtime Executor
         Context (Phase 23D, Goal 3).
 
-        No-op when ``context`` is ``None`` or not sandboxed (Model A) --
-        the existing static ``openclaw.json`` match against the Project
-        Workspace already works unchanged. When sandboxed, resolves an
-        ephemeral, per-invocation config copy whose template agent's
-        ``workspace`` is rewritten to the Runtime Workspace, and points
-        this instance's config resolution at it. Fails closed
-        (``OpenClawAgentSelectionError``) if no template agent matches the
-        Project Workspace -- never falls back to the Project Workspace or
-        a default agent, and never invents a new agent identity.
+        No-op when ``context`` is ``None`` or not sandboxed. Sandboxed
+        dispatch resolves an ephemeral, per-invocation config copy from the
+        explicitly configured runtime-owned runner template, rewrites that
+        template's ``workspace`` to the Runtime Workspace, and points this
+        instance's config resolution at it. It fails closed when the runner
+        is missing or unsafe; it never falls back to the Project Workspace,
+        a default agent, or a generic workspace.
         """
         if context is None or not getattr(context, "is_sandboxed", False):
             return
         real_config_path = self._openclaw_config_path()
         try:
             self._workspace_binding = bind_openclaw_workspace(
-                context, real_config_path=real_config_path
+                context,
+                real_config_path=real_config_path,
+                runner_agent_id=runner_agent_id,
             )
         except ExecutorWorkspaceBindingError as exc:
             error = OpenClawAgentSelectionError(str(exc))
@@ -729,6 +766,7 @@ class OpenClawSessionService:
         self._runtime_workspace_previous_cwd_override = self.execution_cwd_override
         self._openclaw_config_path_override = self._workspace_binding.config_path
         self._runtime_executor_context = context
+        self._runtime_runner_agent_id = self._workspace_binding.agent_id
         # The binding owns both provider configuration/state and the
         # subprocess cwd. Keeping these on the same service prevents a fresh
         # nested repair runtime from resolving its cwd back to the canonical
@@ -823,6 +861,7 @@ class OpenClawSessionService:
         self._workspace_binding = None
         self._openclaw_config_path_override = None
         self._runtime_executor_context = None
+        self._runtime_runner_agent_id = None
         self.execution_cwd_override = self._runtime_workspace_previous_cwd_override
         self._runtime_workspace_previous_cwd_override = None
 
@@ -3416,6 +3455,7 @@ class OpenClawSessionService:
                     project_workspace=project_workspace,
                     project_id=self.project_id,
                     task_execution_id=None,
+                    runtime_root=get_effective_runtime_root(self.db),
                     is_sandboxed=True,
                 )
                 self.execution_cwd_override = str(runtime_workspace)
@@ -3431,13 +3471,11 @@ class OpenClawSessionService:
                 else:
                     self.bind_runtime_workspace(context)
                 if strict_provider_result:
-                    selected_agent_id = self._find_openclaw_agent_for_workspace(
-                        self.execution_cwd_override
-                    )
+                    selected_agent_id = self._last_selected_openclaw_agent_id
                     if not selected_agent_id:
                         raise OpenClawAgentSelectionError(
-                            "No isolated Protocol v2 planning agent matches the "
-                            "bound runtime workspace"
+                            "No explicitly selected Protocol v2 planning agent "
+                            "matches the bound runtime workspace"
                         )
                     self._configure_strict_provider_controls(selected_agent_id)
 

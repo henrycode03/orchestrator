@@ -246,6 +246,10 @@ class Settings(BaseSettings):
     # workspace tree (see phase23a-workspace-runtime-separation-plan.md §8
     # Stage 1). Not yet read by any execution path.
     RUNTIME_ROOT: str = "~/.orchestrator/runtime"
+    # RTO1: explicit OpenClaw template identity. Empty means no normal
+    # OpenClaw invocation is eligible; selection must never fall back to the
+    # ProjectRoot agent, main, or a generic workspace.
+    OPENCLAW_RUNNER_AGENT_ID: str = ""
     # Phase 23D-6: canonical-project-root dispatch executes OpenClaw inside an
     # allocated Task Execution Sandbox by default. Operators can still set this
     # False as an emergency compatibility override.

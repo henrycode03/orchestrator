@@ -192,33 +192,49 @@ def test_dogfood_admission_rejects_non_git_and_remote_less_workspaces(
     assert exc_info.value.category == "workspace_remote_missing"
 
 
-def test_openclaw_binding_rejects_duplicate_exact_workspace_agents(tmp_path: Path):
+def test_openclaw_binding_rejects_duplicate_explicit_runner_agents(
+    tmp_path: Path, monkeypatch
+):
     workspace = _clean_remote_workspace(tmp_path)
-    config = _openclaw_config(tmp_path / "openclaw.json", workspace, "first", "second")
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    context = RuntimeExecutorContext.for_project_workspace(
-        project_workspace=workspace,
-        executor="openclaw",
-        project_id=1,
-        task_execution_id=1,
+    runtime_root = tmp_path / "runtime"
+    runner = runtime_root / "openclaw" / "runner"
+    runtime_workspace = runtime_root / "tasks" / "1" / "1"
+    runner.mkdir(parents=True)
+    runtime_workspace.mkdir(parents=True)
+    config = _openclaw_config(
+        tmp_path / "openclaw.json", runner, "runtime-runner", "runtime-runner"
     )
     context = RuntimeExecutorContext(
-        project_id=context.project_id,
-        task_execution_id=context.task_execution_id,
-        project_workspace=context.project_workspace,
-        runtime_workspace=runtime,
-        executor=context.executor,
+        project_id=1,
+        task_execution_id=1,
+        project_workspace=workspace,
+        runtime_workspace=runtime_workspace,
+        runtime_root=runtime_root,
+        executor="openclaw",
+        sandbox=object(),
     )
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "runtime-runner")
 
-    with pytest.raises(ExecutorWorkspaceBindingError, match="Multiple OpenClaw agents"):
+    with pytest.raises(
+        ExecutorWorkspaceBindingError, match="Multiple OpenClaw runner entries"
+    ):
         bind_openclaw_workspace(context, real_config_path=config)
 
 
-def test_openclaw_project_binding_admission_matrix(tmp_path: Path):
+def test_openclaw_project_binding_admission_uses_runtime_runner(
+    tmp_path: Path, monkeypatch
+):
     workspace = _clean_remote_workspace(tmp_path)
     project = Project(id=901, name="binding matrix", workspace_path=str(workspace))
-    config = _openclaw_config(tmp_path / "openclaw.json", workspace, "matching")
+    runtime_root = tmp_path / "runtime"
+    runner = runtime_root / "openclaw" / "runner"
+    runner.mkdir(parents=True)
+    config = _openclaw_config(tmp_path / "openclaw.json", runner, "runtime-runner")
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "runtime-runner")
+    monkeypatch.setattr(
+        "app.services.workspace.workspace_admission.get_effective_runtime_root",
+        lambda _db: runtime_root,
+    )
 
     admitted = admit_openclaw_workspace_binding(
         db=None,
@@ -226,7 +242,7 @@ def test_openclaw_project_binding_admission_matrix(tmp_path: Path):
         configured_provider="local_openclaw",
         openclaw_config_path=config,
     )
-    assert admitted.openclaw_agent_id == "matching"
+    assert admitted.openclaw_agent_id == "runtime-runner"
     assert admitted.matching_agent_count == 1
     assert admitted.workspace == str(workspace.resolve())
 
@@ -239,58 +255,22 @@ def test_openclaw_project_binding_admission_matrix(tmp_path: Path):
         configured_provider="local_openclaw",
         openclaw_config_path=config,
     )
-    assert alias_admitted.openclaw_agent_id == "matching"
+    assert alias_admitted.openclaw_agent_id == "runtime-runner"
 
-    wrong_workspace = tmp_path / "wrong"
-    wrong_workspace.mkdir()
-    for project_workspace, expected_count in (
-        (wrong_workspace, 0),
-        (tmp_path / "missing", 0),
-    ):
-        candidate = Project(
-            id=903,
-            name="invalid binding",
-            workspace_path=str(project_workspace),
-        )
-        with pytest.raises(WorkspaceAdmissionError) as exc_info:
-            admit_openclaw_workspace_binding(
-                db=None,
-                project=candidate,
-                configured_provider="local_openclaw",
-                openclaw_config_path=config,
-            )
-        assert exc_info.value.category == "openclaw_workspace_binding_unavailable"
-        assert exc_info.value.metadata["matching_agent_count"] == expected_count
-
-    missing_bound = tmp_path / "missing-bound"
-    missing_config = _openclaw_config(
-        tmp_path / "missing-bound.json", missing_bound, "missing-agent"
-    )
+    missing_workspace = tmp_path / "missing"
     with pytest.raises(WorkspaceAdmissionError) as exc_info:
         admit_openclaw_workspace_binding(
             db=None,
             project=Project(
                 id=904,
-                name="missing bound workspace",
-                workspace_path=str(missing_bound),
+                name="missing workspace",
+                workspace_path=str(missing_workspace),
             ),
             configured_provider="local_openclaw",
-            openclaw_config_path=missing_config,
+            openclaw_config_path=config,
         )
     assert exc_info.value.metadata["workspace_exists"] is False
-    assert exc_info.value.metadata["matching_agent_count"] == 1
-
-    ambiguous_config = _openclaw_config(
-        tmp_path / "ambiguous.json", workspace, "first", "second"
-    )
-    with pytest.raises(WorkspaceAdmissionError) as exc_info:
-        admit_openclaw_workspace_binding(
-            db=None,
-            project=project,
-            configured_provider="local_openclaw",
-            openclaw_config_path=ambiguous_config,
-        )
-    assert exc_info.value.metadata["matching_agent_count"] == 2
+    assert exc_info.value.metadata["matching_agent_count"] == 0
 
 
 def test_project_dispatch_binding_admission_skips_non_openclaw_backend(

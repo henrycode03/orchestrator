@@ -38,6 +38,9 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
     db_session.commit()
 
     config_path = tmp_path / "openclaw.json"
+    runtime_root = tmp_path / "runtime-root"
+    runner_workspace = runtime_root / "openclaw" / "runner"
+    runner_workspace.mkdir(parents=True)
     config_path.write_text(
         json.dumps(
             {
@@ -45,7 +48,7 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
                     "list": [
                         {
                             "id": "orchestrator",
-                            "workspace": str(canonical),
+                            "workspace": str(runner_workspace),
                         }
                     ]
                 }
@@ -54,6 +57,7 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "orchestrator")
 
     service = object.__new__(OpenClawSessionService)
     service.db = db_session
@@ -66,6 +70,8 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
     service.execution_cwd_override = None
     service._workspace_binding = None
     service._openclaw_config_path_override = None
+    service._runtime_runner_agent_id = None
+    service._runtime_executor_context = None
     service._log_entry = lambda *args, **kwargs: None
 
     observed: list[tuple[str, str, str, str]] = []

@@ -6,6 +6,7 @@ from app.services.agents.agent_backends import (
     list_supported_backends,
 )
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.orchestration.execution.runtime_context import RuntimeExecutorContext
 from app.models import Project, Session as SessionModel
 from app.config import settings
 from app.services.model_adaptation import resolve_adaptation_profile
@@ -104,9 +105,12 @@ def test_openclaw_cli_args_are_parsed_into_resolved_command(
     ]
 
 
-def test_openclaw_agent_command_selects_matching_workspace_agent(monkeypatch, tmp_path):
-    project_root = tmp_path / "vault" / "projects" / "orchestrator"
+def test_openclaw_agent_command_selects_explicit_runtime_runner(monkeypatch, tmp_path):
+    project_root = tmp_path / "projects" / "product"
+    runtime_root = tmp_path / "orchestrator-runtime"
+    runtime_workspace = runtime_root / "tasks" / "111" / "1"
     project_root.mkdir(parents=True)
+    runtime_workspace.mkdir(parents=True)
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(
         json.dumps(
@@ -119,7 +123,7 @@ def test_openclaw_agent_command_selects_matching_workspace_agent(monkeypatch, tm
                         },
                         {
                             "id": "orchestrator",
-                            "workspace": str(project_root),
+                            "workspace": str(runtime_workspace),
                         },
                     ]
                 }
@@ -128,11 +132,22 @@ def test_openclaw_agent_command_selects_matching_workspace_agent(monkeypatch, tm
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "orchestrator")
 
     service = object.__new__(OpenClawSessionService)
+    service._runtime_executor_context = RuntimeExecutorContext(
+        executor="openclaw",
+        runtime_workspace=runtime_workspace,
+        project_workspace=project_root,
+        project_id=111,
+        task_execution_id=1,
+        runtime_root=runtime_root,
+        sandbox=object(),
+    )
+    service._workspace_binding = type("Binding", (), {"agent_id": "orchestrator"})()
 
     assert service._build_openclaw_agent_command(
-        ["openclaw"], cwd=str(project_root)
+        ["openclaw"], cwd=str(runtime_workspace)
     ) == ["openclaw", "agent", "--agent", "orchestrator"]
 
 

@@ -325,7 +325,12 @@ def repair_step_commands_with_self_correction(
                     if runtime_context is not None and hasattr(
                         fallback_runtime, "bind_runtime_workspace"
                     ):
-                        fallback_runtime.bind_runtime_workspace(runtime_context)
+                        fallback_runtime.bind_runtime_workspace(
+                            runtime_context,
+                            runner_agent_id=getattr(
+                                runtime_service, "_runtime_runner_agent_id", None
+                            ),
+                        )
                     try:
                         repair_result = asyncio.run(
                             fallback_runtime.execute_task(

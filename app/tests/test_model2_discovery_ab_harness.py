@@ -44,7 +44,7 @@ def test_model2_ephemeral_identity_and_pl18_do_not_mutate_product_state(tmp_path
         harness.ARMS["B"], runtime_workspace
     )
     try:
-        assert identity["agent_id"] == "orchestrator"
+        assert identity["agent_id"] == "post33-model2-runtime-runner"
         assert identity["model"] == "ollama/qwen3-coder:30b"
         assert identity["tools"] == {"deny": ["*"]}
     finally:
