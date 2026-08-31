@@ -19,6 +19,7 @@ from app.services.orchestration.operations.file_ops_contract import (
     operation_has_file_op_path,
 )
 
+from ..path_authority import PathDeclarationError, declare
 from ..workspace_guard import TaskWorkspaceViolationError, normalize_path_reference
 
 READ_ONLY_WORKFLOW_STAGES = {
@@ -110,11 +111,21 @@ def _plan_invalid_file_ops_paths(
     for index, step in enumerate(plan, start=1):
         step_number = step.get("step_number", index)
         for operation in step.get("ops", []) or []:
+            raw_path = str(operation.get("path") or "")
             try:
-                normalize_path_reference(str(operation.get("path") or ""), project_dir)
+                normalize_path_reference(raw_path, project_dir)
             except TaskWorkspaceViolationError:
                 invalid_steps.append(int(step_number))
                 break
+            try:
+                declare(raw_path)
+            except PathDeclarationError as exc:
+                # Check the raw declaration so leading dots cannot be stripped
+                # into a different product path before protected-root safety
+                # is evaluated.
+                if exc.code == "path_protected_root":
+                    invalid_steps.append(int(step_number))
+                    break
     return sorted(set(invalid_steps))
 
 

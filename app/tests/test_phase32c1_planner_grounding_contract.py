@@ -173,7 +173,7 @@ def test_repair_without_progressing_evidence_is_not_improvement(tmp_path):
     assert "stale_replace" in arbitration["regression_labels"]
 
 
-def test_existing_file_write_requires_explicit_replace_authorization(tmp_path):
+def test_existing_file_write_uses_structured_operation_intent(tmp_path):
     (tmp_path / "existing.py").write_text(
         "def existing():\n    return 1\n", encoding="utf-8"
     )
@@ -181,7 +181,11 @@ def test_existing_file_write_requires_explicit_replace_authorization(tmp_path):
 
     outcome = _validate(plan, tmp_path)
 
-    assert not outcome.accepted, "existing-file write needs explicit authorization"
+    assert outcome.accepted
+    assert not any(
+        "existing_file_write_requires_explicit_replace_authorization" in reason
+        for reason in outcome.reasons
+    )
 
 
 def test_expected_files_must_be_materialized_before_validation(tmp_path):

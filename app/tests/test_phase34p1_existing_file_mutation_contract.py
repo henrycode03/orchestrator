@@ -1,12 +1,11 @@
 """PHASE34-P1 — existing-file mutation contract expressibility.
 
 GX1 produced a functionally correct plan that the validator rejected with
-``existing_file_write_requires_explicit_replace_authorization``.  The
-authorization is lexical: ``_existing_write_authorized`` looks for
-replace/rewrite/overwrite/rebuild/preserve near the path.  Planning and repair
-were never told that, so a correct edit could fail purely on the verb chosen
-for the step description.  These tests pin the guidance to the prompts that can
-act on it, and pin the validator semantics that are deliberately unchanged.
+``existing_file_write_requires_explicit_replace_authorization``. LWA1 moves
+whole-file intent to the structured ``write_file`` operation while retaining
+the existing prompt guidance and independent source/path authority checks.
+These tests pin the guidance to the prompts that can act on it and the bounded
+validator semantics.
 """
 
 from __future__ import annotations
@@ -134,7 +133,7 @@ def test_repair_prompt_omits_contract_for_unrelated_rejections(tmp_path):
     assert not any(line.startswith("2y.") for line in prompt.splitlines())
 
 
-# ---- validator semantics are deliberately unchanged -----------------------
+# ---- validator authority semantics remain bounded -------------------------
 
 
 def test_new_file_creation_still_validates(tmp_path):
@@ -152,7 +151,7 @@ def test_new_file_creation_still_validates(tmp_path):
     assert outcome.status == "accepted"
 
 
-def test_bare_write_to_existing_file_is_still_rejected(tmp_path):
+def test_structured_write_to_grounded_existing_file_is_accepted(tmp_path):
     project_dir = _project(tmp_path)
     outcome = _validate(
         project_dir,
@@ -162,8 +161,8 @@ def test_bare_write_to_existing_file_is_still_rejected(tmp_path):
             ["greeter.py"],
         ),
     )
-    assert outcome.status == "repair_required"
-    assert any(AUTHORIZATION_CODE in reason for reason in outcome.reasons)
+    assert outcome.status == "accepted"
+    assert not any(AUTHORIZATION_CODE in reason for reason in outcome.reasons)
 
 
 def test_explicit_whole_file_replacement_validates(tmp_path):

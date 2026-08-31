@@ -449,27 +449,18 @@ def _explicit_task_scope_paths(*values: Any) -> set[str]:
     return {path.replace("\\", "/").lstrip("./") for path in scope_paths}
 
 
-def _existing_write_authorized(
-    task_text: str, relative_path: str, operation_description: str = ""
-) -> bool:
-    authorization_words = (
-        r"\b(preserve|replace|rewrite|overwrite|rebuild|entire\s+file|full\s+file)\b"
+def _whole_file_replacement_intent(operation: Mapping[str, Any]) -> bool:
+    """Return the typed whole-file intent carried by a complete write op.
+
+    ``write_file`` is the Plan contract's complete-content materialization
+    operation. This answers intent only; source grounding and accepted-path
+    authority remain separate checks in ``_source_operation_contract_issues``
+    and ``build_accepted_path_authority``.
+    """
+
+    return str(operation.get("op") or "").strip() == "write_file" and isinstance(
+        operation.get("content"), str
     )
-    if re.search(authorization_words, str(operation_description or ""), re.IGNORECASE):
-        return True
-    lowered = "\n".join(
-        [str(task_text or ""), str(operation_description or "")]
-    ).lower()
-    target = relative_path.lower()
-    start = 0
-    while True:
-        index = lowered.find(target, start)
-        if index < 0:
-            return False
-        window = lowered[max(0, index - 180) : index + len(target) + 180]
-        if re.search(authorization_words, window):
-            return True
-        start = index + len(target)
 
 
 def _plan_creation_authorized_paths(
@@ -839,30 +830,12 @@ def _source_operation_contract_issues(
                         current_content[relative_path] = content
                         details["accepted_creation_paths"].append(relative_path)
                         continue
-                    if (
-                        (project_dir / relative_path).is_file()
-                        and isinstance(content, str)
-                        and _existing_write_authorized(
-                            task_text,
-                            relative_path,
-                            step.get("description", ""),
-                        )
-                    ):
-                        current_content[relative_path] = content
-                        details["accepted_existing_mutation_paths"].append(
-                            relative_path
-                        )
-                        continue
                     details["new_file_write_without_creation_authorization"].append(
                         label
                     )
                     continue
                 if record.status == SOURCE_STATUS_EXISTING:
-                    if not _existing_write_authorized(
-                        task_text,
-                        relative_path,
-                        step.get("description", ""),
-                    ):
+                    if not _whole_file_replacement_intent(operation):
                         details["existing_file_write_without_authorization"].append(
                             label
                         )

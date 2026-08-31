@@ -213,10 +213,9 @@ def build_accepted_path_authority(
         the record is source-grounded ``SOURCE_STATUS_EXISTING`` **and** the
         accepted Plan requests a mutating structured file operation on it.  The
         authorization decision itself is not re-implemented here: acceptance is
-        the decision.  ``_source_operation_contract_issues`` raises
-        ``existing_file_write_without_authorization`` (via
-        ``_existing_write_authorized``) for an unauthorized existing-file write,
-        and that finding is repairable, so a plan carrying it never reaches an
+        the decision.  ``_source_operation_contract_issues`` requires a complete
+        structured ``write_file`` operation for an existing-file whole-file
+        mutation; an ungrounded or otherwise unauthorized write never reaches an
         accepted status and never reaches this function.
 
     ``existing_readonly``
