@@ -519,7 +519,7 @@ def test_task_retry_reaches_dispatch_with_valid_openclaw_binding(
 def test_task_retry_new_session_isolates_historical_ordered_tasks(
     authenticated_client, db_session, monkeypatch
 ):
-    """Explicit isolated retry must not inherit unrelated project history."""
+    """Explicit retry must not inherit unrelated unplanned project history."""
     project = Project(name="Historical Queue Isolation Project")
     db_session.add(project)
     db_session.commit()
@@ -545,12 +545,6 @@ def test_task_retry_new_session_isolates_historical_ordered_tasks(
 
     _stub_retry_dispatch(monkeypatch)
 
-    workflow_response = authenticated_client.post(
-        f"/api/v1/tasks/{selected_task.id}/retry"
-    )
-    assert workflow_response.status_code == 409
-    assert "Earlier ordered tasks must finish" in workflow_response.json()["detail"]
-
     isolated_response = authenticated_client.post(
         f"/api/v1/tasks/{selected_task.id}/retry",
         json={"execution_scope": "new_session"},
@@ -561,6 +555,107 @@ def test_task_retry_new_session_isolates_historical_ordered_tasks(
     assert payload["execution_scope"] == "isolated_session"
     assert payload["isolated_session"] is True
     assert payload["task_id"] == selected_task.id
+
+
+def test_task_retry_explicit_target_ignores_failed_unplanned_predecessor(
+    authenticated_client, db_session, monkeypatch
+):
+    """An explicit retry does not turn legacy FIFO position into a dependency."""
+    project = Project(name="Explicit Retry Order Only Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    failed_predecessor = Task(
+        project_id=project.id,
+        title="Historical failed task",
+        description="Its failure is retained history, not a prerequisite.",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        title="Explicitly selected task",
+        description="Retry this exact task.",
+        status=TaskStatus.FAILED,
+        plan_position=2,
+    )
+    db_session.add_all([failed_predecessor, selected_task])
+    db_session.commit()
+    db_session.refresh(selected_task)
+
+    captured_kwargs = {}
+    _stub_retry_dispatch(monkeypatch, captured_kwargs)
+
+    response = authenticated_client.post(f"/api/v1/tasks/{selected_task.id}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["task_id"] == selected_task.id
+    assert captured_kwargs["task_id"] == selected_task.id
+    db_session.refresh(failed_predecessor)
+    db_session.refresh(selected_task)
+    assert failed_predecessor.status == TaskStatus.FAILED
+    assert selected_task.status == TaskStatus.PENDING
+    assert (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.task_id == failed_predecessor.id)
+        .count()
+        == 0
+    )
+    assert (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.task_id == selected_task.id)
+        .count()
+        == 1
+    )
+
+
+def test_task_retry_preserves_failed_predecessor_in_explicit_plan(
+    authenticated_client, db_session
+):
+    """An explicit Plan predecessor remains a fail-closed retry blocker."""
+    project = Project(name="Explicit Retry Dependency Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    plan = Plan(
+        project_id=project.id,
+        title="Dependency plan",
+        source_brain="local",
+        requirement="Preserve explicit predecessor completion.",
+        markdown="1. prerequisite\n2. dependent task",
+        status="committed",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    failed_predecessor = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Failed prerequisite",
+        description="Must complete first.",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Dependent task",
+        description="Retry only after the prerequisite completes.",
+        status=TaskStatus.FAILED,
+        plan_position=2,
+    )
+    db_session.add_all([failed_predecessor, selected_task])
+    db_session.commit()
+    db_session.refresh(selected_task)
+
+    response = authenticated_client.post(f"/api/v1/tasks/{selected_task.id}/retry")
+
+    assert response.status_code == 409
+    assert "Failed prerequisite" in response.json()["detail"]
+    assert db_session.query(TaskExecution).count() == 0
+    db_session.refresh(failed_predecessor)
+    assert failed_predecessor.status == TaskStatus.FAILED
 
 
 def test_task_retry_new_session_keeps_plan_scoped_ordering(
@@ -985,7 +1080,7 @@ def test_compatibility_execute_e2_shape_reaches_planning_boundary_without_duplic
     assert payload["task_execution_id"] == db_session.query(TaskExecution).one().id
 
 
-def test_compatibility_execute_keeps_ordinary_legacy_ordering(
+def test_compatibility_execute_allows_explicit_unplanned_target(
     authenticated_client, db_session, monkeypatch
 ):
     project = Project(name="Ordinary Compatibility Queue Project")
@@ -1036,10 +1131,12 @@ def test_compatibility_execute_keeps_ordinary_legacy_ordering(
         json={"session_id": ordinary_session.id},
     )
 
-    assert response.status_code == 409
-    assert "Earlier ordered tasks must finish" in response.json()["detail"]
-    assert db_session.query(SessionTask).count() == 0
-    assert db_session.query(TaskExecution).count() == 0
+    assert response.status_code == 202
+    assert response.json()["task_id"] == selected_task.id
+    assert db_session.get(Task, historical_pending.id).status == TaskStatus.PENDING
+    assert db_session.get(Task, historical_failed.id).status == TaskStatus.FAILED
+    assert db_session.query(SessionTask).count() == 1
+    assert db_session.query(TaskExecution).count() == 1
 
 
 def test_compatibility_execute_keeps_admitted_plan_predecessor_ordering(

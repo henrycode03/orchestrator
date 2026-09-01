@@ -571,7 +571,10 @@ def _queue_task_retry(
     blocking_tasks = TaskService(db).get_queue_blocking_tasks(
         task,
         session=selected_session,
-        isolated_retry=explicit_new_session,
+        # A public retry is already an explicit target. Reuse the existing
+        # isolated admission semantics for unplanned legacy queue history;
+        # plan-scoped predecessors remain blocking in the service predicate.
+        isolated_retry=True,
     )
     if blocking_tasks:
         blocking_summary = ", ".join(
