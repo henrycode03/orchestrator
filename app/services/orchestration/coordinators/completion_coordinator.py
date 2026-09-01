@@ -36,6 +36,9 @@ from app.services.orchestration.lifecycle.completion import TaskCompletionFinali
 from app.services.orchestration.phases.completion_summary import (
     _generate_task_summary_with_fallback,
 )
+from app.services.orchestration.phases.completion_deterministic_repair import (
+    attempt_deterministic_candidate_repair,
+)
 from app.services.orchestration.phases.completion_repair_capsule import (
     CompletionRepairProgress,
     classify_completion_repair_progress,
@@ -638,6 +641,72 @@ class CompletionCoordinator:
                 logger.warning(
                     "[SYMBOL_VERIFICATION] LogEntry write failed (non-fatal): %s", _exc
                 )
+
+        # DCR1: deterministic pre-escalation repair. Runs at most once per
+        # completion attempt, before any model is asked to synthesize a repair
+        # step, and only for allowlisted typed findings whose paths already sit
+        # inside the accepted mutation authority. It never decides completion —
+        # the normal candidate validation below is re-run over the result.
+        if completion_validation.repairable_findings and not (
+            (completion_validation.details or {}).get(
+                "candidate_authority_invariant_failed"
+            )
+        ):
+            deterministic_outcome = attempt_deterministic_candidate_repair(
+                completion_validation=completion_validation,
+                project_dir=Path(orchestration_state.project_dir),
+                accepted_path_authority=candidate_authority,
+            )
+            if deterministic_outcome.status != "skipped":
+                emit_live(
+                    "INFO" if deterministic_outcome.applied else "WARN",
+                    (
+                        "[ORCHESTRATION] Deterministic candidate repair "
+                        f"{deterministic_outcome.status}: "
+                        f"{deterministic_outcome.reason}"
+                    ),
+                    metadata={
+                        "phase": OrchestrationPhase.COMPLETION_REPAIR,
+                        "deterministic_repair": deterministic_outcome.to_dict(),
+                    },
+                )
+                append_orchestration_event(
+                    project_dir=control_state_of(orchestration_state),
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.REPAIR_GENERATED,
+                    details={
+                        "phase": OrchestrationPhase.COMPLETION_REPAIR,
+                        "deterministic_repair": True,
+                        **deterministic_outcome.to_dict(),
+                    },
+                )
+            if deterministic_outcome.applied:
+                completion_validation = ValidatorService.validate_task_completion(
+                    project_dir=orchestration_state.project_dir,
+                    plan=orchestration_state.plan,
+                    task_prompt=prompt,
+                    execution_profile=execution_profile,
+                    workspace_consistency=workspace_consistency,
+                    title=task.title if task else None,
+                    description=task.description if task else None,
+                    relaxed_mode=orchestration_state.relaxed_mode,
+                    completion_evidence=_gating_completion_evidence(rebuild=True),
+                    validation_severity=ctx.validation_severity,
+                    workflow_stage=ctx.workflow_stage,
+                    is_first_ordered_task=bool(task and task.plan_position == 1),
+                    accepted_path_authority=candidate_authority,
+                    accepted_path_authority_error=candidate_authority_error,
+                    require_accepted_path_authority=True,
+                )
+                record_validation_verdict(
+                    db,
+                    session_id,
+                    task_id,
+                    orchestration_state,
+                    completion_validation,
+                )
+                db.commit()
 
         if completion_validation.repairable_findings and not (
             (completion_validation.details or {}).get(
