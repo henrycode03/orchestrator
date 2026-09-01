@@ -412,6 +412,22 @@ def test_second_attempt_is_a_no_op_once_the_finding_is_cleared(tmp_path):
     assert second.reason == "no_deterministic_repairable_finding"
 
 
+def test_inaccessible_retained_changeset_is_treated_as_unavailable():
+    class InaccessiblePath:
+        def is_dir(self):
+            raise PermissionError("fixture parent is not traversable")
+
+    class UnreadableDirectoryPath:
+        def is_dir(self):
+            return True
+
+        def iterdir(self):
+            raise PermissionError("fixture entries are not readable")
+
+    assert _retained_changeset_sources(InaccessiblePath()) is None
+    assert _retained_changeset_sources(UnreadableDirectoryPath()) is None
+
+
 # --- exact Task 230 shape ---------------------------------------------------
 
 
@@ -420,13 +436,26 @@ TASK230_CHANGE_SET = Path(
 )
 
 
+def _retained_changeset_sources(path: Path) -> tuple[Path, ...] | None:
+    try:
+        if not path.is_dir():
+            return None
+        return tuple(path.iterdir())
+    except OSError:
+        return None
+
+
+TASK230_SOURCES = _retained_changeset_sources(TASK230_CHANGE_SET)
+
+
 @pytest.mark.skipif(
-    not TASK230_CHANGE_SET.is_dir(), reason="retained Task 230 change set unavailable"
+    TASK230_SOURCES is None, reason="retained Task 230 change set unavailable"
 )
 def test_task230_retained_changeset_closes_without_llm_repair(tmp_path):
     import shutil
 
-    for source in TASK230_CHANGE_SET.iterdir():
+    assert TASK230_SOURCES is not None
+    for source in TASK230_SOURCES:
         shutil.copy2(source, tmp_path / source.name)
     paths = ["README.md", "temp_convert.py", "test_temp_convert.py"]
     authority = _authority(tmp_path, paths)
