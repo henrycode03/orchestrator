@@ -75,6 +75,10 @@ from app.services.orchestration.planning.source_operation_verification import (
 from app.services.orchestration.planning.repair_evidence import (
     record_pending_planning_repair_triplet,
 )
+from app.services.observability.planning_provider_evidence import (
+    begin_planning_provider_evidence_from_runtime,
+    inspect_chat_completion_response,
+)
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
 )
@@ -501,6 +505,25 @@ class PlannerService:
             "provider_invocation_started": False,
             "provider_response_received": False,
         }
+        evidence = None
+        try:
+            evidence = begin_planning_provider_evidence_from_runtime(
+                runtime_service,
+                prompt=planning_prompt,
+                model=model,
+                provider_endpoint_class=f"{base_url}/chat/completions",
+                effective_timeout_seconds=direct_timeout,
+                transport_timeout_seconds=direct_timeout,
+                invocation_kind="direct_chat_completions",
+                provider_api_streaming=False,
+                partial_response_available_in_current_nonstreaming_path=False,
+            )
+            provider_prompt_diagnostics.update(evidence.metadata)
+        except Exception as exc:
+            _logger.warning(
+                "[PLANNING_DIRECT] bounded provider evidence could not start: %s",
+                exc,
+            )
 
         started_at = _time.monotonic()
         _logger.info(
@@ -512,6 +535,12 @@ class PlannerService:
             direct_timeout,
         )
 
+        response_state: Dict[str, Any] = {
+            "received": False,
+            "observed": {},
+            "provider_request_correlation_id": None,
+        }
+
         async def _do_request() -> Optional[str]:
             async with httpx.AsyncClient(timeout=direct_timeout) as client:
                 resp = await client.post(
@@ -519,8 +548,15 @@ class PlannerService:
                     json=payload,
                     headers=headers,
                 )
+            response_state["received"] = True
+            response_headers = getattr(resp, "headers", {}) or {}
+            response_state["provider_request_correlation_id"] = response_headers.get(
+                "x-request-id"
+            ) or response_headers.get("request-id")
             resp.raise_for_status()
-            return PlannerService._extract_chat_completion_content(resp.json())
+            body = resp.json()
+            response_state["observed"] = inspect_chat_completion_response(body)
+            return PlannerService._extract_chat_completion_content(body)
 
         try:
             provider_prompt_diagnostics["provider_invocation_started"] = True
@@ -528,6 +564,14 @@ class PlannerService:
                 _do_request(), timeout=float(direct_timeout)
             )
         except asyncio.TimeoutError:
+            if evidence is not None:
+                provider_prompt_diagnostics.update(
+                    evidence.fail(
+                        asyncio.TimeoutError(),
+                        response_received=bool(response_state["received"]),
+                        partial_response_available=False,
+                    )
+                )
             _logger.warning(
                 "[PLANNING_DIRECT] wall-clock timeout after %ds; falling back to runtime",
                 direct_timeout,
@@ -537,6 +581,23 @@ class PlannerService:
                 "runtime_diagnostics": dict(provider_prompt_diagnostics),
             }
         except Exception as exc:
+            if evidence is not None:
+                observed = response_state.get("observed") or {}
+                provider_prompt_diagnostics.update(
+                    evidence.fail(
+                        exc,
+                        response_received=bool(response_state["received"]),
+                        visible_content=observed.get("visible_content"),
+                        reasoning_content=observed.get("reasoning_content"),
+                        usage=observed.get("usage"),
+                        finish_reason=observed.get("finish_reason"),
+                        provider_request_correlation_id=(
+                            response_state.get("provider_request_correlation_id")
+                            or observed.get("provider_request_correlation_id")
+                        ),
+                        partial_response_available=False,
+                    )
+                )
             _logger.warning(
                 "[PLANNING_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",
                 _time.monotonic() - started_at,
@@ -548,7 +609,24 @@ class PlannerService:
                 "runtime_diagnostics": dict(provider_prompt_diagnostics),
             }
         provider_prompt_diagnostics["provider_response_received"] = True
+        observed = response_state.get("observed") or {}
         if not output.strip():
+            if evidence is not None:
+                provider_prompt_diagnostics.update(
+                    evidence.fail(
+                        ValueError("provider response content is empty"),
+                        response_received=True,
+                        visible_content=observed.get("visible_content"),
+                        reasoning_content=observed.get("reasoning_content"),
+                        usage=observed.get("usage"),
+                        finish_reason=observed.get("finish_reason"),
+                        provider_request_correlation_id=(
+                            response_state.get("provider_request_correlation_id")
+                            or observed.get("provider_request_correlation_id")
+                        ),
+                        partial_response_available=False,
+                    )
+                )
             _logger.warning(
                 "[PLANNING_DIRECT] empty output after %.1fs; falling back to runtime",
                 _time.monotonic() - started_at,
@@ -557,6 +635,20 @@ class PlannerService:
                 "planning_direct": False,
                 "runtime_diagnostics": dict(provider_prompt_diagnostics),
             }
+        if evidence is not None:
+            provider_prompt_diagnostics.update(
+                evidence.complete(
+                    visible_content=observed.get("visible_content") or output,
+                    reasoning_content=observed.get("reasoning_content"),
+                    usage=observed.get("usage"),
+                    finish_reason=observed.get("finish_reason"),
+                    provider_request_correlation_id=(
+                        response_state.get("provider_request_correlation_id")
+                        or observed.get("provider_request_correlation_id")
+                    ),
+                    partial_response_available=False,
+                )
+            )
         duration_seconds = _time.monotonic() - started_at
         _logger.info(
             "[PLANNING_DIRECT] success planning_direct=True backend=direct_chat_completions"

@@ -94,6 +94,9 @@ from app.services.observability import (
     start_langfuse_observation,
     update_langfuse_observation,
 )
+from app.services.observability.planning_provider_evidence import (
+    begin_planning_provider_evidence_from_runtime,
+)
 from app.services.permissions.approval import PermissionApprovalService
 from app.services.orchestration.prompt_optimization import (
     optimize_prompt,
@@ -382,6 +385,7 @@ class OpenClawSessionService:
         self._task_session_id: Optional[str] = None
         self._last_selected_openclaw_agent_id: Optional[str] = None
         self._strict_provider_controls: Optional[Dict[str, Any]] = None
+        self._active_planning_provider_evidence = None
         self.process: Optional[subprocess.Popen] = None
         backend_name = (
             runtime_configuration.backend_name
@@ -1703,6 +1707,45 @@ class OpenClawSessionService:
         subprocess_env, git_guard_shim_dir = build_git_containment_env()
         subprocess_env = self._apply_workspace_binding_env(subprocess_env)
 
+        self._active_planning_provider_evidence = None
+        if invocation_kind.startswith("planning"):
+            try:
+                backend_metadata = self.get_backend_metadata()
+                backend = str(backend_metadata.get("backend") or "").strip()
+                model = str(backend_metadata.get("model_family") or "").strip() or None
+                endpoint = None
+                if backend == "openai_chat_completions":
+                    endpoint = str(
+                        getattr(settings, "PLANNING_DIRECT_BASE_URL", "") or ""
+                    ).rstrip("/")
+                    if endpoint:
+                        endpoint = f"{endpoint}/chat/completions"
+                elif backend == "direct_ollama":
+                    endpoint = str(
+                        getattr(settings, "OLLAMA_BASE_URL", "") or ""
+                    ).rstrip("/")
+                self._active_planning_provider_evidence = (
+                    begin_planning_provider_evidence_from_runtime(
+                        self,
+                        prompt=prompt,
+                        model=model,
+                        provider_endpoint_class=endpoint or f"openclaw_cli:{backend}",
+                        effective_timeout_seconds=timeout_seconds,
+                        transport_timeout_seconds=(
+                            timeout_seconds
+                            if strict_provider_result
+                            else timeout_seconds + 30
+                        ),
+                        invocation_kind=invocation_kind,
+                        provider_api_streaming=None,
+                        partial_response_available_in_current_nonstreaming_path=None,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[OPENCLAW] bounded planning provider evidence could not start: %s",
+                    exc,
+                )
         diagnostics: Dict[str, Any] = {
             "timeout_seconds": timeout_seconds,
             "timeout_with_cleanup_seconds": (
@@ -1764,6 +1807,10 @@ class OpenClawSessionService:
         except BaseException as exc:
             diagnostics["provider_invocation_started"] = False
             diagnostics["provider_response_received"] = False
+            evidence = self._finish_active_planning_provider_evidence(
+                exception=exc, diagnostics=diagnostics
+            )
+            diagnostics.update(evidence)
             exc.runtime_diagnostics = diagnostics
             cleanup_git_containment_shim(git_guard_shim_dir)
             raise
@@ -2091,6 +2138,76 @@ class OpenClawSessionService:
                 stderr=stderr_text,
             ),
             diagnostics,
+        )
+
+    def _finish_active_planning_provider_evidence(
+        self,
+        *,
+        exception: BaseException | None = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        recorder = getattr(self, "_active_planning_provider_evidence", None)
+        self._active_planning_provider_evidence = None
+        if recorder is None:
+            return {}
+        diagnostics = diagnostics or {}
+        if exception is not None:
+            return recorder.fail(
+                exception,
+                response_received=bool(diagnostics.get("provider_response_received")),
+                partial_content_snapshot=(
+                    diagnostics.get("stdout_tail") or diagnostics.get("stderr_tail")
+                ),
+                partial_response_available=bool(
+                    diagnostics.get("partial_response_seen")
+                ),
+            )
+        result = result or {}
+        result_diagnostics = result.get("runtime_diagnostics") or {}
+        if not isinstance(result_diagnostics, dict):
+            result_diagnostics = {}
+        output = result.get("output")
+        response_received = bool(
+            result.get("status") == "completed"
+            or diagnostics.get("provider_response_received")
+        )
+        if result.get("status") == "failed":
+            failure = OpenClawSessionError(
+                str(result.get("error") or "OpenClaw provider returned a failed result")
+            )
+            return recorder.fail(
+                failure,
+                response_received=response_received,
+                visible_content=output,
+                reasoning_content=result.get("reasoning")
+                or result_diagnostics.get("reasoning_content"),
+                usage=result.get("usage") or result_diagnostics.get("usage"),
+                finish_reason=result.get("finish_reason")
+                or result_diagnostics.get("finish_reason"),
+                provider_request_correlation_id=(
+                    result.get("provider_request_correlation_id")
+                    or result_diagnostics.get("provider_request_correlation_id")
+                ),
+                partial_response_available=bool(
+                    diagnostics.get("partial_response_seen")
+                ),
+            )
+        return recorder.complete(
+            visible_content=output,
+            reasoning_content=result.get("reasoning")
+            or result_diagnostics.get("reasoning_content"),
+            usage=result.get("usage") or result_diagnostics.get("usage"),
+            finish_reason=result.get("finish_reason")
+            or result_diagnostics.get("finish_reason"),
+            provider_request_correlation_id=(
+                result.get("provider_request_correlation_id")
+                or result_diagnostics.get("provider_request_correlation_id")
+            ),
+            partial_content_snapshot=(
+                diagnostics.get("stdout_tail") or diagnostics.get("stderr_tail")
+            ),
+            partial_response_available=bool(diagnostics.get("partial_response_seen")),
         )
 
     def parse_cli_response(
@@ -3509,21 +3626,38 @@ class OpenClawSessionService:
                 if isolated_temp_dir is not None:
                     isolated_temp_dir.cleanup()
         except subprocess.TimeoutExpired as exc:
+            diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
+            evidence = self._finish_active_planning_provider_evidence(
+                exception=exc, diagnostics=diagnostics
+            )
             error = OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
             )
             error.provider_failure_classification = "provider_timeout"
+            error.runtime_diagnostics = {**diagnostics, **evidence}
             raise error from exc
         except asyncio.TimeoutError as exc:
+            diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
+            evidence = self._finish_active_planning_provider_evidence(
+                exception=exc, diagnostics=diagnostics
+            )
             error = OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
             )
             error.provider_failure_classification = "provider_timeout"
-            error.runtime_diagnostics = getattr(exc, "runtime_diagnostics", None)
+            error.runtime_diagnostics = {**diagnostics, **evidence}
             raise error from exc
-        except OpenClawNoOutputTimeoutError:
+        except OpenClawNoOutputTimeoutError as exc:
+            diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
+            evidence = self._finish_active_planning_provider_evidence(
+                exception=exc, diagnostics=diagnostics
+            )
+            exc.runtime_diagnostics = {**diagnostics, **evidence}
             raise
         except asyncio.CancelledError:
+            self._finish_active_planning_provider_evidence(
+                exception=asyncio.CancelledError()
+            )
             raise
         finally:
             if planning_temp_dir is not None:
@@ -3532,15 +3666,28 @@ class OpenClawSessionService:
                 self.execution_cwd_override = previous_cwd_override
                 planning_temp_dir.cleanup()
         runtime_session_id = full_cmd[full_cmd.index("--session-id") + 1]
-        result = self.parse_cli_response(
-            proc,
-            expected_session_id=(
-                runtime_session_id if session_prefix.startswith("planning") else None
-            ),
-            strict_provider_result=strict_provider_result,
+        try:
+            result = self.parse_cli_response(
+                proc,
+                expected_session_id=(
+                    runtime_session_id
+                    if session_prefix.startswith("planning")
+                    else None
+                ),
+                strict_provider_result=strict_provider_result,
+            )
+        except Exception as exc:
+            evidence = self._finish_active_planning_provider_evidence(
+                exception=exc, diagnostics=diagnostics
+            )
+            diagnostics.update(evidence)
+            raise
+        evidence = self._finish_active_planning_provider_evidence(
+            diagnostics=diagnostics, result=result
         )
         result["runtime_diagnostics"] = {
             **diagnostics,
+            **evidence,
             **dict(result.pop("provider_result_diagnostics", {}) or {}),
         }
         return result

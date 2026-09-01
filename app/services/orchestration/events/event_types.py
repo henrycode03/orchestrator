@@ -46,6 +46,9 @@ class EventType:
     REASONING_ARTIFACT_GENERATED = "reasoning_artifact_generated"
     LANE_ESCALATION_TRIGGERED = "lane_escalation_triggered"
     LANE_ESCALATION_RESULT = "lane_escalation_result"
+    PLANNING_PROVIDER_STARTED = "planning_provider_started"
+    PLANNING_PROVIDER_COMPLETED = "planning_provider_completed"
+    PLANNING_PROVIDER_FAILED = "planning_provider_failed"
 
     # Low-resource execution
     CONTEXT_COMPACTED = "context_compacted"
