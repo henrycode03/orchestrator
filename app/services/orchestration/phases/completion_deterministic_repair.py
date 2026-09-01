@@ -21,6 +21,7 @@ from typing import Any, Optional, Sequence
 from app.services.orchestration.validation.candidate_checks import (
     _candidate_python,
     _run_command,
+    discover_candidate_static_policy,
 )
 from app.services.orchestration.validation.path_authority import (
     PathDeclarationError,
@@ -180,6 +181,11 @@ def attempt_deterministic_candidate_repair(
     if not paths:
         return DeterministicRepairOutcome(
             status="skipped", reason=ineligible_reason, rule_ids=rule_ids
+        )
+
+    if not discover_candidate_static_policy(project_dir).black_admitted:
+        return DeterministicRepairOutcome(
+            status="skipped", reason="black_gate_not_admitted", rule_ids=rule_ids
         )
 
     command = shlex.join([_candidate_python(project_dir), "-m", "black", "--", *paths])

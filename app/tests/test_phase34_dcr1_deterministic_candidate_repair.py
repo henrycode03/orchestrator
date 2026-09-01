@@ -34,7 +34,15 @@ FORMATTED = "def f(x):\n    return x * 2\n\n\ndef g(y):\n    return y + 1\n"
 PLAN = [{"step_number": 1, "verification": "python -m pytest"}]
 
 
-def _authority(project_dir, paths):
+def _authority(project_dir, paths, *, black_config=True, flake8_config=True):
+    if black_config:
+        (project_dir / "pyproject.toml").write_text(
+            "[tool.black]\nline-length = 88\n", encoding="utf-8"
+        )
+    if flake8_config:
+        (project_dir / ".flake8").write_text(
+            "[flake8]\nmax-line-length = 88\n", encoding="utf-8"
+        )
     return executor_test_authority(
         project_dir,
         [{"op": "write_file", "path": path} for path in paths],
@@ -61,7 +69,15 @@ def _verdict(findings):
     )
 
 
-def _candidate_run(project_dir, paths):
+def _candidate_run(project_dir, paths, *, black_config=True, flake8_config=True):
+    if black_config:
+        (project_dir / "pyproject.toml").write_text(
+            "[tool.black]\nline-length = 88\n", encoding="utf-8"
+        )
+    if flake8_config:
+        (project_dir / ".flake8").write_text(
+            "[flake8]\nmax-line-length = 88\n", encoding="utf-8"
+        )
     change_set = {
         "added_files": list(paths),
         "modified_files": [],
@@ -440,7 +456,7 @@ def _retained_changeset_sources(path: Path) -> tuple[Path, ...] | None:
     try:
         if not path.is_dir():
             return None
-        return tuple(path.iterdir())
+        return tuple(entry for entry in path.iterdir() if entry.is_file())
     except OSError:
         return None
 
@@ -451,31 +467,36 @@ TASK230_SOURCES = _retained_changeset_sources(TASK230_CHANGE_SET)
 @pytest.mark.skipif(
     TASK230_SOURCES is None, reason="retained Task 230 change set unavailable"
 )
-def test_task230_retained_changeset_closes_without_llm_repair(tmp_path):
+def test_task230_retained_changeset_closes_without_style_or_llm_repair(tmp_path):
     import shutil
 
     assert TASK230_SOURCES is not None
     for source in TASK230_SOURCES:
         shutil.copy2(source, tmp_path / source.name)
     paths = ["README.md", "temp_convert.py", "test_temp_convert.py"]
-    authority = _authority(tmp_path, paths)
+    authority = _authority(tmp_path, paths, black_config=False, flake8_config=False)
 
-    before = _verdict(_candidate_run(tmp_path, paths).findings)
-    assert {f.rule_id for f in before.repairable_findings} == {
-        "candidate_black_failed",
-        "candidate_flake8_failed",
-    }
+    before = _verdict(
+        _candidate_run(
+            tmp_path, paths, black_config=False, flake8_config=False
+        ).findings
+    )
+    assert before.status == "accepted"
+    assert before.repairable_findings == []
 
     outcome = attempt_deterministic_candidate_repair(
         completion_validation=before,
         project_dir=tmp_path,
         accepted_path_authority=authority,
     )
-    assert outcome.status == "applied"
-    # README.md is not a Python path and is never handed to the formatter.
-    assert outcome.paths == ("temp_convert.py", "test_temp_convert.py")
+    assert outcome.status == "skipped"
+    assert outcome.reason == "no_deterministic_repairable_finding"
 
-    after = _verdict(_candidate_run(tmp_path, paths).findings)
+    after = _verdict(
+        _candidate_run(
+            tmp_path, paths, black_config=False, flake8_config=False
+        ).findings
+    )
     assert after.repairable_findings == []
     assert after.status == "accepted"
     assert (

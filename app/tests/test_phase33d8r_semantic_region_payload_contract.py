@@ -146,6 +146,12 @@ def test_exact_snippet_selector_replaces_only_exact_region_and_preserves_surroun
     assert "# A surrounding comment" in actual
     assert actual.endswith("\n")
 
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.black]\nline-length = 88\n", encoding="utf-8"
+    )
+    (tmp_path / ".flake8").write_text(
+        "[flake8]\nmax-line-length = 88\n", encoding="utf-8"
+    )
     candidate = validate_candidate_delta(
         project_dir=tmp_path,
         change_set={

@@ -214,6 +214,12 @@ def test_static_checks_are_candidate_file_scoped(tmp_path: Path) -> None:
     candidate = tmp_path / "app" / "bad_style.py"
     untouched = tmp_path / "legacy.py"
     candidate.parent.mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.black]\nline-length = 88\n", encoding="utf-8"
+    )
+    (tmp_path / ".flake8").write_text(
+        "[flake8]\nmax-line-length = 88\n", encoding="utf-8"
+    )
     candidate.write_text("def answer( ):\n return 42\n", encoding="utf-8")
     untouched.write_text("def baseline( ):\n return 1\n", encoding="utf-8")
 

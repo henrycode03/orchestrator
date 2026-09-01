@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import configparser
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
 import shlex
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -30,10 +32,83 @@ class CandidateVerificationSelection:
 
 
 @dataclass(frozen=True)
+class CandidateStaticPolicy:
+    """Project-owned admission for optional candidate style tools."""
+
+    black_admitted: bool = False
+    black_source: str | None = None
+    flake8_admitted: bool = False
+    flake8_source: str | None = None
+
+    def to_dict(self) -> dict[str, dict[str, Any]]:
+        return {
+            "black": {
+                "admitted": self.black_admitted,
+                "source": self.black_source,
+            },
+            "flake8": {
+                "admitted": self.flake8_admitted,
+                "source": self.flake8_source,
+            },
+        }
+
+
+@dataclass(frozen=True)
 class CandidateCheckRun:
     selection: CandidateVerificationSelection
     findings: tuple[CandidateFinding, ...]
     commands_run: tuple[str, ...]
+    static_policy: CandidateStaticPolicy = field(default_factory=CandidateStaticPolicy)
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _has_config_section(path: Path, section: str) -> bool:
+    try:
+        parser = configparser.ConfigParser(interpolation=None)
+        with path.open(encoding="utf-8") as config_file:
+            parser.read_file(config_file)
+        return parser.has_section(section)
+    except (configparser.Error, OSError, UnicodeError):
+        return False
+
+
+def discover_candidate_static_policy(project_dir: Path) -> CandidateStaticPolicy:
+    """Admit optional style gates only from root project-owned configuration."""
+
+    black_source: str | None = None
+    pyproject = project_dir / "pyproject.toml"
+    if _is_file(pyproject):
+        try:
+            document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            document = {}
+        tool = document.get("tool")
+        if isinstance(tool, Mapping) and isinstance(tool.get("black"), Mapping):
+            black_source = "pyproject.toml:[tool.black]"
+
+    flake8_source: str | None = None
+    flake8_file = project_dir / ".flake8"
+    if _is_file(flake8_file):
+        flake8_source = ".flake8"
+    else:
+        for name in ("setup.cfg", "tox.ini"):
+            config_path = project_dir / name
+            if _is_file(config_path) and _has_config_section(config_path, "flake8"):
+                flake8_source = f"{name}:[flake8]"
+                break
+
+    return CandidateStaticPolicy(
+        black_admitted=black_source is not None,
+        black_source=black_source,
+        flake8_admitted=flake8_source is not None,
+        flake8_source=flake8_source,
+    )
 
 
 def candidate_delta_identity(
@@ -276,6 +351,7 @@ def validate_candidate_delta(
         observed_scope=observed_scope,
         verification_scope=verification_scope,
     )
+    static_policy = discover_candidate_static_policy(project_dir)
     findings: list[CandidateFinding] = []
     commands_run: list[str] = []
     if selection.command:
@@ -334,23 +410,29 @@ def validate_candidate_delta(
         if python_paths:
             quoted_python = shlex.quote(_candidate_python(project_dir))
             quoted_paths = " ".join(shlex.quote(path) for path in python_paths)
-            static_commands = (
+            static_commands = [
                 (
                     "compileall",
                     "candidate_python_compile_failed",
                     f"{quoted_python} -m compileall -q {quoted_paths}",
-                ),
-                (
-                    "black",
-                    "candidate_black_failed",
-                    f"{quoted_python} -m black --check {quoted_paths}",
-                ),
-                (
-                    "flake8",
-                    "candidate_flake8_failed",
-                    f"{quoted_python} -m flake8 {quoted_paths}",
-                ),
-            )
+                )
+            ]
+            if static_policy.black_admitted:
+                static_commands.append(
+                    (
+                        "black",
+                        "candidate_black_failed",
+                        f"{quoted_python} -m black --check {quoted_paths}",
+                    )
+                )
+            if static_policy.flake8_admitted:
+                static_commands.append(
+                    (
+                        "flake8",
+                        "candidate_flake8_failed",
+                        f"{quoted_python} -m flake8 {quoted_paths}",
+                    )
+                )
             for source, rule_id, command in static_commands:
                 commands_run.append(command)
                 returncode, output = _run_command(
@@ -430,4 +512,5 @@ def validate_candidate_delta(
         selection=selection,
         findings=tuple(findings),
         commands_run=tuple(commands_run),
+        static_policy=static_policy,
     )

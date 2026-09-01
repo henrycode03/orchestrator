@@ -85,6 +85,9 @@ def _write_q6v_candidate(project_dir: Path) -> None:
         "[pytest]\ntestpaths = app/tests\npythonpath = .\n",
         encoding="utf-8",
     )
+    (project_dir / "pyproject.toml").write_text(
+        "[tool.black]\nline-length = 88\n", encoding="utf-8"
+    )
     (project_dir / ".flake8").write_bytes((_REPO_ROOT / ".flake8").read_bytes())
     test_path.write_text(
         "import pytest\n"

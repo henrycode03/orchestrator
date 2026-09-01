@@ -318,6 +318,12 @@ def test_path_scope_rejects_wrong_readonly_traversal_and_case_aliases(
 def test_valid_bounded_repair_revalidates_to_candidate_success(tmp_path: Path) -> None:
     candidate = tmp_path / "app/formatting.py"
     candidate.parent.mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.black]\nline-length = 88\n", encoding="utf-8"
+    )
+    (tmp_path / ".flake8").write_text(
+        "[flake8]\nmax-line-length = 88\n", encoding="utf-8"
+    )
     candidate.write_text("def answer( ):\n return 42\n", encoding="utf-8")
     change_set = {
         "added_files": [],

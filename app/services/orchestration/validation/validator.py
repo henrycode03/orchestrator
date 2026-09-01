@@ -3653,6 +3653,9 @@ class ValidatorService:
                 "fallback": candidate_checks.selection.fallback,
             }
             details["candidate_commands"] = list(candidate_checks.commands_run)
+            details["candidate_static_policy"] = (
+                candidate_checks.static_policy.to_dict()
+            )
             details["test_findings"] = [
                 finding.to_dict()
                 for finding in candidate_checks.findings
