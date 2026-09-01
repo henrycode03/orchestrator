@@ -105,14 +105,119 @@ cleanup_pid_file() {
 ensure_venv() {
     echo -e "${BLUE}🔧 Checking virtual environment...${NC}"
     cd "${PROJECT_ROOT}"
-    if [ ! -d "${VENV_DIR}" ]; then
+    if [ ! -x "${VENV_DIR}/bin/python3" ]; then
         python3 -m venv "${VENV_DIR}"
-        "${VENV_DIR}/bin/pip" install -r requirements.txt
+        "${VENV_DIR}/bin/python" -m pip install -r requirements.txt
         echo -e "${GREEN}✅ Virtual environment created${NC}"
     else
+        repair_relocated_venv
         echo -e "${GREEN}✅ Virtual environment exists${NC}"
     fi
     echo ""
+}
+
+repair_relocated_venv() {
+    [ -x "${VENV_DIR}/bin/python3" ] || return 0
+
+    # Python virtualenv console scripts embed the environment's absolute path
+    # in their shebang. Rewrite only Python entry points under this venv when
+    # that path no longer matches the relocated environment.
+    "${VENV_DIR}/bin/python3" - "${VENV_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+
+venv_dir = Path(sys.argv[1]).resolve()
+bin_dir = venv_dir / "bin"
+expected = {
+    str(bin_dir / "python"),
+    str(bin_dir / "python3"),
+}
+
+for script in bin_dir.iterdir():
+    if not script.is_file() or script.is_symlink():
+        continue
+
+    payload = script.read_bytes()
+    first_line, separator, remainder = payload.partition(b"\n")
+    if not separator or not first_line.startswith(b"#!"):
+        continue
+
+    interpreter = first_line[2:].decode("utf-8", errors="replace").strip()
+    interpreter = interpreter.split(maxsplit=1)[0]
+    interpreter_name = Path(interpreter).name
+    if interpreter in expected or interpreter_name not in {"python", "python3"}:
+        continue
+    if not interpreter.startswith("/") or not interpreter.endswith(
+        ("/bin/python", "/bin/python3")
+    ):
+        continue
+    if Path(interpreter).parent.parent.name != venv_dir.name:
+        continue
+
+    replacement = f"#!{bin_dir / interpreter_name}".encode("utf-8")
+    script.write_bytes(replacement + b"\n" + remainder)
+
+
+activation_files = {
+    "activate": bin_dir / "activate",
+    "activate.csh": bin_dir / "activate.csh",
+    "activate.fish": bin_dir / "activate.fish",
+}
+for name, script in activation_files.items():
+    if not script.is_file() or script.is_symlink():
+        continue
+
+    lines = script.read_text(encoding="utf-8").splitlines(keepends=True)
+    changed = False
+    rewritten = []
+    for raw_line in lines:
+        newline = "\n" if raw_line.endswith("\n") else ""
+        line = raw_line[:-1] if newline else raw_line
+        stripped = line.lstrip()
+        indentation = line[:len(line) - len(stripped)]
+        if name == "activate" and stripped.startswith("export VIRTUAL_ENV/"):
+            replacement = f"{indentation}export VIRTUAL_ENV={venv_dir}"
+            if replacement != line:
+                line = replacement
+                changed = True
+        elif name == "activate" and stripped.startswith("export VIRTUAL_ENV="):
+            prefix, value = line.split("=", 1)
+            if value.startswith("$(cygpath ") and value.endswith(")"):
+                replacement = f"{prefix}=$(cygpath {venv_dir})"
+                if replacement != line:
+                    line = replacement
+                    changed = True
+            elif value.startswith("/"):
+                replacement = f"{prefix}={venv_dir}"
+                if replacement != line:
+                    line = replacement
+                    changed = True
+        elif name == "activate.csh" and line.lstrip().startswith(
+            "setenv VIRTUAL_ENV "
+        ):
+            replacement = (
+                f"{line[:len(line) - len(line.lstrip())]}"
+                f"setenv VIRTUAL_ENV {venv_dir}"
+            )
+            if replacement != line:
+                line = replacement
+                changed = True
+        elif name == "activate.fish" and line.lstrip().startswith(
+            "set -gx VIRTUAL_ENV "
+        ):
+            replacement = (
+                f"{line[:len(line) - len(line.lstrip())]}"
+                f"set -gx VIRTUAL_ENV {venv_dir}"
+            )
+            if replacement != line:
+                line = replacement
+                changed = True
+        rewritten.append(line + newline)
+
+    if changed:
+        script.write_text("".join(rewritten), encoding="utf-8")
+PY
 }
 
 ensure_frontend_deps() {
@@ -693,5 +798,7 @@ main() {
     echo ""
 }
 
-# Run main function
-main
+# Run main function unless this file is sourced by a test or helper.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main
+fi
