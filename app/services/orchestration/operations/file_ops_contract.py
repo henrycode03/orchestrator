@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Mapping, Set
@@ -195,6 +196,111 @@ def replace_mode_transitions(
             }
         )
     return tuple(transitions)
+
+
+@dataclass(frozen=True)
+class ReplaceModePreservation:
+    """Outcome of restoring already-valid replace operations after a repair."""
+
+    plan: Any
+    preserved: tuple[dict[str, Any], ...]
+    unpreserved: tuple[dict[str, Any], ...]
+
+
+def _replace_operations_by_identity(
+    plan: Any,
+) -> dict[tuple[int, int], tuple[int, int, Any]]:
+    """Index plan operations by the stable (step_number, operation_index) key."""
+
+    result: dict[tuple[int, int], tuple[int, int, Any]] = {}
+    if not isinstance(plan, list):
+        return result
+    for step_index, step in enumerate(plan, start=1):
+        if not isinstance(step, Mapping):
+            continue
+        step_number = step.get("step_number", step_index)
+        if isinstance(step_number, bool) or not isinstance(step_number, int):
+            continue
+        for operation_index, operation in enumerate(step.get("ops") or [], start=1):
+            result[(step_number, operation_index)] = (
+                step_index - 1,
+                operation_index - 1,
+                operation,
+            )
+    return result
+
+
+def preserve_replace_operation_modes(
+    previous_plan: Any, candidate_plan: Any
+) -> ReplaceModePreservation:
+    """Restore already-valid semantic replaces a narrow repair downgraded.
+
+    A narrow repair may only change the invalid portion of a Plan.  When the
+    repaired Plan keeps an operation at the same step/operation position but
+    downgrades an already-valid ``SEMANTIC_REPLACE`` to ``LEGACY_REPLACE`` on
+    the same path, the original operation is restored verbatim.  No legacy
+    anchor is synthesized and no other mode transition is preserved: every
+    other transition is reported as ``unpreserved`` so the caller can keep
+    failing closed.
+    """
+
+    transitions = replace_mode_transitions(previous_plan, candidate_plan)
+    if not transitions:
+        return ReplaceModePreservation(candidate_plan, (), ())
+
+    previous_operations = _replace_operations_by_identity(previous_plan)
+    candidate_operations = _replace_operations_by_identity(candidate_plan)
+    preserved: list[dict[str, Any]] = []
+    unpreserved: list[dict[str, Any]] = []
+    restorations: list[tuple[int, int, dict[str, Any]]] = []
+
+    for transition in transitions:
+        identity = (transition["step_number"], transition["operation_index"])
+        previous_entry = previous_operations.get(identity)
+        candidate_entry = candidate_operations.get(identity)
+        if (
+            transition["from"] != ReplaceOperationMode.SEMANTIC_REPLACE.value
+            or transition["to"] != ReplaceOperationMode.LEGACY_REPLACE.value
+            or previous_entry is None
+            or candidate_entry is None
+        ):
+            unpreserved.append(transition)
+            continue
+        try:
+            intent = SemanticReplaceIntent.from_operation(previous_entry[2])
+        except SemanticReplaceProjectionError:
+            # The original operation was not already valid; the repair is
+            # entitled to change it and this seam must not restore it.
+            unpreserved.append(transition)
+            continue
+        if not _same_declared_path(intent.path, candidate_entry[2]):
+            # The repair retargeted the operation; that is not a mode drift.
+            unpreserved.append(transition)
+            continue
+        restorations.append((previous_entry[0], candidate_entry[1], intent.to_dict()))
+        preserved.append(dict(transition))
+
+    if not restorations:
+        return ReplaceModePreservation(candidate_plan, (), tuple(unpreserved))
+
+    restored_plan = copy.deepcopy(candidate_plan)
+    for step_offset, operation_offset, operation in restorations:
+        restored_plan[step_offset]["ops"][operation_offset] = operation
+    return ReplaceModePreservation(restored_plan, tuple(preserved), tuple(unpreserved))
+
+
+def _same_declared_path(canonical_path: str, candidate_operation: Any) -> bool:
+    from app.services.orchestration.validation.path_authority import declare
+
+    if not isinstance(candidate_operation, Mapping):
+        return False
+    candidate_path = normalize_replace_in_file_aliases(candidate_operation).get("path")
+    if not isinstance(candidate_path, str) or not candidate_path.strip():
+        return False
+    try:
+        return declare(candidate_path).value == canonical_path
+    except Exception:
+        return False
 
 
 def is_supported_file_op_name(op_name: Any) -> bool:

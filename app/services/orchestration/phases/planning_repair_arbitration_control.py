@@ -36,6 +36,7 @@ from app.services.orchestration.planning.planner import (
     PlanningRepairOutputContractViolation,
 )
 from app.services.orchestration.operations.file_ops_contract import (
+    preserve_replace_operation_modes,
     replace_mode_transitions,
 )
 from app.services.orchestration.phases.planning_support import (
@@ -55,6 +56,53 @@ from app.services.orchestration.state.persistence import append_orchestration_ev
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
+
+
+def preserve_repair_replace_operation_modes(
+    *,
+    ctx: OrchestrationRunContext,
+    previous_plan: Any,
+) -> dict[str, Any]:
+    """Keep already-valid semantic replaces immutable across a narrow repair.
+
+    A repair prompt regenerates the whole Plan, so a repair aimed at one
+    missing target can also redraft an operation it was never asked to touch.
+    Restore those operations from the accepted draft before the repaired Plan
+    is arbitrated.  Transitions that cannot be preserved deterministically are
+    left in place so ``arbitrate_planning_repair_candidate`` still fails
+    closed on them.
+    """
+
+    preservation = preserve_replace_operation_modes(
+        previous_plan, ctx.orchestration_state.plan
+    )
+    if not preservation.preserved:
+        return {"preserved": [], "unpreserved": list(preservation.unpreserved)}
+    ctx.orchestration_state.plan = preservation.plan
+    ctx.logger.warning(
+        "[ORCHESTRATION] Planning repair drifted replace operation mode; "
+        "restored the already-valid operations: %s",
+        preservation.preserved,
+    )
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="WARN",
+        phase="planning",
+        message=(
+            "[ORCHESTRATION] Planning repair kept the already-valid replace "
+            "operation mode from the previous draft"
+        ),
+        details={
+            "reason": "repair_replace_mode_preserved",
+            "preserved_replace_mode_transitions": list(preservation.preserved),
+            "unpreserved_replace_mode_transitions": list(preservation.unpreserved),
+        },
+    )
+    return {
+        "preserved": list(preservation.preserved),
+        "unpreserved": list(preservation.unpreserved),
+    }
 
 
 def arbitrate_planning_repair_candidate(
@@ -80,6 +128,12 @@ def arbitrate_planning_repair_candidate(
             "planning repair arbitration: %s",
             exc,
         )
+    # A narrow repair may only change the invalid portion of the Plan.  Restore
+    # replace operations that were already valid before the repair regenerated
+    # the Plan, so the fence below only sees drift that cannot be preserved.
+    preservation = preserve_repair_replace_operation_modes(
+        ctx=ctx, previous_plan=previous_plan
+    )
     arbitration = classify_planning_repair_candidate(
         previous_plan=previous_plan,
         repaired_plan=ctx.orchestration_state.plan,
@@ -334,6 +388,10 @@ def arbitrate_planning_repair_candidate(
             arbitration=arbitration,
             planning_phase_event=planning_phase_event,
         )
+        if preservation["preserved"]:
+            # Hand the restored Plan back through the existing replace contract
+            # so the caller re-derives its immediate-repair scan from it.
+            return {"action": "replace", "plan": ctx.orchestration_state.plan}
         return {"action": "none"}
 
     arbitration["reason"] = "invalid_python_repair_candidate"

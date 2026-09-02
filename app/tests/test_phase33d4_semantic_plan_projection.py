@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -407,7 +408,11 @@ def test_repair_mode_transitions_are_explicitly_detected(tmp_path):
     assert upgrade[0]["to"] == "SEMANTIC_REPLACE"
 
 
-def test_full_plan_repair_fence_rejects_semantic_to_legacy_downgrade(tmp_path):
+def test_full_plan_repair_fence_rejects_unpreservable_mode_transition(tmp_path):
+    # PHASE34-PCS1: a same-path SEMANTIC_REPLACE -> LEGACY_REPLACE downgrade of
+    # an already-valid operation is now restored deterministically instead of
+    # aborting Planning (see test_phase34_pcs1_bounded_planning_repair_contract).
+    # Every transition that cannot be preserved still fails closed here.
     (tmp_path / "target.txt").write_bytes(b"before\n")
     semantic = _step(_semantic_operation(tmp_path))
     legacy = _step(
@@ -419,9 +424,13 @@ def test_full_plan_repair_fence_rejects_semantic_to_legacy_downgrade(tmp_path):
         }
     )
     ctx = SimpleNamespace(
-        orchestration_state=SimpleNamespace(project_dir=tmp_path, plan=legacy),
+        orchestration_state=SimpleNamespace(
+            project_dir=tmp_path, plan=semantic, phase_history=[]
+        ),
         prompt="replace target.txt",
         task=None,
+        logger=logging.getLogger("phase33d4-test"),
+        emit_live=lambda *_args, **_kwargs: None,
     )
 
     with pytest.raises(
@@ -430,7 +439,7 @@ def test_full_plan_repair_fence_rejects_semantic_to_legacy_downgrade(tmp_path):
         arbitrate_planning_repair_candidate(
             ctx=ctx,
             retry_state=_PlanningRetryState(),
-            previous_plan=semantic,
+            previous_plan=legacy,
             immediate_repair_issues={},
             planning_phase_event=None,
             output_text="[]",
