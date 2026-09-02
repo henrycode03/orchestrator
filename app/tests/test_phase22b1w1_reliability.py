@@ -62,6 +62,16 @@ def _write_config(path, project_workspace, runtime_root):
                         }
                     ],
                 },
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "models": [
+                                {"id": "local"},
+                                {"id": "qwen-local"},
+                            ]
+                        },
+                    }
+                },
                 "session": {"maintenance": {"mode": "warn"}},
             }
         ),
