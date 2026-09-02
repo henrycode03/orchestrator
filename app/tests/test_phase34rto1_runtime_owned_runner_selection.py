@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,10 @@ from app.services.orchestration.execution.executor_workspace_binding import (
 )
 from app.services.orchestration.execution.runtime_context import (
     RuntimeExecutorContext,
+)
+from app.services.agents.runtime_configuration import (
+    BackendRole,
+    RoleRuntimeConfiguration,
 )
 from app.services.workspace.workspace_admission import (
     WorkspaceAdmissionError,
@@ -529,6 +534,133 @@ def test_explicit_runner_id_is_selected_over_project_root_agent(
         assert selected["workspace"] == str(runtime_workspace)
     finally:
         binding.release()
+
+
+def test_binding_applies_explicit_runtime_model_without_fallbacks(
+    tmp_path, monkeypatch
+):
+    project_root, runtime_root, runner_root, runtime_workspace, context = (
+        _runtime_fixture(tmp_path, task_execution_id=9003)
+    )
+    config_path = tmp_path / "openclaw.json"
+    config = {
+        "agents": {
+            "defaults": {
+                "model": {
+                    "primary": "ollama/qwen3-coder:30b",
+                    "fallbacks": ["openai/qwen-local"],
+                }
+            },
+            "list": [
+                {"id": "project-agent", "workspace": str(project_root)},
+                {
+                    "id": "runtime-runner",
+                    "workspace": str(runner_root),
+                    "model": "ollama/qwen3-coder:30b",
+                },
+            ],
+        }
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    persistent_before = config_path.read_bytes()
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "runtime-runner")
+
+    binding = bind_openclaw_workspace(
+        context,
+        real_config_path=config_path,
+        model_ref="openai/qwen-local",
+    )
+    try:
+        bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
+        selected = next(
+            agent
+            for agent in bound_config["agents"]["list"]
+            if agent["id"] == "runtime-runner"
+        )
+        assert selected["model"] == {
+            "primary": "openai/qwen-local",
+            "fallbacks": [],
+        }
+        assert (
+            bound_config["agents"]["defaults"]["model"]
+            == config["agents"]["defaults"]["model"]
+        )
+        assert selected["workspace"] == str(runtime_workspace)
+        ephemeral_agent_dir = Path(selected["agentDir"])
+        ephemeral_state_dir = Path(binding.environment["OPENCLAW_STATE_DIR"])
+        assert ephemeral_agent_dir.is_dir()
+        assert ephemeral_state_dir.is_dir()
+        assert config_path.read_bytes() == persistent_before
+    finally:
+        binding.release()
+
+    assert not binding.config_path.exists()
+    assert not ephemeral_agent_dir.exists()
+    assert not ephemeral_state_dir.exists()
+
+
+def test_service_binding_uses_role_model_over_persistent_runner_model(
+    tmp_path, monkeypatch
+):
+    project_root, runtime_root, runner_root, runtime_workspace, context = (
+        _runtime_fixture(tmp_path, task_execution_id=9004)
+    )
+    config_path = tmp_path / "openclaw.json"
+    config = {
+        "models": {
+            "providers": {
+                "openai": {"models": [{"id": "qwen-local"}]},
+                "ollama": {"models": [{"id": "qwen3-coder:30b"}]},
+            }
+        },
+        "agents": {
+            "defaults": {
+                "model": {
+                    "primary": "ollama/qwen3-coder:30b",
+                    "fallbacks": ["openai/qwen-local"],
+                }
+            },
+            "list": [
+                {
+                    "id": "runtime-runner",
+                    "workspace": str(runner_root),
+                    "model": "ollama/qwen3-coder:30b",
+                }
+            ],
+        },
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    persistent_before = config_path.read_bytes()
+    monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "runtime-runner")
+
+    service = object.__new__(OpenClawSessionService)
+    service.runtime_configuration = RoleRuntimeConfiguration(
+        role=BackendRole.EXECUTION,
+        backend_name="local_openclaw",
+        model_family="qwen-local",
+        adaptation_profile="openclaw_default",
+    )
+    service._openclaw_config_path = lambda: config_path
+    service._workspace_binding = None
+    service.execution_cwd_override = None
+
+    service.bind_runtime_workspace(context)
+    try:
+        bound_config = json.loads(
+            service._workspace_binding.config_path.read_text(encoding="utf-8")
+        )
+        selected = bound_config["agents"]["list"][0]
+        assert selected["model"] == {
+            "primary": "openai/qwen-local",
+            "fallbacks": [],
+        }
+        assert selected["workspace"] == str(runtime_workspace)
+        assert config_path.read_bytes() == persistent_before
+    finally:
+        service.release_runtime_workspace_binding()
+
+    assert service._workspace_binding is None
+    assert config_path.read_bytes() == persistent_before
 
 
 def test_command_selection_uses_explicit_runner_id_not_workspace_order(

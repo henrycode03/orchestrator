@@ -275,6 +275,7 @@ def bind_openclaw_workspace(
     *,
     real_config_path: Path,
     runner_agent_id: Optional[str] = None,
+    model_ref: Optional[str] = None,
 ) -> ExecutorWorkspaceBinding:
     """Bind an OpenClaw agent's workspace to `context.runtime_workspace`.
 
@@ -302,6 +303,14 @@ def bind_openclaw_workspace(
         configured_agent_id=runner_agent_id,
     )
     agent_id = selection.agent_id
+    resolved_model_ref = None
+    if model_ref is not None:
+        resolved_model_ref = str(model_ref).strip()
+        if not resolved_model_ref:
+            raise ExecutorWorkspaceBindingError(
+                "Explicit OpenClaw runtime model is empty; refusing "
+                "persistent/default model authority"
+            )
 
     bound_config = json.loads(json.dumps(real_config))  # cheap deep copy
     tmp_dir = Path(tempfile.mkdtemp(prefix="orchestrator-openclaw-binding-"))
@@ -313,6 +322,14 @@ def bind_openclaw_workspace(
         if isinstance(agent, dict) and str(agent.get("id") or "").strip() == agent_id:
             agent["workspace"] = str(context.runtime_workspace)
             agent["agentDir"] = str(agent_dir)
+            if resolved_model_ref is not None:
+                # OpenClaw 2026.4.10 resolves an explicit agent model before
+                # agents.defaults.model. Empty fallbacks make this invocation
+                # fail closed instead of silently changing provider/model.
+                agent["model"] = {
+                    "primary": resolved_model_ref,
+                    "fallbacks": [],
+                }
 
     defaults = (bound_config.setdefault("agents", {})).setdefault("defaults", {})
     # OpenClaw 2026.4.10 owns this control at agents.defaults.  Agent entries

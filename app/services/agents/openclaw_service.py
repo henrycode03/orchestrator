@@ -436,6 +436,69 @@ class OpenClawSessionService:
             settings.AGENT_MODEL, db=self.db
         )
 
+    @staticmethod
+    def _runtime_openclaw_model_ref_from_config(
+        config: Dict[str, Any], model_family: str
+    ) -> str:
+        """Resolve one role model to OpenClaw's explicit provider/model ref.
+
+        The role runtime configuration owns the requested model. OpenClaw's
+        catalog is used only to qualify an unqualified model ID; persistent
+        agent/default model fields never participate in this resolution.
+        """
+
+        requested = str(model_family or "").strip()
+        if not requested:
+            raise OpenClawProviderControlError(
+                "OpenClaw runtime model is empty; refusing persistent/default "
+                "model authority"
+            )
+        providers = (config.get("models") or {}).get("providers") or {}
+        if "/" in requested:
+            provider_name, model_id = requested.split("/", 1)
+            provider = providers.get(provider_name)
+            model_exists = any(
+                isinstance(model, dict)
+                and str(model.get("id") or "").strip() == model_id
+                for model in (provider or {}).get("models", [])
+            )
+            if not model_exists:
+                raise OpenClawProviderControlError(
+                    f"Runtime model {requested!r} has no OpenClaw provider "
+                    "catalog entry"
+                )
+            return f"{provider_name}/{model_id}"
+
+        matches = []
+        for provider_name, provider in providers.items():
+            for model in (provider or {}).get("models", []):
+                if (
+                    isinstance(model, dict)
+                    and str(model.get("id") or "").strip() == requested
+                ):
+                    matches.append(f"{provider_name}/{requested}")
+        if len(matches) != 1:
+            raise OpenClawProviderControlError(
+                f"Runtime model {requested!r} does not resolve to one OpenClaw "
+                f"provider/model catalog entry: {matches}"
+            )
+        return matches[0]
+
+    def _runtime_openclaw_model_ref(self, config_path: Path) -> Optional[str]:
+        runtime_configuration = getattr(self, "runtime_configuration", None)
+        if runtime_configuration is None:
+            return None
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise OpenClawProviderControlError(
+                "Unable to read OpenClaw configuration for runtime model binding"
+            ) from exc
+        return self._runtime_openclaw_model_ref_from_config(
+            config,
+            runtime_configuration.model_family,
+        )
+
     def _adaptation_profile_for_role(self, model_family: str):
         if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
             return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
@@ -753,10 +816,12 @@ class OpenClawSessionService:
             return
         real_config_path = self._openclaw_config_path()
         try:
+            model_ref = self._runtime_openclaw_model_ref(real_config_path)
             self._workspace_binding = bind_openclaw_workspace(
                 context,
                 real_config_path=real_config_path,
                 runner_agent_id=runner_agent_id,
+                model_ref=model_ref,
             )
         except ExecutorWorkspaceBindingError as exc:
             error = OpenClawAgentSelectionError(str(exc))
@@ -826,6 +891,13 @@ class OpenClawSessionService:
             raise OpenClawAgentSelectionError(
                 f"Configured Protocol v2 planning agent {agent_id!r} does not exist"
             )
+        model_ref = None
+        runtime_configuration = getattr(self, "runtime_configuration", None)
+        if runtime_configuration is not None:
+            model_ref = self._runtime_openclaw_model_ref_from_config(
+                config,
+                runtime_configuration.model_family,
+            )
         config_dir = tempfile.TemporaryDirectory(prefix="protocol-v2-planning-")
         self._strict_planning_config_dir = config_dir
         config_path = Path(config_dir.name) / "openclaw.json"
@@ -833,6 +905,8 @@ class OpenClawSessionService:
         state_dir.mkdir(parents=True, exist_ok=True)
         selected["workspace"] = str(runtime_workspace)
         selected["agentDir"] = str(Path(config_dir.name) / "agent")
+        if model_ref is not None:
+            selected["model"] = {"primary": model_ref, "fallbacks": []}
         defaults = (config.setdefault("agents", {})).setdefault("defaults", {})
         defaults["workspace"] = str(runtime_workspace)
         memory_search = defaults.get("memorySearch")
@@ -1050,7 +1124,15 @@ class OpenClawSessionService:
         memory_search = defaults.get("memorySearch")
         if isinstance(memory_search, dict):
             defaults["memorySearch"] = {**memory_search, "enabled": False}
-        model_ref = selected.get("model") or defaults.get("model")
+        runtime_configuration = getattr(self, "runtime_configuration", None)
+        model_ref = (
+            self._runtime_openclaw_model_ref_from_config(
+                config,
+                runtime_configuration.model_family,
+            )
+            if runtime_configuration is not None
+            else selected.get("model") or defaults.get("model")
+        )
         if isinstance(model_ref, dict):
             model_ref = model_ref.get("primary") or model_ref.get("id")
         model_ref = str(model_ref or "").strip()
