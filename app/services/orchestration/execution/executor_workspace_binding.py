@@ -1,4 +1,4 @@
-"""Execution-time executor workspace binding layer (Phase 23D).
+"""Execution-time executor workspace binding layer (Phase 23D/ORS1).
 
 Phase 23C confirmed a real architectural blocker: OpenClaw's fail-closed
 agent-selection guard (Phase 22C-0) requires a configured agent whose
@@ -9,10 +9,11 @@ entry can ever match it, so every runtime-workspace dispatch raised
 
 This module closes that gap without rewriting the operator's persistent
 `openclaw.json` and without creating or deleting any agent identity in it.
-It reads the real config read-only, selects the explicitly configured
-runtime-owned runner template, and writes a private, ephemeral copy of that
-config with only that one agent's `workspace` field rewritten to the current
-Runtime Workspace.
+Normal Orchestrator dispatch reads the real config read-only, adds one
+invocation-only synthetic agent to a private copy, and points that agent at
+the current Runtime Workspace. The persistent runner-template selector below
+remains available for explicit historical/maintenance callers, but is not a
+normal lifecycle prerequisite.
 The copy is consumed by exactly one dispatch (via `OPENCLAW_CONFIG_PATH`,
 already an existing `OpenClawSessionService._openclaw_config_path()` seam)
 and discarded on release -- the same ephemeral-artifact-per-invocation
@@ -56,6 +57,7 @@ class ExecutorWorkspaceBindingError(Exception):
 
 
 RUNNER_AGENT_ID_ENV = "OPENCLAW_RUNNER_AGENT_ID"
+EPHEMERAL_AGENT_ID = "orchestrator-runtime"
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,53 @@ def resolve_openclaw_runner_agent_id(
 
 def _path_is_within(child: Path, parent: Path) -> bool:
     return child == parent or parent in child.parents
+
+
+def validate_runtime_workspace_context(context: RuntimeExecutorContext) -> None:
+    """Validate the runtime/project relationship before creating a binding.
+
+    This is the safety portion of the old runner admission contract. It does
+    not inspect OpenClaw identities, so workspace containment remains enforced
+    even when the persistent operator config contains only ``main``.
+    """
+
+    runtime_root_value = getattr(context, "runtime_root", None)
+    if not runtime_root_value:
+        raise ExecutorWorkspaceBindingError(
+            "Runtime Workspace binding has no approved Orchestrator runtime root"
+        )
+    runtime_root = Path(runtime_root_value).expanduser().resolve(strict=False)
+    project_workspace = (
+        Path(context.project_workspace).expanduser().resolve(strict=False)
+    )
+    runtime_workspace = (
+        Path(context.runtime_workspace).expanduser().resolve(strict=False)
+    )
+    if not runtime_root.exists() or not runtime_root.is_dir():
+        raise ExecutorWorkspaceBindingError(
+            f"Approved Orchestrator runtime root does not exist: {runtime_root}"
+        )
+    if _path_is_within(project_workspace, runtime_root) or _path_is_within(
+        runtime_root, project_workspace
+    ):
+        raise ExecutorWorkspaceBindingError(
+            "Project Workspace and approved Orchestrator runtime root overlap; "
+            "refusing ambiguous workspace ownership"
+        )
+    if _path_is_within(runtime_workspace, project_workspace):
+        raise ExecutorWorkspaceBindingError(
+            f"Runtime Workspace {runtime_workspace} is inside Project Workspace "
+            f"{project_workspace}"
+        )
+    if not _path_is_within(runtime_workspace, runtime_root):
+        raise ExecutorWorkspaceBindingError(
+            f"Runtime Workspace {runtime_workspace} is outside approved runtime "
+            f"root {runtime_root}"
+        )
+    if not runtime_workspace.exists() or not runtime_workspace.is_dir():
+        raise ExecutorWorkspaceBindingError(
+            "Runtime Workspace does not exist as a directory: " f"{runtime_workspace}"
+        )
 
 
 def _find_template_agent_id(config: Dict[str, Any], workspace: Path) -> Optional[str]:
@@ -253,7 +302,7 @@ class ExecutorWorkspaceBinding:
     """An active, per-invocation binding. Must be released via `release()`."""
 
     agent_id: str
-    persistent_workspace: Path
+    persistent_workspace: Optional[Path]
     config_path: Path
     _tmp_dir: Path
     environment: Dict[str, str]
@@ -280,14 +329,13 @@ def bind_openclaw_workspace(
     """Bind an OpenClaw agent's workspace to `context.runtime_workspace`.
 
     Reads `real_config_path` (the real, persistent `openclaw.json`) once,
-    read-only. Selects the explicitly configured runtime-owned runner
-    template and writes a private temp copy of the whole config with only
-    that agent's `workspace` field rewritten to
-    `context.runtime_workspace`.
+    read-only. Normal dispatch adds a synthetic invocation-only agent to a
+    private temp copy and binds it to `context.runtime_workspace`.
 
-    Raises `ExecutorWorkspaceBindingError` if the explicit runner is absent
-    or unsafe. This never registers a new agent or falls back to a Project
-    Workspace/default/generic match.
+    ``runner_agent_id`` is retained only for explicit historical callers that
+    still need the old persistent-template adapter. Normal Orchestrator code
+    deliberately leaves it unset and never consults environment/default
+    runner identity.
     """
 
     try:
@@ -297,20 +345,23 @@ def bind_openclaw_workspace(
             f"Could not read OpenClaw config at {real_config_path}: {exc}"
         ) from exc
 
-    selection = select_runtime_owned_openclaw_template(
-        real_config,
-        context,
-        configured_agent_id=runner_agent_id,
-    )
-    agent_id = selection.agent_id
-    resolved_model_ref = None
-    if model_ref is not None:
-        resolved_model_ref = str(model_ref).strip()
-        if not resolved_model_ref:
-            raise ExecutorWorkspaceBindingError(
-                "Explicit OpenClaw runtime model is empty; refusing "
-                "persistent/default model authority"
-            )
+    validate_runtime_workspace_context(context)
+    legacy_selection = None
+    if runner_agent_id is not None:
+        legacy_selection = select_runtime_owned_openclaw_template(
+            real_config,
+            context,
+            configured_agent_id=runner_agent_id,
+        )
+        agent_id = legacy_selection.agent_id
+    else:
+        agent_id = EPHEMERAL_AGENT_ID
+    resolved_model_ref = str(model_ref or "").strip() or None
+    if resolved_model_ref is None and legacy_selection is None:
+        raise ExecutorWorkspaceBindingError(
+            "Explicit OpenClaw runtime model is required; refusing "
+            "persistent/default model authority"
+        )
 
     bound_config = json.loads(json.dumps(real_config))  # cheap deep copy
     tmp_dir = Path(tempfile.mkdtemp(prefix="orchestrator-openclaw-binding-"))
@@ -318,18 +369,57 @@ def bind_openclaw_workspace(
     agent_dir = tmp_dir / "agent"
     state_dir.mkdir(parents=True, exist_ok=True)
     agent_dir.mkdir(parents=True, exist_ok=True)
-    for agent in (bound_config.get("agents") or {}).get("list") or []:
-        if isinstance(agent, dict) and str(agent.get("id") or "").strip() == agent_id:
-            agent["workspace"] = str(context.runtime_workspace)
-            agent["agentDir"] = str(agent_dir)
-            if resolved_model_ref is not None:
-                # OpenClaw 2026.4.10 resolves an explicit agent model before
-                # agents.defaults.model. Empty fallbacks make this invocation
-                # fail closed instead of silently changing provider/model.
-                agent["model"] = {
+    main_agent = next(
+        (
+            agent
+            for agent in (real_config.get("agents") or {}).get("list") or []
+            if isinstance(agent, dict) and agent.get("id") == "main"
+        ),
+        None,
+    )
+    main_agent_dir = str((main_agent or {}).get("agentDir") or "").strip()
+    auth_profiles = Path(main_agent_dir).expanduser() / "auth-profiles.json"
+    if auth_profiles.is_file():
+        # OpenClaw resolves provider credentials relative to agentDir. Copy
+        # only the operator-owned auth profile into the invocation directory;
+        # never point the ephemeral agent at persistent main state and never
+        # modify the source file.
+        shutil.copy2(auth_profiles, agent_dir / "auth-profiles.json")
+    agents = bound_config.setdefault("agents", {}).setdefault("list", [])
+    if legacy_selection is None:
+        if any(
+            isinstance(agent, dict) and str(agent.get("id") or "").strip() == agent_id
+            for agent in agents
+        ):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise ExecutorWorkspaceBindingError(
+                f"Ephemeral OpenClaw agent ID {agent_id!r} collides with the "
+                "operator config; refusing ambiguous identity selection"
+            )
+        agents.append(
+            {
+                "id": agent_id,
+                "workspace": str(context.runtime_workspace),
+                "agentDir": str(agent_dir),
+                "model": {
                     "primary": resolved_model_ref,
                     "fallbacks": [],
-                }
+                },
+            }
+        )
+    else:
+        for agent in agents:
+            if (
+                isinstance(agent, dict)
+                and str(agent.get("id") or "").strip() == agent_id
+            ):
+                agent["workspace"] = str(context.runtime_workspace)
+                agent["agentDir"] = str(agent_dir)
+                if resolved_model_ref is not None:
+                    agent["model"] = {
+                        "primary": resolved_model_ref,
+                        "fallbacks": [],
+                    }
 
     defaults = (bound_config.setdefault("agents", {})).setdefault("defaults", {})
     # OpenClaw 2026.4.10 owns this control at agents.defaults.  Agent entries
@@ -352,16 +442,18 @@ def bind_openclaw_workspace(
         "%s -> %s for task_execution_id=%s (template workspace %s; ephemeral config at %s; "
         "persistent %s untouched)",
         agent_id,
-        selection.persistent_workspace,
+        legacy_selection.persistent_workspace if legacy_selection else None,
         context.runtime_workspace,
         context.task_execution_id,
-        selection.persistent_workspace,
+        legacy_selection.persistent_workspace if legacy_selection else None,
         config_path,
         real_config_path,
     )
     return ExecutorWorkspaceBinding(
         agent_id=agent_id,
-        persistent_workspace=selection.persistent_workspace,
+        persistent_workspace=(
+            legacy_selection.persistent_workspace if legacy_selection else None
+        ),
         config_path=config_path,
         _tmp_dir=tmp_dir,
         environment=environment,

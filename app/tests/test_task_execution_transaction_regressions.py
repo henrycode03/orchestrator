@@ -35,6 +35,7 @@ def _stub_retry_dispatch(
     *,
     bypass_binding_admission: bool = True,
 ):
+    del bypass_binding_admission
     from app.tasks import worker as worker_module
 
     monkeypatch.setattr(
@@ -54,15 +55,6 @@ def _stub_retry_dispatch(
         return _FakeAsyncResult()
 
     monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
-    if bypass_binding_admission:
-        monkeypatch.setattr(
-            "app.api.v1.endpoints.tasks.admit_project_openclaw_binding_for_dispatch",
-            lambda *args, **kwargs: None,
-        )
-        monkeypatch.setattr(
-            "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
-            lambda *args, **kwargs: None,
-        )
 
 
 def test_sync_task_execution_uses_terminal_task_state_over_stale_running_link(
@@ -426,7 +418,7 @@ def test_task_retry_explicit_new_session_preserves_legacy_isolated_session_creat
     assert new_session.name == "Retry isolated session"
 
 
-def test_task_retry_rejects_unbound_openclaw_project_before_task_execution(
+def test_task_retry_does_not_require_persistent_openclaw_binding(
     authenticated_client, db_session, monkeypatch, tmp_path
 ):
     project_workspace = tmp_path / "unbound-project"
@@ -455,14 +447,9 @@ def test_task_retry_rejects_unbound_openclaw_project_before_task_execution(
         json={"execution_scope": "new_session"},
     )
 
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["category"] == "openclaw_workspace_binding_unavailable"
-    assert detail["project_id"] == project.id
-    assert detail["matching_agent_count"] == 0
-    assert detail["admission_stage"] == "task_retry_dispatch"
-    assert db_session.query(TaskExecution).count() == 0
-    assert db_session.query(SessionModel).count() == 0
+    assert response.status_code == 200
+    assert db_session.query(TaskExecution).count() == 1
+    assert db_session.query(SessionModel).count() == 1
 
 
 def test_task_retry_reaches_dispatch_with_valid_openclaw_binding(
@@ -830,10 +817,6 @@ def test_admitted_dogfood_session_isolates_legacy_project_queue(
     )
     monkeypatch.setattr(
         "app.services.session.session_runtime_service._maybe_compact_checkpoint_before_dispatch",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(

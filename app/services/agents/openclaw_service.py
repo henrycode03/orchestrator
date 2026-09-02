@@ -72,7 +72,6 @@ from app.services.orchestration.execution.executor_workspace_binding import (
     ExecutorWorkspaceBinding,
     ExecutorWorkspaceBindingError,
     bind_openclaw_workspace,
-    select_runtime_owned_openclaw_template,
 )
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
@@ -659,12 +658,11 @@ class OpenClawSessionService:
         cwd: Optional[str],
         strict_provider_result: bool = False,
     ) -> List[str]:
-        """Select the explicit runner for the declared Runtime Workspace.
+        """Select the explicitly bound invocation agent for the Runtime Workspace.
 
-        The runner template is selected by configured identity and validated
-        as runtime-owned. Its ephemeral config must point that identity at
-        ``cwd`` exactly, preserving Phase 22C-0's fail-closed containment
-        against default, ProjectRoot, or generic-workspace dispatch.
+        Sandboxed dispatch must have a binding created by the executor seam.
+        The binding supplies a synthetic invocation-only identity, so no
+        persistent Project or runner identity participates in selection.
         """
 
         full_cmd = [*base_command, "agent"]
@@ -699,15 +697,18 @@ class OpenClawSessionService:
             )
 
         if runtime_context is not None:
-            try:
-                selection = select_runtime_owned_openclaw_template(
-                    config,
-                    runtime_context,
-                    configured_agent_id=getattr(self, "_runtime_runner_agent_id", None),
+            binding = getattr(self, "_workspace_binding", None)
+            if binding is None:
+                _fail(
+                    "OpenClaw Runtime Workspace has no ephemeral binding; "
+                    "refusing persistent/default agent selection."
                 )
-            except ExecutorWorkspaceBindingError as exc:
-                _fail(str(exc))
-            agent_id = selection.agent_id
+            agent_id = str(getattr(binding, "agent_id", "") or "").strip()
+            if not agent_id:
+                _fail(
+                    "Ephemeral OpenClaw binding has no selected invocation agent; "
+                    "refusing fallback selection."
+                )
         else:
             agent_id = str(
                 getattr(self, "_last_selected_openclaw_agent_id", "") or ""
@@ -802,15 +803,13 @@ class OpenClawSessionService:
         self, context: Optional[Any], *, runner_agent_id: Optional[str] = None
     ) -> None:
         """Bind this session's OpenClaw execution to a Runtime Executor
-        Context (Phase 23D, Goal 3).
+        Context (Phase 23D/ORS1).
 
         No-op when ``context`` is ``None`` or not sandboxed. Sandboxed
-        dispatch resolves an ephemeral, per-invocation config copy from the
-        explicitly configured runtime-owned runner template, rewrites that
-        template's ``workspace`` to the Runtime Workspace, and points this
-        instance's config resolution at it. It fails closed when the runner
-        is missing or unsafe; it never falls back to the Project Workspace,
-        a default agent, or a generic workspace.
+        dispatch creates an ephemeral synthetic agent in a private config
+        copy, binds it to the Runtime Workspace, and pins the exact role
+        model with no fallbacks. ``runner_agent_id`` is accepted for source
+        compatibility but is intentionally not an authority input.
         """
         if context is None or not getattr(context, "is_sandboxed", False):
             return
@@ -820,7 +819,6 @@ class OpenClawSessionService:
             self._workspace_binding = bind_openclaw_workspace(
                 context,
                 real_config_path=real_config_path,
-                runner_agent_id=runner_agent_id,
                 model_ref=model_ref,
             )
         except ExecutorWorkspaceBindingError as exc:

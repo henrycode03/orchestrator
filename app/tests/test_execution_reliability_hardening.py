@@ -51,12 +51,9 @@ from app.tasks.worker import _should_reject_stale_dispatch_claim
 
 
 def _bypass_project_openclaw_binding_admission(monkeypatch):
-    """Keep queue-state tests provider-free; admission has dedicated coverage."""
+    """Compatibility fixture: normal queueing has no persistent-agent gate."""
 
-    monkeypatch.setattr(
-        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
-        lambda *args, **kwargs: None,
-    )
+    del monkeypatch
 
 
 def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(

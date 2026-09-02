@@ -28,11 +28,9 @@ import pytest
 from app.config import settings
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.agents.openclaw_service import (
-    OpenClawAgentSelectionError,
     OpenClawSessionService,
 )
 from app.services.orchestration.execution.executor_workspace_binding import (
-    ExecutorWorkspaceBindingError,
     bind_openclaw_workspace,
 )
 from app.services.orchestration.execution.runtime import (
@@ -41,6 +39,10 @@ from app.services.orchestration.execution.runtime import (
 )
 from app.services.orchestration.execution.runtime_context import (
     RuntimeExecutorContext,
+)
+from app.services.agents.runtime_configuration import (
+    BackendRole,
+    RoleRuntimeConfiguration,
 )
 from app.services.workspace.task_sandbox_allocator import TaskSandbox
 
@@ -82,7 +84,8 @@ def _write_openclaw_config(path, *, agent_id: str, workspace) -> None:
                             "workspace": str(workspace),
                         }
                     ]
-                }
+                },
+                "models": {"providers": {"openai": {"models": [{"id": "qwen-local"}]}}},
             }
         ),
         encoding="utf-8",
@@ -229,13 +232,25 @@ class TestExecutorWorkspaceBindingLayer:
             sandbox, project_workspace=project_workspace
         )
 
-        binding = bind_openclaw_workspace(context, real_config_path=real_config_path)
+        binding = bind_openclaw_workspace(
+            context,
+            real_config_path=real_config_path,
+            model_ref="openai/qwen-local",
+        )
         try:
-            assert binding.agent_id == "orchestrator"
+            assert binding.agent_id == "orchestrator-runtime"
             assert binding.config_path != real_config_path
             bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
-            bound_agent = bound_config["agents"]["list"][0]
+            bound_agent = next(
+                agent
+                for agent in bound_config["agents"]["list"]
+                if agent["id"] == binding.agent_id
+            )
             assert bound_agent["workspace"] == str(sandbox.path)
+            assert bound_agent["model"] == {
+                "primary": "openai/qwen-local",
+                "fallbacks": [],
+            }
 
             # The real, persistent config is untouched.
             assert real_config_path.read_text(encoding="utf-8") == real_config_before
@@ -247,7 +262,7 @@ class TestExecutorWorkspaceBindingLayer:
             binding.release()
         assert not binding.config_path.exists()
 
-    def test_fails_closed_when_no_template_agent_matches(self, tmp_path):
+    def test_binds_without_a_persistent_template_agent(self, tmp_path):
         real_config_path = tmp_path / "openclaw.json"
         _write_openclaw_config(
             real_config_path,
@@ -261,8 +276,15 @@ class TestExecutorWorkspaceBindingLayer:
             sandbox, project_workspace=project_workspace
         )
 
-        with pytest.raises(ExecutorWorkspaceBindingError):
-            bind_openclaw_workspace(context, real_config_path=real_config_path)
+        binding = bind_openclaw_workspace(
+            context,
+            real_config_path=real_config_path,
+            model_ref="openai/qwen-local",
+        )
+        try:
+            assert binding.agent_id == "orchestrator-runtime"
+        finally:
+            binding.release()
 
     def test_release_never_raises_on_missing_dir(self, tmp_path):
         real_config_path = tmp_path / "openclaw.json"
@@ -277,7 +299,11 @@ class TestExecutorWorkspaceBindingLayer:
         context = RuntimeExecutorContext.for_sandbox(
             sandbox, project_workspace=project_workspace
         )
-        binding = bind_openclaw_workspace(context, real_config_path=real_config_path)
+        binding = bind_openclaw_workspace(
+            context,
+            real_config_path=real_config_path,
+            model_ref="openai/qwen-local",
+        )
         binding.release()
         binding.release()  # must not raise on double release
 
@@ -291,7 +317,15 @@ class TestOpenClawSessionServiceRuntimeWorkspaceBinding:
         db_session.add(session)
         db_session.commit()
         db_session.refresh(session)
-        return OpenClawSessionService(db_session, session.id)
+        service = OpenClawSessionService(db_session, session.id)
+        service.runtime_configuration = RoleRuntimeConfiguration(
+            role=BackendRole.EXECUTION,
+            backend_name="local_openclaw",
+            model_family="qwen-local",
+            adaptation_profile="openclaw_default",
+        )
+        service.backend_role = BackendRole.EXECUTION.value
+        return service
 
     def test_noop_for_non_sandboxed_context(self, db_session):
         service = self._make_service(db_session)
@@ -347,7 +381,7 @@ class TestOpenClawSessionServiceRuntimeWorkspaceBinding:
         # Idempotent: releasing again must not raise.
         service.release_runtime_workspace_binding()
 
-    def test_fails_closed_as_openclaw_agent_selection_error(
+    def test_ignores_unrelated_persistent_agent_template(
         self, db_session, tmp_path, monkeypatch
     ):
         service = self._make_service(db_session)
@@ -366,9 +400,12 @@ class TestOpenClawSessionServiceRuntimeWorkspaceBinding:
             sandbox, project_workspace=project_workspace
         )
 
-        with pytest.raises(OpenClawAgentSelectionError):
-            service.bind_runtime_workspace(context)
-        # Fail-closed: no partial override left behind.
+        service.bind_runtime_workspace(context)
+        try:
+            assert service._openclaw_config_path_override is not None
+            assert service._workspace_binding.agent_id == "orchestrator-runtime"
+        finally:
+            service.release_runtime_workspace_binding()
         assert service._openclaw_config_path_override is None
 
 
@@ -398,7 +435,9 @@ class TestConcurrentRuntimeWorkspaceBinding:
                     sandbox, project_workspace=project_workspace
                 )
                 results[task_execution_id] = bind_openclaw_workspace(
-                    context, real_config_path=real_config_path
+                    context,
+                    real_config_path=real_config_path,
+                    model_ref="openai/qwen-local",
                 )
             except Exception as exc:  # noqa: BLE001 - surfaced via `errors`
                 errors.append((task_execution_id, exc))
@@ -425,9 +464,12 @@ class TestConcurrentRuntimeWorkspaceBinding:
                     / "1"
                     / str(task_execution_id)
                 )
-                assert (
-                    bound_config["agents"]["list"][0]["workspace"] == expected_workspace
+                bound_agent = next(
+                    agent
+                    for agent in bound_config["agents"]["list"]
+                    if agent["id"] == binding.agent_id
                 )
+                assert bound_agent["workspace"] == expected_workspace
         finally:
             for binding in results.values():
                 binding.release()

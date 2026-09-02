@@ -581,10 +581,6 @@ def test_actual_queue_persists_exact_task_execution_identity(
 
     monkeypatch.setattr("app.tasks.worker.execute_orchestration_task", _FakeWorkerTask)
     monkeypatch.setattr(
-        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
         "app.services.session.session_runtime_service.ensure_task_workspace",
         lambda *args, **kwargs: {
             "workspace_path": str(tmp_path / "task-workspace"),

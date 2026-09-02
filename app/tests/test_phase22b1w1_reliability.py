@@ -261,12 +261,15 @@ def test_nested_step_debug_repair_keeps_runtime_binding_until_provider_returns(
             }
         )
         selected = json.loads(observed["config_path"].read_text(encoding="utf-8"))
-        observed["selected_agent_workspace"] = selected["agents"]["list"][0][
-            "workspace"
-        ]
-        observed["selected_agent_dir"] = selected["agents"]["list"][0]["agentDir"]
+        selected_agent = next(
+            agent
+            for agent in selected["agents"]["list"]
+            if agent["id"] == self._workspace_binding.agent_id
+        )
+        observed["selected_agent_workspace"] = selected_agent["workspace"]
+        observed["selected_agent_dir"] = selected_agent["agentDir"]
         observed["session_store"] = selected["session"]["store"]
-        self._last_selected_openclaw_agent_id = selected["agents"]["list"][0]["id"]
+        self._last_selected_openclaw_agent_id = selected_agent["id"]
         self._validate_runtime_invocation_boundary(observed["cwd"])
         (runtime / "provider-scaffold").mkdir()
         (runtime / "provider-scaffold" / "state.json").write_text(

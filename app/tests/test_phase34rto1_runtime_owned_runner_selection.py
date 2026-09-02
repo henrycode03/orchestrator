@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from app.models import Project
 from app.services.orchestration.execution.executor_workspace_binding import (
     ExecutorWorkspaceBindingError,
     bind_openclaw_workspace,
+    select_runtime_owned_openclaw_template,
 )
 from app.services.orchestration.execution.runtime_context import (
     RuntimeExecutorContext,
@@ -78,7 +80,9 @@ def test_missing_runner_identity_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="runner agent ID is not configured"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_unknown_runner_identity_fails_closed(tmp_path, monkeypatch):
@@ -96,7 +100,9 @@ def test_unknown_runner_identity_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="runner agent .* was not found"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_duplicate_runner_identity_fails_closed(tmp_path, monkeypatch):
@@ -122,7 +128,9 @@ def test_duplicate_runner_identity_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="Multiple OpenClaw runner entries"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_runner_workspace_equal_to_project_root_fails_closed(tmp_path, monkeypatch):
@@ -140,7 +148,9 @@ def test_runner_workspace_equal_to_project_root_fails_closed(tmp_path, monkeypat
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="outside approved runtime root"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_runner_workspace_nested_under_project_root_fails_closed(tmp_path, monkeypatch):
@@ -160,7 +170,9 @@ def test_runner_workspace_nested_under_project_root_fails_closed(tmp_path, monke
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="outside approved runtime root"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_runner_workspace_parent_of_project_root_fails_closed(tmp_path, monkeypatch):
@@ -179,7 +191,9 @@ def test_runner_workspace_parent_of_project_root_fails_closed(tmp_path, monkeypa
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="outside approved runtime root"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_runner_workspace_missing_directory_fails_closed(tmp_path, monkeypatch):
@@ -198,7 +212,9 @@ def test_runner_workspace_missing_directory_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="does not exist as a directory"
     ):
-        bind_openclaw_workspace(context, real_config_path=config_path)
+        select_runtime_owned_openclaw_template(
+            json.loads(config_path.read_text()), context
+        )
 
 
 def test_missing_approved_runtime_root_fails_closed(tmp_path, monkeypatch):
@@ -451,7 +467,11 @@ def test_physical_binding_probe_writes_only_ephemeral_runtime_copy(
         for name in bootstrap_names
     }
 
-    binding = bind_openclaw_workspace(context, real_config_path=config_path)
+    binding = bind_openclaw_workspace(
+        context,
+        real_config_path=config_path,
+        runner_agent_id="runtime-runner",
+    )
     try:
         bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
         selected = next(
@@ -522,7 +542,11 @@ def test_explicit_runner_id_is_selected_over_project_root_agent(
         sandbox=object(),
     )
 
-    binding = bind_openclaw_workspace(context, real_config_path=config_path)
+    binding = bind_openclaw_workspace(
+        context,
+        real_config_path=config_path,
+        runner_agent_id=runner_id,
+    )
     try:
         assert binding.agent_id == runner_id
         bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
@@ -575,7 +599,7 @@ def test_binding_applies_explicit_runtime_model_without_fallbacks(
         selected = next(
             agent
             for agent in bound_config["agents"]["list"]
-            if agent["id"] == "runtime-runner"
+            if agent["id"] == binding.agent_id
         )
         assert selected["model"] == {
             "primary": "openai/qwen-local",
@@ -649,7 +673,11 @@ def test_service_binding_uses_role_model_over_persistent_runner_model(
         bound_config = json.loads(
             service._workspace_binding.config_path.read_text(encoding="utf-8")
         )
-        selected = bound_config["agents"]["list"][0]
+        selected = next(
+            agent
+            for agent in bound_config["agents"]["list"]
+            if agent["id"] == service._workspace_binding.agent_id
+        )
         assert selected["model"] == {
             "primary": "openai/qwen-local",
             "fallbacks": [],
@@ -679,6 +707,10 @@ def test_command_selection_uses_explicit_runner_id_not_workspace_order(
                     "list": [
                         {"id": "project-agent", "workspace": str(runtime_workspace)},
                         {"id": "runtime-runner", "workspace": str(runtime_workspace)},
+                        {
+                            "id": "orchestrator-runtime",
+                            "workspace": str(runtime_workspace),
+                        },
                     ]
                 }
             }
@@ -699,15 +731,15 @@ def test_command_selection_uses_explicit_runner_id_not_workspace_order(
         sandbox=object(),
     )
     service.execution_cwd_override = str(runtime_workspace)
-    service._workspace_binding = object()
+    service._workspace_binding = SimpleNamespace(agent_id="orchestrator-runtime")
     service._last_selected_openclaw_agent_id = None
 
     result = service._build_openclaw_agent_command(
         ["openclaw"], cwd=str(runtime_workspace)
     )
 
-    assert result == ["openclaw", "agent", "--agent", "runtime-runner"]
-    assert service._last_selected_openclaw_agent_id == "runtime-runner"
+    assert result == ["openclaw", "agent", "--agent", "orchestrator-runtime"]
+    assert service._last_selected_openclaw_agent_id == "orchestrator-runtime"
 
 
 def test_two_tasks_share_template_identity_but_not_ephemeral_binding(
@@ -735,8 +767,16 @@ def test_two_tasks_share_template_identity_but_not_ephemeral_binding(
     )
     monkeypatch.setenv("OPENCLAW_RUNNER_AGENT_ID", "runtime-runner")
 
-    first = bind_openclaw_workspace(first_context, real_config_path=config_path)
-    second = bind_openclaw_workspace(second_context, real_config_path=config_path)
+    first = bind_openclaw_workspace(
+        first_context,
+        real_config_path=config_path,
+        runner_agent_id="runtime-runner",
+    )
+    second = bind_openclaw_workspace(
+        second_context,
+        real_config_path=config_path,
+        runner_agent_id="runtime-runner",
+    )
     try:
         assert first.agent_id == second.agent_id == "runtime-runner"
         assert first.config_path != second.config_path

@@ -59,10 +59,6 @@ from app.services.workspace.control_state_paths import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.workspace.workspace_admission import (
-    WorkspaceAdmissionError,
-    admit_project_openclaw_binding_for_dispatch,
-)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -592,15 +588,6 @@ def _queue_task_retry(
     project = db.query(Project).filter(Project.id == task.project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    try:
-        admit_project_openclaw_binding_for_dispatch(
-            db,
-            project,
-            admission_stage="task_retry_dispatch",
-        )
-    except WorkspaceAdmissionError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload()) from exc
-
     session_task = (
         db.query(SessionTask)
         .filter(

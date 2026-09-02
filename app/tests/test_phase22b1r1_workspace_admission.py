@@ -218,7 +218,11 @@ def test_openclaw_binding_rejects_duplicate_explicit_runner_agents(
     with pytest.raises(
         ExecutorWorkspaceBindingError, match="Multiple OpenClaw runner entries"
     ):
-        bind_openclaw_workspace(context, real_config_path=config)
+        bind_openclaw_workspace(
+            context,
+            real_config_path=config,
+            runner_agent_id="runtime-runner",
+        )
 
 
 def test_openclaw_project_binding_admission_uses_runtime_runner(

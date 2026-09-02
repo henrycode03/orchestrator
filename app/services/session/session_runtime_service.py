@@ -48,10 +48,6 @@ from app.services.workspace.control_state_paths import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.workspace.workspace_admission import (
-    WorkspaceAdmissionError,
-    admit_project_openclaw_binding_for_dispatch,
-)
 from app.services.orchestration.prompt_templates import OrchestrationState
 from app.task_intent import normalize_task_intent
 from app.services.tasks.service import TaskService
@@ -516,16 +512,6 @@ def queue_task_for_session(
     project = db.query(Project).filter(Project.id == task.project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    try:
-        admit_project_openclaw_binding_for_dispatch(
-            db,
-            project,
-            admission_stage="session_task_dispatch",
-            planning_backend_override=planning_backend_override,
-        )
-    except WorkspaceAdmissionError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload()) from exc
-
     try:
         # Acquire the existing canonical mutation lock before workspace
         # hydration and keep it through the active-execution check plus the

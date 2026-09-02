@@ -31,10 +31,7 @@ from app.services.workspace.project_mutation_lock import (
 
 
 def _bypass_binding(monkeypatch):
-    monkeypatch.setattr(
-        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
-        lambda *args, **kwargs: None,
-    )
+    del monkeypatch
 
 
 def _fake_dispatch(monkeypatch):
