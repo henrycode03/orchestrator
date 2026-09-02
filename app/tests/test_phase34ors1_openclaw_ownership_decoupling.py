@@ -201,6 +201,7 @@ def test_service_command_builder_reads_active_ephemeral_config(tmp_path, monkeyp
     service._last_selected_openclaw_agent_id = None
     service.execution_cwd_override = None
     service._log_entry = lambda *args, **kwargs: None
+    monkeypatch.setattr(service, "_resolve_openclaw_command", lambda: ["openclaw"])
 
     service.bind_runtime_workspace(context, runner_agent_id="missing-runner")
     try:

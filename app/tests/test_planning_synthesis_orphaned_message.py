@@ -5,6 +5,10 @@ import pytest
 
 from app.models import Project
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.runtime_configuration import (
+    BackendRole,
+    RoleRuntimeConfiguration,
+)
 
 
 def test_planning_retry_session_ids_are_unique_within_one_second(monkeypatch):
@@ -44,6 +48,11 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
     config_path.write_text(
         json.dumps(
             {
+                "models": {
+                    "providers": {
+                        "openai": {"models": [{"id": "qwen-local"}]},
+                    }
+                },
                 "agents": {
                     "list": [
                         {
@@ -51,7 +60,7 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
                             "workspace": str(runner_workspace),
                         }
                     ]
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -68,6 +77,12 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
     service.task_model = None
     service.project_id = project.id
     service.execution_cwd_override = None
+    service.runtime_configuration = RoleRuntimeConfiguration(
+        role=BackendRole.PLANNING,
+        backend_name="local_openclaw",
+        model_family="qwen-local",
+        adaptation_profile="openclaw_default",
+    )
     service._workspace_binding = None
     service._openclaw_config_path_override = None
     service._runtime_runner_agent_id = None
