@@ -583,6 +583,8 @@ def _has_explicit_code_test_intent(task_prompt: str) -> bool:
     explicit_patterns = [
         r"\b(?:with|include|add|write|create|update|provide)\s+"
         r"(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
+        r"\b(?:with|include|add|write|create|update|provide)\s+"
+        r"(?:new\s+)?(?:regression\s+)?(?:tests?|coverage)\b",
         r"\bwith\b[^.;\n]{0,80}\btests?\b",
         r"\band\s+(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
         r"\b[a-z_][a-z0-9_-]*\s+tests?\b",
@@ -618,6 +620,8 @@ def _has_explicit_new_test_writing_intent(task_prompt: str) -> bool:
         # "add tests", "with unit tests", "include test coverage", etc.
         r"\b(?:with|include|add|write|create|update|provide)\s+"
         r"(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
+        r"\b(?:with|include|add|write|create|update|provide)\s+"
+        r"(?:new\s+)?(?:regression\s+)?(?:tests?|coverage)\b",
         # "tests for the feature", "tests that verify", etc.
         r"\btests?\s+(?:for|that|cover|exercise|import)\b",
     ]
@@ -695,12 +699,18 @@ def _minimum_implementation_evidence(plan: list[dict[str, Any]]) -> bool:
         for operation in step.get("ops") or []:
             if not isinstance(operation, dict):
                 continue
-            if str(operation.get("op") or "") not in {"write_file", "append_file"}:
+            operation_name = str(operation.get("op") or "")
+            if operation_name not in {
+                "write_file",
+                "append_file",
+                "replace_in_file",
+            }:
                 continue
             path = _normalize_path(operation.get("path"))
             if not _is_source_path(path):
                 continue
-            content = str(operation.get("content") or "").strip()
+            content_key = "content" if operation_name != "replace_in_file" else "new"
+            content = str(operation.get(content_key) or "").strip()
             if len(content) < 24:
                 continue
             if PLACEHOLDER_RE.search(content):
@@ -950,6 +960,13 @@ def build_task1_bootstrap_contract(
         if fallback_task_type == BootstrapTaskType.ARTIFACT_ONLY:
             fallback_required_source_files = []
             fallback_required_artifacts = artifact_candidates
+        expected_test_reason = _expected_test_reason(
+            bootstrap_task_type=fallback_task_type,
+            task_prompt=task_prompt,
+            all_paths=all_paths,
+            existing_files=normalized_existing_files,
+            source_candidates=source_candidates,
+        )
         return TaskBootstrapContract(
             bootstrap_task_type=fallback_task_type,
             classification_evidence={
@@ -974,7 +991,7 @@ def build_task1_bootstrap_contract(
             python_import_targets=import_targets,
             forbidden_python_src_imports=forbidden_src_imports,
             missing_python_package_markers=missing_package_markers,
-            expected_test_reason=None,
+            expected_test_reason=expected_test_reason,
             minimum_implementation_evidence=_minimum_implementation_evidence(plan),
             minimum_artifact_evidence=_minimum_artifact_evidence(plan),
             contract_id=resolution["contract_id"],
@@ -1096,16 +1113,17 @@ def validate_task1_bootstrap_contract(
         codes.append("task1_bootstrap_expected_test_not_generated")
 
     if (
-        contract.planner_contract_status == "legacy_compatibility"
+        contract.planner_contract_status
+        in {"legacy_compatibility", "missing_registered_contract_facts"}
         and contract.expected_test_reason
         and contract.expected_test_reason
         != EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT
         and contract.expected_test_reason
         != EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT
-        and not contract.expected_test_files
+        and not any(_is_test_path(path) for path in _materialized_file_targets(plan))
     ):
         violations.append(
-            "Task 1 bootstrap prompt asks for tests but no test files are declared or materialized"
+            "Task 1 bootstrap prompt asks for tests but no test files are materialized"
         )
         codes.append("task1_bootstrap_missing_expected_test_files")
 
