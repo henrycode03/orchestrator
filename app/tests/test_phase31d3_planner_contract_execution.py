@@ -248,3 +248,26 @@ def test_validator_does_not_turn_prompt_words_into_missing_test_evidence(tmp_pat
         "task1_bootstrap_missing_expected_test_files" not in evidence["violation_codes"]
     )
     assert evidence["terminal_classification"] == "terminal_limitation"
+
+
+def test_bootstrap_recognizes_top_level_pytest_file_as_existing_test_evidence():
+    verdict = validate_task1_bootstrap_contract(
+        plan=[
+            _step(
+                {
+                    "op": "write_file",
+                    "path": "tiny_calc.py",
+                    "content": "def answer():\n    return 42\n",
+                },
+                expected_files=["tiny_calc.py"],
+            )
+        ],
+        task_prompt=(
+            "Create tiny_calc.py so answer() returns 42 and run "
+            "python3 -m pytest -q test_tiny_calc.py."
+        ),
+        existing_files={"test_tiny_calc.py"},
+    )
+
+    assert verdict.passed, verdict.violations
+    assert verdict.contract.expected_test_reason == "existing_project_tests_present"

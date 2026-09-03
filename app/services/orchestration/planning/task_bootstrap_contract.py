@@ -142,8 +142,25 @@ def _is_verification_helper_script(path_text: str) -> bool:
 
 
 def _is_test_path(path_text: str) -> bool:
-    parts = Path(path_text).parts
-    return bool(parts and parts[0].lower() in TEST_ROOTS)
+    normalized = _normalize_path(path_text)
+    path = Path(normalized)
+    parts = path.parts
+    if not parts:
+        return False
+    if parts[0].lower() in TEST_ROOTS:
+        return True
+
+    # Pytest also treats conventional test module names as tests when they
+    # live at the project root (or alongside the source), e.g.
+    # ``test_tiny_calc.py``.  The directory-only check above made those files
+    # invisible to the bootstrap contract's existing-test evidence.
+    stem = path.stem.lower()
+    return path.suffix.lower() in SOURCE_EXTENSIONS and (
+        stem == "test"
+        or stem.startswith("test_")
+        or stem.endswith("_test")
+        or stem.endswith(".test")
+    )
 
 
 def _is_source_path(path_text: str) -> bool:
@@ -580,6 +597,13 @@ def _has_explicit_code_test_intent(task_prompt: str) -> bool:
         " ",
         prompt_lower,
     )
+    positive_test_intent_text = re.sub(
+        r"\b(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b"
+        r"\s*,?\s+(?:if|when|where|as)\s+"
+        r"(?:needed|necessary|appropriate|applicable|required)\b",
+        " ",
+        positive_test_intent_text,
+    )
     explicit_patterns = [
         r"\b(?:with|include|add|write|create|update|provide)\s+"
         r"(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
@@ -615,6 +639,13 @@ def _has_explicit_new_test_writing_intent(task_prompt: str) -> bool:
         r"[^.;\n]*(?:tests?|pytest|unit\s+tests?|test\s+files?)",
         " ",
         prompt_lower,
+    )
+    positive_text = re.sub(
+        r"\b(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b"
+        r"\s*,?\s+(?:if|when|where|as)\s+"
+        r"(?:needed|necessary|appropriate|applicable|required)\b",
+        " ",
+        positive_text,
     )
     strict_patterns = [
         # "add tests", "with unit tests", "include test coverage", etc.
