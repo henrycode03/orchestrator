@@ -40,6 +40,9 @@ from app.services.orchestration.planning.workspace_identity import (
 from app.services.orchestration.phases.planning_guidance_enforcement import (
     collect_repair_guidance_block as _collect_repair_guidance,
 )
+from app.services.orchestration.phases.post_plan_source_grounding import (
+    ground_post_plan_source_materialization,
+)
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.state.session_state import mark_session_paused
@@ -1255,6 +1258,62 @@ def _abort_repeated_physical_src_import_repair(
         "status": "failed",
         "reason": failure_type,
     }
+
+
+def _ground_post_plan_sources_or_abort_missing(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: Any,
+    output_text: str,
+) -> dict[str, str] | None:
+    grounding = ground_post_plan_source_materialization(
+        ctx.orchestration_state.plan,
+        project_dir=ctx.orchestration_state.project_dir,
+        source_materialization=ctx.planner_source_materialization,
+        workspace_identity=_planner_workspace_identity(ctx),
+    )
+    if not grounding.ok:
+        failure_type = grounding.failure_code or "post_plan_grounding_failed"
+        failure_reason = "Deterministic post-Plan source grounding failed"
+        if grounding.failure_path:
+            failure_reason += f" for {grounding.failure_path}"
+        if grounding.failure_detail:
+            failure_reason += f": {grounding.failure_detail}"
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = failure_reason
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message="[ORCHESTRATION] Post-Plan source grounding failed closed",
+            details=grounding.to_dict(),
+        )
+        _emit_planning_diagnostics_contract_violation(
+            ctx,
+            reason=failure_type,
+            contract_violations=[failure_reason],
+            semantic_violation_codes=[failure_type],
+            contract_diagnostics=grounding.to_dict(),
+            output_text=output_text,
+            strategy_info="post_plan_source_grounding",
+        )
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=failure_reason,
+        )
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed(
+                "post-Plan source grounding failed"
+            )
+        return {"status": "failed", "reason": failure_type}
+    ctx.planner_source_materialization = grounding.materialization
+    return _abort_missing_source_materialization_repair(
+        ctx=ctx,
+        retry_state=retry_state,
+        output_text=output_text,
+    )
 
 
 def _abort_missing_source_materialization_repair(

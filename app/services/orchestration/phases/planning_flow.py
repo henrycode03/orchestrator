@@ -114,7 +114,7 @@ from app.services.orchestration.phases.planning_support import (
     MAX_PLANNING_RETRIES,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     _PlanningRetryState,
-    _abort_missing_source_materialization_repair,
+    _ground_post_plan_sources_or_abort_missing,
     apply_replace_anchor_realignment as _apply_replace_anchor_realignment,
     _abort_repeated_physical_src_import_repair,
     _abort_root_cause_oscillation_repair_loop,
@@ -1390,7 +1390,7 @@ def execute_planning_phase(
                     retry_state.consecutive_failures += 1
                     continue
                 raise
-            materialization_result = _abort_missing_source_materialization_repair(
+            materialization_result = _ground_post_plan_sources_or_abort_missing(
                 ctx=ctx,
                 retry_state=retry_state,
                 output_text=output_text,
