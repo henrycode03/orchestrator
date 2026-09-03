@@ -102,6 +102,13 @@ _logger = logging.getLogger(__name__)
 
 MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD = 6000
 DIRECT_PLANNING_PROMPT_CHAR_CAP = 12000
+# Planning's own generation contract (PHASE34-PGR1).  Planning is a structured
+# transformation task: it must spend its completion budget emitting the Plan
+# rather than hidden reasoning.  The budget matches the direct no-thinking
+# planning route (``_invoke_direct_no_thinking_planning``), the existing
+# Planning-owned bounded contract on this repository.
+PLANNING_GENERATION_MAX_OUTPUT_TOKENS = 2048
+PLANNING_GENERATION_CONTRACT_BACKENDS = frozenset({"openai_chat_completions"})
 OPENCLAW_SESSION_LOCK_MARKERS = (
     "session file locked",
     "sessions.json.lock",
@@ -425,6 +432,50 @@ class PlannerService:
             )
             return False
         return True
+
+    @staticmethod
+    def planning_generation_invocation_options(
+        runtime_service: Any,
+    ) -> Optional[RuntimeInvocationOptions]:
+        """Return Planning's declared generation contract, if the backend needs it.
+
+        The direct no-thinking planning route already bounds its own request,
+        but it only admits ``local_openclaw``/``direct_ollama``.  On the
+        chat-completions Planning backend the runtime call previously carried
+        no invocation options at all, so the provider default (reasoning
+        enabled, no completion budget) applied and reasoning consumed the whole
+        generation before any Plan text was emitted (PHASE34-PNO1).  Planning
+        declares the semantic requirement here; the adapter owns the wire
+        translation.
+        """
+
+        backend_metadata: Dict[str, Any] = {}
+        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
+        if callable(get_backend_metadata):
+            try:
+                backend_metadata = get_backend_metadata() or {}
+            except Exception:
+                backend_metadata = {}
+        backend_name = str(backend_metadata.get("backend") or "").strip()
+        if backend_name not in PLANNING_GENERATION_CONTRACT_BACKENDS:
+            return None
+        return RuntimeInvocationOptions(
+            reasoning_enabled=False,
+            max_output_tokens=PLANNING_GENERATION_MAX_OUTPUT_TOKENS,
+        )
+
+    @classmethod
+    def planning_generation_kwargs(cls, runtime_service: Any) -> Dict[str, Any]:
+        """Runtime ``execute_task`` kwargs carrying Planning's generation contract.
+
+        Empty for backends that do not take invocation options, so runtimes
+        without an invocation-options parameter keep their exact call shape.
+        """
+
+        options = cls.planning_generation_invocation_options(runtime_service)
+        if options is None:
+            return {}
+        return {"invocation_options": options}
 
     @staticmethod
     def _is_no_model_output_planning_timeout(exc: Exception) -> bool:
@@ -2356,6 +2407,7 @@ class PlannerService:
                         **minimal_prompt_diagnostics,
                     },
                     direct_planning_state=planning_attempt_state,
+                    **cls.planning_generation_kwargs(runtime_service),
                 )
             )
         except Exception as exc:
@@ -2476,6 +2528,7 @@ class PlannerService:
                         "minimal_prompt_timeout_reason": str(exc)[:240],
                     },
                     direct_planning_state=planning_attempt_state,
+                    **cls.planning_generation_kwargs(runtime_service),
                 )
             )
 

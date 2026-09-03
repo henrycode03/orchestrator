@@ -437,6 +437,7 @@ def execute_planning_phase(
                     "planning_prompt_tokens": planning_prompt_tokens,
                     "planning_attempt": "initial",
                 },
+                **PlannerService.planning_generation_kwargs(ctx.runtime_service),
             )
         )
 
