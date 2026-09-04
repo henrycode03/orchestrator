@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import ast
 import builtins
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.operations.file_ops_contract import (
     normalize_file_op_shape,
+)
+from app.services.orchestration.operations.source_region_identity import (
+    SourceRegionIdentity,
+    SourceRegionIdentityError,
+)
+from app.services.orchestration.planning.source_materialization import (
+    current_source_version_identity,
 )
 from app.services.project.source_imports import extract_python_test_contract
 
@@ -103,6 +111,45 @@ def _plan_python_source_syntax_issues(
                 candidate_content = current + str(operation.get("content") or "")
             else:
                 if "selector" in operation:
+                    if root is None or not isinstance(operation.get("new"), str):
+                        continue
+                    try:
+                        selector = SourceRegionIdentity.from_dict(
+                            operation.get("selector")
+                        )
+                        target = (root / relative_path).resolve()
+                        source_bytes = target.read_bytes()
+                        if (
+                            selector.canonical_path.value != relative_path
+                            or current_source_version_identity(target)
+                            != selector.expected_source_version
+                            or selector.end_byte > len(source_bytes)
+                        ):
+                            continue
+                        source_bytes[: selector.start_byte].decode("utf-8")
+                        source_bytes[: selector.end_byte].decode("utf-8")
+                        selected = source_bytes[selector.start_byte : selector.end_byte]
+                        if (
+                            hashlib.sha256(selected).hexdigest()
+                            != selector.selected_region_sha256
+                        ):
+                            continue
+                        candidate_content = (
+                            source_bytes[: selector.start_byte]
+                            + operation["new"].encode("utf-8")
+                            + source_bytes[selector.end_byte :]
+                        ).decode("utf-8")
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        SourceRegionIdentityError,
+                    ):
+                        continue
+                    simulated_files[relative_path] = candidate_content
+                    try:
+                        compile(candidate_content, relative_path, "exec")
+                    except SyntaxError as exc:
+                        _record_issue(relative_path, exc)
                     continue
                 old = operation.get("old")
                 new = operation.get("new")
