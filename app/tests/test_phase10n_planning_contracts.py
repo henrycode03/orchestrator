@@ -38,10 +38,10 @@ def test_phase10n_test_scaffold_guidance_is_in_planning_and_repair_prompts(
     )
 
     for prompt in (minimal, ultra, repair, compact):
-        assert "inspect nearby tests first" in prompt
-        assert "fixtures, factories, and domain constructors" in prompt
-        assert "raw dicts" in prompt
-        assert "Compile changed Python tests" in prompt
+        assert "Tests: inspect tests" in prompt
+        assert "supported test mutation" in prompt
+        assert "inspection, verification, or expected_files alone" in prompt
+        assert "Never invent paths" in prompt
         assert "real project check with a nonzero failure mode" in prompt
 
     assert len(compact) < PLANNING_REPAIR_PROMPT_MAX_CHARS

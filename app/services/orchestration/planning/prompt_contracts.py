@@ -138,10 +138,10 @@ def render_shell_fallback_limits() -> str:
 
 def render_test_scaffold_contract() -> str:
     return (
-        "For new/changed tests: inspect nearby tests first; match their imports, "
-        "fixtures, factories, and domain constructors. Do not replace project "
-        "objects with raw dicts unless existing tests do. Compile changed Python "
-        "tests before or with the final suite run."
+        "Tests: inspect tests; compile Python. Explicit new/regression intent "
+        "require a supported test mutation (append_file, replace_in_file, or authorized "
+        "write_file) per target; inspection, verification, or expected_files alone "
+        "do not satisfy it. Never invent paths."
     )
 
 
