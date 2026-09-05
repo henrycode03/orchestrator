@@ -19,9 +19,25 @@ from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
     HYDRATION_EXCLUDED_NAMES,
     LEGACY_BASELINE_DIR_NAME,
-    is_hydration_excluded_path,
     resolve_project_root,
 )
+
+
+ROLLBACK_ROOT_EXCLUDED_NAMES = frozenset(HYDRATION_EXCLUDED_NAMES)
+
+
+def is_rollback_excluded_path(relative_path: Path) -> bool:
+    """Keep protected Git internals and root runtime state out of rollback.
+
+    Hydration intentionally treats runtime-like names as excluded wherever
+    they occur. Rollback has a narrower ownership boundary: root runtime
+    names remain protected, while the same names nested under a Product
+    directory are preserved as Product content. Git internals stay protected
+    at every depth.
+    """
+
+    parts = Path(relative_path).parts
+    return ".git" in parts or (bool(parts) and parts[0] in ROLLBACK_ROOT_EXCLUDED_NAMES)
 
 
 class WorkspaceSnapshotService:
@@ -45,7 +61,7 @@ class WorkspaceSnapshotService:
             for task in self.db.query(Task).filter(Task.project_id == project.id).all()
             if getattr(task, "task_subfolder", None)
         }
-        reserved = set(HYDRATION_EXCLUDED_NAMES)
+        reserved = set(ROLLBACK_ROOT_EXCLUDED_NAMES)
         reserved.add(LEGACY_BASELINE_DIR_NAME)
         reserved.update(task_subfolders)
         return reserved
@@ -93,7 +109,7 @@ class WorkspaceSnapshotService:
                 first_part = relative.parts[0]
                 if first_part in reserved_names:
                     continue
-            if is_hydration_excluded_path(relative):
+            if is_rollback_excluded_path(relative):
                 continue
             destination = snapshot_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -167,13 +183,13 @@ class WorkspaceSnapshotService:
             path
             for path in snapshot_dir.rglob("*")
             if path.is_file()
-            and not is_hydration_excluded_path(path.relative_to(snapshot_dir))
+            and not is_rollback_excluded_path(path.relative_to(snapshot_dir))
         ]
         current_workspace_files = [
             path
             for path in target_dir.rglob("*")
             if path.is_file()
-            and not is_hydration_excluded_path(path.relative_to(target_dir))
+            and not is_rollback_excluded_path(path.relative_to(target_dir))
         ]
         if not snapshot_files and current_workspace_files:
             return {
@@ -193,7 +209,7 @@ class WorkspaceSnapshotService:
         for child in list(target_dir.iterdir()):
             if preserve_project_root_rules and child.name in reserved_names:
                 continue
-            if child.name in HYDRATION_EXCLUDED_NAMES:
+            if is_rollback_excluded_path(Path(child.name)):
                 continue
             if preserve_project_root_rules and child.name == AUTO_SNAPSHOT_DIR_NAME:
                 continue
