@@ -376,6 +376,7 @@ def arbitrate_planning_repair_candidate(
                         ctx=ctx,
                         retry_state=retry_state,
                         arbitration=arbitration,
+                        previous_plan=previous_plan,
                         bootstrap_verdict=bootstrap_verdict,
                         planning_phase_event=planning_phase_event,
                         output_text=output_text,
@@ -470,6 +471,17 @@ def arbitrate_planning_repair_candidate(
         if validation_knowledge_ctx:
             _log_knowledge_usage(ctx, validation_knowledge_ctx, used_in_prompt=True)
         retry_state.last_repair_reason = second_repair_reason.event_reason
+        # PER1: same reachability rule as the budgeted Bootstrap branch below --
+        # this candidate has been generated, parsed and rejected by arbitration,
+        # so persist its triplet before the next bounded repair is dispatched.
+        # Whether the flow retries is unchanged.
+        arbitration["arbitration_action"] = "syntax_retry"
+        _attach_failed_repair_triplet_evidence(
+            ctx=ctx,
+            arbitration=arbitration,
+            previous_plan=previous_plan,
+            output_text=output_text,
+        )
         planning_result = repair_planning_output(
             ctx=ctx,
             retry_state=retry_state,
@@ -811,6 +823,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
     ctx: OrchestrationRunContext,
     retry_state: _PlanningRetryState,
     arbitration: dict[str, Any],
+    previous_plan: Any,
     bootstrap_verdict: Any,
     planning_phase_event: dict[str, Any] | None,
     output_text: str,
@@ -877,6 +890,17 @@ def _reject_repair_candidate_by_bootstrap_contract(
         )
         arbitration["arbitration_action"] = "bootstrap_contract_repair"
         arbitration["reason"] = "repair_candidate_rejected_by_bootstrap_contract"
+        # PER1: this candidate has been generated, parsed and rejected. Persist
+        # its triplet now -- the terminal no-budget writer below is not reached
+        # when the retry budget opens the planning circuit breaker first, and
+        # the next dispatch overwrites nothing because each candidate carries
+        # its own repair-attempt identity.  Retry behaviour is unchanged.
+        _attach_failed_repair_triplet_evidence(
+            ctx=ctx,
+            arbitration=arbitration,
+            previous_plan=previous_plan,
+            output_text=output_text,
+        )
         try:
             append_orchestration_event(
                 project_dir=ctx.control_state_location,
@@ -951,7 +975,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
     _attach_failed_repair_triplet_evidence(
         ctx=ctx,
         arbitration=arbitration,
-        previous_plan=[],
+        previous_plan=previous_plan,
         output_text=output_text,
     )
     try:
@@ -1004,12 +1028,22 @@ def _attach_failed_repair_triplet_evidence(
     previous_plan: Any,
     output_text: str,
 ) -> None:
+    """Persist the failed repair triplet for the candidate just rejected.
+
+    Diagnostic only: an evidence failure never changes the planning verdict,
+    the retry budget, or any arbitration decision.  A missing pending record is
+    a join defect, so it is reported explicitly instead of passing silently.
+    """
+    repair_attempt = int(arbitration.get("repair_attempts") or 1)
+    evidence_seq = int(getattr(ctx, "planning_repair_evidence_seq", 0) or 0)
     try:
         artifact_ref = write_failed_planning_repair_triplet(
             project_dir=ctx.orchestration_state.project_dir,
+            control_state_location=ctx.control_state_location,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
-            repair_attempt=int(arbitration.get("repair_attempts") or 1),
+            evidence_seq=evidence_seq,
+            repair_attempt=repair_attempt,
             previous_plan=previous_plan,
             repaired_plan=ctx.orchestration_state.plan,
             repaired_output_text=output_text,
@@ -1023,6 +1057,22 @@ def _attach_failed_repair_triplet_evidence(
         return
     if artifact_ref:
         arbitration["planning_repair_evidence"] = artifact_ref
+        return
+    ctx.logger.warning(
+        "[ORCHESTRATION] No pending planning repair triplet for "
+        "session_id=%s task_id=%s evidence_seq=%s repair_attempt=%s (%s); "
+        "failed-repair evidence was not persisted for this candidate.",
+        ctx.session_id,
+        ctx.task_id,
+        evidence_seq,
+        repair_attempt,
+        arbitration.get("arbitration_action"),
+    )
+    arbitration["planning_repair_evidence_missing"] = {
+        "evidence_seq": evidence_seq,
+        "repair_attempt": repair_attempt,
+        "reason": "no_pending_planning_repair_triplet",
+    }
 
 
 def _emit_planning_repair_arbitration(

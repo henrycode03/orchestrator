@@ -211,7 +211,7 @@ def test_failed_planning_repair_triplet_evidence_is_redacted(tmp_path):
         project_dir=tmp_path,
         session_id=11,
         task_id=22,
-        repair_attempt=1,
+        evidence_seq=1,
         previous_plan_text=json.dumps(previous_plan),
         repair_prompt=(
             "Repair this plan. OPENAI_API_KEY=sk-testsecret1234567890 "
@@ -223,8 +223,10 @@ def test_failed_planning_repair_triplet_evidence_is_redacted(tmp_path):
 
     artifact_ref = write_failed_planning_repair_triplet(
         project_dir=tmp_path,
+        control_state_location=tmp_path,
         session_id=11,
         task_id=22,
+        evidence_seq=1,
         repair_attempt=1,
         previous_plan=previous_plan,
         repaired_plan=repaired_plan,
@@ -243,6 +245,7 @@ def test_failed_planning_repair_triplet_evidence_is_redacted(tmp_path):
         / "planning-repair-evidence"
         / ("session_11_task_22_repair_attempt_1_failed.json")
     )
+    assert artifact_ref["artifact_path"] == str(artifact_path)
     payload = json.loads(artifact_path.read_text())
     serialized = json.dumps(payload)
 

@@ -50,6 +50,7 @@ FAMILY_FINGERPRINTS = "fingerprints"
 FAMILY_CHANGE_SETS = "change-sets"
 FAMILY_TASK_REPORTS = "task-reports"
 FAMILY_ENGINEERING_CONTEXT = "engineering-context"
+FAMILY_PLANNING_REPAIR_EVIDENCE = "planning-repair-evidence"
 
 #: state_manager.json is a single file directly under the control-state root.
 STATE_MANAGER_FILENAME = "state_manager.json"

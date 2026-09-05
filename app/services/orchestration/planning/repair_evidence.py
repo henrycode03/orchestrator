@@ -9,10 +9,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from app.services.workspace.control_state_paths import (
+    FAMILY_PLANNING_REPAIR_EVIDENCE,
+    control_state_family_dir,
+)
 from app.services.workspace.permissions import ensure_shared_permissions
 
 
-_PendingKey = Tuple[str, int, int, int]
+_PendingKey = Tuple[str, int, int, int]  # project_dir, session, task, seq
 _PENDING_TRIPLETS: Dict[_PendingKey, Dict[str, Any]] = {}
 
 _SECRET_KEY_RE = re.compile(r"(api[_-]?key|token|secret|password|authorization)", re.I)
@@ -31,22 +35,27 @@ def record_pending_planning_repair_triplet(
     project_dir: Any,
     session_id: Optional[int],
     task_id: Optional[int],
-    repair_attempt: int,
+    evidence_seq: int,
     previous_plan_text: str,
     repair_prompt: str,
     repaired_plan_text: str,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Keep a repair triplet in memory until arbitration decides it failed."""
+    """Keep a repair triplet in memory until arbitration decides it failed.
+
+    ``evidence_seq`` is the identity of this one repair generation, minted by
+    the single repair dispatcher.  The arbitration writer consumes the record
+    under exactly this key; there is deliberately no fallback lookup.
+    """
 
     if session_id is None or task_id is None:
         return
-    key = _pending_key(project_dir, session_id, task_id, repair_attempt)
+    key = _pending_key(project_dir, session_id, task_id, evidence_seq)
     _PENDING_TRIPLETS[key] = {
         "project_dir": str(project_dir),
         "session_id": session_id,
         "task_id": task_id,
-        "repair_attempt": repair_attempt,
+        "evidence_seq": evidence_seq,
         "previous_plan_text": previous_plan_text,
         "repair_prompt": repair_prompt,
         "repaired_plan_text": repaired_plan_text,
@@ -58,22 +67,33 @@ def record_pending_planning_repair_triplet(
 def write_failed_planning_repair_triplet(
     *,
     project_dir: Any,
+    control_state_location: Any,
     session_id: int,
     task_id: int,
+    evidence_seq: int,
     repair_attempt: int,
     previous_plan: Any,
     repaired_plan: Any,
     repaired_output_text: str,
     arbitration: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Persist a redacted triplet artifact for failed repair arbitration."""
+    """Persist a redacted triplet artifact for failed repair arbitration.
 
-    key = _pending_key(project_dir, session_id, task_id, repair_attempt)
+    ``project_dir`` is the repair-generation context (the Runtime Workspace)
+    and is used only to join this write to the pending record the Planner
+    created.  ``control_state_location`` is the durable destination, so the
+    artifact outlives Runtime Workspace disposal exactly like the event
+    journal and state snapshots already do.
+    """
+
+    key = _pending_key(project_dir, session_id, task_id, evidence_seq)
     pending = _PENDING_TRIPLETS.pop(key, None)
     if pending is None:
         return None
 
-    artifact_dir = Path(project_dir) / ".agent" / "planning-repair-evidence"
+    artifact_dir = control_state_family_dir(
+        control_state_location, FAMILY_PLANNING_REPAIR_EVIDENCE
+    )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     ensure_shared_permissions(artifact_dir)
 
@@ -136,14 +156,15 @@ def write_failed_planning_repair_triplet(
         "artifact_type": payload["artifact_type"],
         "schema_version": payload["schema_version"],
         "repair_attempt": repair_attempt,
+        "evidence_seq": evidence_seq,
         "redacted": True,
     }
 
 
 def _pending_key(
-    project_dir: Any, session_id: int, task_id: int, repair_attempt: int
+    project_dir: Any, session_id: int, task_id: int, evidence_seq: int
 ) -> _PendingKey:
-    return (str(Path(project_dir)), int(session_id), int(task_id), int(repair_attempt))
+    return (str(Path(project_dir)), int(session_id), int(task_id), int(evidence_seq))
 
 
 def _best_effort_json_or_text(value: Any, *, fallback: Any) -> Any:

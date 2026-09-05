@@ -364,6 +364,9 @@ class OrchestrationRunContext:
     # Request-local advisory evidence; never persisted as planning authority.
     read_only_observation: Any = None
     read_only_discovery_completed: bool = False
+    # PER1: one stable evidence identity per Planning repair generation, minted
+    # by the single repair dispatcher and consumed by the arbitration writer.
+    planning_repair_evidence_seq: int = 0
 
     @property
     def control_state_location(self) -> ControlStateLocation:

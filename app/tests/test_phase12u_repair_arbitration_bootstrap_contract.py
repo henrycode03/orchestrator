@@ -144,6 +144,7 @@ def _make_ctx(
         emit_live=MagicMock(),
         db=MagicMock(),
         restore_workspace_snapshot_if_needed=None,
+        control_state_location=project_dir,
     )
     return ctx
 
@@ -226,6 +227,7 @@ def test_rejection_diagnostic_emitted_with_correct_fields(tmp_path):
         ctx=ctx,
         retry_state=retry_state,
         arbitration=arbitration,
+        previous_plan=[],
         bootstrap_verdict=bootstrap_verdict,
         planning_phase_event=None,
         output_text="[]",
@@ -272,6 +274,7 @@ def test_rejection_does_not_emit_classified_candidate_progress(tmp_path):
         ctx=ctx,
         retry_state=retry_state,
         arbitration=arbitration,
+        previous_plan=[],
         bootstrap_verdict=bootstrap_verdict,
         planning_phase_event=None,
         output_text="[]",

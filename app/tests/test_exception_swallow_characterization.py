@@ -378,6 +378,7 @@ def test_reject_repair_candidate_event_write_failure_continues(tmp_path, monkeyp
         ctx=ctx,
         retry_state=retry_state,
         arbitration=arbitration,
+        previous_plan=[],
         bootstrap_verdict=bootstrap_verdict,
         planning_phase_event=None,
         output_text="[]",

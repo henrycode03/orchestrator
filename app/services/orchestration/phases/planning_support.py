@@ -250,7 +250,20 @@ def _repair_planning_output(
     prompt_profile: str = "default",
     knowledge_context: Any | None = None,
 ) -> Dict[str, Any]:
+    """Dispatch one Planning repair generation.
+
+    PER1: this is the single funnel every Planning repair dispatch goes
+    through, so it mints the one evidence identity for the candidate this call
+    produces.  ``planning_repair_evidence_seq`` is carried on the run context
+    and consumed by the arbitration writer that persists the failed triplet for
+    that same candidate, which is always the most recent generation.  Nothing
+    here changes what is repaired, retried, or arbitrated.
+    """
     from app.task_intent import render_create_only_guidance
+
+    ctx.planning_repair_evidence_seq = (
+        int(getattr(ctx, "planning_repair_evidence_seq", 0) or 0) + 1
+    )
 
     guidance_block = _collect_repair_guidance(ctx)
     intent_guidance = render_create_only_guidance(
@@ -285,6 +298,7 @@ def _repair_planning_output(
         knowledge_context=knowledge_context,
         session_id=ctx.session_id,
         task_id=ctx.task_id,
+        repair_evidence_attempt=ctx.planning_repair_evidence_seq,
         guidance_block=guidance_block,
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,

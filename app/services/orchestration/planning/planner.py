@@ -2555,6 +2555,7 @@ class PlannerService:
         _no_output_retry_used: bool = False,
         _repair_attempt_number: int = 1,
         _compact_no_output_retry: bool = False,
+        repair_evidence_attempt: Optional[int] = None,
         guidance_block: str = "",
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
@@ -2959,7 +2960,15 @@ class PlannerService:
                 project_dir=project_dir,
                 session_id=session_id,
                 task_id=task_id,
-                repair_attempt=_repair_attempt_number,
+                # PER1: the evidence join uses the one identity the repair
+                # dispatcher minted for this generation, not the Planner-local
+                # no-output retry counter, so the arbitration writer that
+                # persists this triplet looks it up under the same key.
+                evidence_seq=(
+                    repair_evidence_attempt
+                    if repair_evidence_attempt is not None
+                    else _repair_attempt_number
+                ),
                 previous_plan_text=malformed_output,
                 repair_prompt=repair_prompt,
                 repaired_plan_text=str(result.get("output") or ""),
@@ -3042,6 +3051,7 @@ class PlannerService:
                         lock_wait_seconds=lock_wait_seconds,
                         _no_output_retry_used=True,
                         _repair_attempt_number=_repair_attempt_number + 1,
+                        repair_evidence_attempt=repair_evidence_attempt,
                         _compact_no_output_retry=True,
                         guidance_block=guidance_block,
                         workspace_identity=workspace_identity,
