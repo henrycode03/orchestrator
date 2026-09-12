@@ -173,14 +173,24 @@ class Settings(BaseSettings):
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     # PHASE35-PGI3: provider-injected typed grounding remains fail-safe off.
-    # PHASE35-BPR1 deployment policy.  The provider-request limit bounds
-    # exploration/corrective turns only; the coordinator additionally reserves
-    # exactly one non-renewable terminal-assessment turn, so the truthful total
-    # provider ceiling is this value plus one.  The coordinator stays inert
-    # until ENABLE_TYPED_GROUNDING_COORDINATOR is turned on.
+    # PHASE35-BPR1 deployment policy, PHASE35-CPR1 correction partition,
+    # PHASE36-GB2 three-action budget.  The provider-request limit bounds
+    # exploration turns only; the coordinator additionally reserves exactly one
+    # non-renewable terminal-assessment turn and exactly one non-renewable
+    # mechanical correction turn, so the truthful total provider ceiling is
+    # this value plus two.  The coordinator stays inert until
+    # ENABLE_TYPED_GROUNDING_COORDINATOR is turned on.
+    #
+    # The two limits below are a pair and must move together.  Exploration
+    # turns upper-bound repository actions, because the reserved terminal turn
+    # can never carry an action, so raising the step ceiling alone is inert.
+    # Three supports the ordinary cross-file shape adjudicated in PHASE36-GB1:
+    # inspect_file, same-file resolve_structure, one cross-file
+    # resolve_structure.  It is a ceiling, not a quota; early SUFFICIENT after
+    # one or two actions still terminates immediately.
     ENABLE_TYPED_GROUNDING_COORDINATOR: bool = False
-    TYPED_GROUNDING_MAX_STEPS: Optional[int] = 2
-    TYPED_GROUNDING_MAX_PROVIDER_REQUESTS: Optional[int] = 2
+    TYPED_GROUNDING_MAX_STEPS: Optional[int] = 3
+    TYPED_GROUNDING_MAX_PROVIDER_REQUESTS: Optional[int] = 3
     # Opt-in deployment contract for machines that intentionally expose one
     # direct inference runtime and one generation model to every lifecycle
     # role.  False preserves the existing role-specific GX10 configuration.

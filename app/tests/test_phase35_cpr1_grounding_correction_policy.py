@@ -522,8 +522,8 @@ def test_total_provider_ceiling_includes_the_correction_allowance():
 def test_production_integration_keeps_the_shipped_semantic_budgets():
     from app.config import settings
 
-    assert settings.TYPED_GROUNDING_MAX_PROVIDER_REQUESTS == 2
-    assert settings.TYPED_GROUNDING_MAX_STEPS == 2
+    assert settings.TYPED_GROUNDING_MAX_PROVIDER_REQUESTS == 3
+    assert settings.TYPED_GROUNDING_MAX_STEPS == 3
     assert settings.ENABLE_TYPED_GROUNDING_COORDINATOR is False
 
 
