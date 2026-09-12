@@ -31,6 +31,11 @@ MAX_FILE_BYTES = 4096
 MAX_FILE_LINES = 200
 MAX_STRUCTURAL_REGION_BYTES = 8192
 MAX_LINE_NUMBER = 1_000_000
+# PHASE36-GR2: the narrowest deterministic bound on the structural locator map
+# rendered into provider-visible state.  The map is navigation metadata that
+# lets a provider aim a resolve_structure locator at a region the bounded
+# inspect_file window did not reach; it is never substantive source evidence.
+MAX_STRUCTURAL_SYMBOLS = 40
 
 SCHEMA_VERSION = "grounding-observation/1"
 PROVENANCE_MODEL_REQUEST = "model_request"

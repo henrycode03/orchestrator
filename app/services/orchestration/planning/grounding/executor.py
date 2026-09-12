@@ -38,6 +38,7 @@ from .contracts import (
     MAX_HIT_COUNT,
     MAX_OBSERVATION_BYTES,
     MAX_SNIPPET_CHARS,
+    MAX_STRUCTURAL_SYMBOLS,
     MountedRouteLocator,
     ResolveStructureAction,
     SearchTextAction,
@@ -582,6 +583,46 @@ class GroundingExecutor:
             result_limit=MAX_HIT_COUNT,
         )
 
+    def _truncated_structure_facts(self, path: str) -> dict[str, object]:
+        """Return locator metadata for a file whose content window truncated.
+
+        PHASE36-GR2.  ``inspect_file`` reads at most ``MAX_FILE_BYTES``, so a
+        larger file arrives as a head slice that usually stops mid-statement and
+        cannot be parsed.  The previous behavior discarded structure entirely at
+        exactly the moment it was most needed, leaving the provider with no way
+        to name the region it had not seen.  The structural map is therefore
+        derived from a separate full-source read under the existing
+        deterministic parse bound, while ``bounded_content`` stays truncated.
+
+        ``parse_status`` remains ``source_truncated`` because the *content* is
+        still truncated; only navigation metadata is added.  The map is never
+        promoted as evidence: substantive status is decided by
+        ``is_substantive_observation`` from bounded content and action identity,
+        never from ``structural_facts``.  Any failure degrades to the previous
+        bare marker rather than failing the observation.
+        """
+
+        facts: dict[str, object] = {"parse_status": "source_truncated"}
+        try:
+            document = self._read_source(path)
+            complete = extract_structural_facts(document.path, document.raw)
+        except (
+            GroundingExecutionError,
+            GroundingRequestRejection,
+            PythonStructureError,
+        ):
+            return facts
+        symbols = tuple(complete.get("top_level_symbols", ()))
+        routes = tuple(complete.get("route_decorators", ()))
+        facts["structure_scope"] = "complete_file"
+        facts["top_level_symbols"] = symbols[:MAX_STRUCTURAL_SYMBOLS]
+        facts["route_decorators"] = routes[:MAX_STRUCTURAL_SYMBOLS]
+        facts["structure_truncated"] = (
+            len(symbols) > MAX_STRUCTURAL_SYMBOLS
+            or len(routes) > MAX_STRUCTURAL_SYMBOLS
+        )
+        return facts
+
     def _execute_inspect_file(
         self,
         request: GroundingRequest,
@@ -617,7 +658,7 @@ class GroundingExecutor:
             bounded = b"".join(lines[:MAX_FILE_LINES])
             truncated = True
         if truncated:
-            facts = {"parse_status": "source_truncated"}
+            facts = self._truncated_structure_facts(canonical.value)
         else:
             try:
                 facts = extract_structural_facts(document.path, document.raw)

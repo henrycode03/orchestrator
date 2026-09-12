@@ -28,6 +28,7 @@ from .contracts import (
     GroundingOutcome,
     GroundingRequest,
     GroundingRequestRejection,
+    MAX_STRUCTURAL_SYMBOLS,
     SUBSTANTIVE_EVIDENCE_ACTIONS,
     is_substantive_observation,
     parse_grounding_request,
@@ -244,6 +245,32 @@ def transition_grounding_state(
     return _transition(state, target)
 
 
+def _structural_locators(observation: GroundingObservation) -> list[dict[str, Any]]:
+    """Project one observation's symbol map into bounded provider-visible form.
+
+    PHASE36-GR2.  A provider that received a truncated ``inspect_file`` window
+    needs enough structure to aim a ``resolve_structure`` locator at the region
+    it did not see.  Only the four locator fields the existing structural
+    contract already supports are rendered, bounded by ``MAX_STRUCTURAL_SYMBOLS``.
+    This is navigation metadata, never substantive source evidence.
+    """
+
+    symbols = observation.structural_facts.get("top_level_symbols") or ()
+    locators: list[dict[str, Any]] = []
+    for symbol in tuple(symbols)[:MAX_STRUCTURAL_SYMBOLS]:
+        if not isinstance(symbol, Mapping):
+            continue
+        locators.append(
+            {
+                "name": symbol.get("name"),
+                "kind": symbol.get("kind"),
+                "start_line": symbol.get("start_line"),
+                "end_line": symbol.get("end_line"),
+            }
+        )
+    return locators
+
+
 def render_grounding_state(state: GroundingCoordinatorState) -> str:
     """Render bounded typed state for the next provider turn."""
 
@@ -279,6 +306,14 @@ def render_grounding_state(state: GroundingCoordinatorState) -> str:
                     for hit in observation.hits
                 ],
                 "structural_identity": _plain(observation.structural_identity),
+                # PHASE36-GR2: a truncated observation must announce itself.
+                # bounded_content is a bounded region of the source, not the
+                # whole file, and evidence for unseen regions cannot be drawn
+                # from it.  structural_locators names what was not returned so
+                # the provider can request it with resolve_structure.
+                "truncated": observation.truncated,
+                "returned_bytes": len(observation.bounded_content),
+                "structural_locators": _structural_locators(observation),
                 "bounded_content": observation.bounded_content.decode(
                     "utf-8", errors="replace"
                 )[:4096],
@@ -1282,6 +1317,11 @@ class GroundingCoordinator:
                 "outcome": observation.outcome.value,
                 "normalized_request": _plain(request.normalized_payload),
                 "evidence_bytes": observation.budget_delta.source_evidence_bytes,
+                # PHASE36-GR2: durable reconstruction of the region-expansion
+                # sequence needs to distinguish a bounded window from a whole
+                # file.  Without it, evidence_bytes at the cap is only
+                # circumstantial.  One boolean; no accounting field changes.
+                "truncated": observation.truncated,
                 # The coordinator is authoritative for cumulative accounting:
                 # _append_observation applies substantive path deduplication
                 # before returning the state used by this event.

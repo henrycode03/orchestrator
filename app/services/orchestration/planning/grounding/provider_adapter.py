@@ -47,13 +47,67 @@ FIRST_TURN_WIRE_EXAMPLES = (
     '"decorator_path":"/items"}}',
 )
 
+# PHASE36-GR2: the post-observation turn is where region expansion happens, so
+# it must show the region action, not only inspect_file.  Offering inspect_file
+# as the sole next_action example left re-requesting the same path as the only
+# visible same-file move, and inspect_file is a deterministic head-of-file slice
+# that returns byte-identical content for an unchanged path.
 POST_OBSERVATION_WIRE_EXAMPLES = (
     '{"decision":"SUFFICIENT","cited_observation_ids":'
     '["grounding-observation-..."],"rationale":"..."}',
     '{"decision":"NEED_MORE_EVIDENCE","next_action":'
     '{"action":"inspect_file","path":"app/example.py"},'
     '"rationale":"..."}',
+    '{"decision":"NEED_MORE_EVIDENCE","next_action":'
+    '{"action":"resolve_structure","relation":"symbol_definition",'
+    '"locator":{"path":"app/example.py","name":"target"}},'
+    '"rationale":"..."}',
+    '{"decision":"NEED_MORE_EVIDENCE","next_action":'
+    '{"action":"resolve_structure","relation":"enclosing_symbol",'
+    '"locator":{"path":"app/example.py","line":42}},'
+    '"rationale":"..."}',
     '{"decision":"INSUFFICIENT","reason":"..."}',
+)
+
+#: The exact same-file region-expansion contract, restated on the turn that
+#: needs it.  Field names are taken from the existing closed action schema; no
+#: field is invented here.
+REGION_EXPANSION_CONTRACT = (
+    "EVIDENCE COVERAGE.\n"
+    "Each observation in state carries truncated and returned_bytes.\n"
+    "truncated=true means bounded_content is only a bounded region of that\n"
+    "file, taken from its beginning. The rest of the file was NOT returned.\n"
+    "A truncated observation is evidence only for the region it actually\n"
+    "contains. It is not evidence about code it did not return.\n\n"
+    "inspect_file is the bounded initial observation of a file. Its fields are\n"
+    "exactly action, path: it has no offset, range, line, or symbol field, so\n"
+    "inspect_file on a path already observed returns identical content and\n"
+    "yields no new evidence.\n"
+    "resolve_structure is targeted same-file region expansion. Its fields are\n"
+    "exactly action, relation, locator. relation is exactly symbol_definition,\n"
+    "enclosing_symbol, or mounted_route, and the locator fields must exactly\n"
+    "match the selected relation:\n"
+    "    symbol_definition locator fields are exactly path, name\n"
+    "    enclosing_symbol  locator fields are exactly path, line\n"
+    "    mounted_route     locator fields are exactly path, method, decorator_path\n"
+    "Each observation also carries structural_locators: the name, kind,\n"
+    "start_line and end_line of symbols in the file, including symbols outside\n"
+    "the returned region. structural_locators is navigation metadata only and\n"
+    "can never itself be cited as evidence; use it to name a region and obtain\n"
+    "that region with resolve_structure.\n\n"
+    "When the current observation is truncated and a structural locator names\n"
+    "the relevant symbol, prefer resolve_structure on that symbol over\n"
+    "repeating an identical inspect_file."
+)
+
+#: Applies to every turn that may return SUFFICIENT.
+SUFFICIENCY_COVERAGE_RULE = (
+    "SUFFICIENT requires substantive evidence that actually covers the\n"
+    "behavior being grounded. A file being relevant is not coverage: if the\n"
+    "implementation you rely on lies outside every region actually returned,\n"
+    "the evidence does not yet ground the task. Cite the observation that\n"
+    "contains the implementation, obtain it with resolve_structure, or return\n"
+    "INSUFFICIENT."
 )
 
 TERMINAL_ASSESSMENT_WIRE_EXAMPLES = (
@@ -171,6 +225,8 @@ def render_post_observation_prompt(context: GroundingDecisionContext) -> str:
         "NEED_MORE_EVIDENCE with inspect_file or resolve_structure is the normal\n"
         "way to obtain substantive evidence.\n"
         "INSUFFICIENT remains legal when no candidate supports deeper inspection.\n\n"
+        f"{REGION_EXPANSION_CONTRACT}\n\n"
+        f"{SUFFICIENCY_COVERAGE_RULE}\n\n"
         "## IMMUTABLE OPERATOR TASK\n"
         f"{context.operator_task}\n\n"
         "## TYPED PRIOR OBSERVATIONS AND STATE\n"
@@ -201,6 +257,7 @@ def render_terminal_assessment_prompt(context: GroundingDecisionContext) -> str:
         "SUFFICIENT requires at least one cited substantive observation, meaning\n"
         "inspect_file or resolve_structure. Search-only evidence cannot satisfy\n"
         "final grounding, because it carries no file's source.\n"
+        f"{SUFFICIENCY_COVERAGE_RULE}\n"
         "If the gathered evidence does not ground the task, return INSUFFICIENT.\n\n"
         "## IMMUTABLE OPERATOR TASK\n"
         f"{context.operator_task}\n\n"
