@@ -128,7 +128,7 @@ def _service(config: Path, monkeypatch) -> OpenClawSessionService:
         adaptation_profile="openclaw_default",
     )
     service._workspace_binding = None
-    service._strict_planning_config_dir = None
+    service._strict_planning_binding = None
     service._openclaw_config_path_override = None
     service._runtime_executor_context = None
     service._runtime_runner_agent_id = None

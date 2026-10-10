@@ -133,7 +133,7 @@ def read_process_start_ticks(pid: int) -> Optional[int]:
 
 
 def _binding_metadata(
-    tmp_dir: Path, binding_id: str, context: RuntimeExecutorContext
+    tmp_dir: Path, binding_id: str, task_execution_id: Any
 ) -> Dict[str, Any]:
     pid = os.getpid()
     return {
@@ -149,7 +149,7 @@ def _binding_metadata(
         "owner_pid_start_ticks": read_process_start_ticks(pid),
         "owner_pid_namespace": read_pid_namespace(),
         "boot_id": read_boot_id(),
-        "task_execution_id": getattr(context, "task_execution_id", None),
+        "task_execution_id": task_execution_id,
         "liveness": "exclusive_flock:" + BINDING_LOCK_NAME,
         "cleanup_eligibility": (
             "only when the binding lock is free and metadata revalidates; "
@@ -533,28 +533,8 @@ def bind_openclaw_workspace(
             "operator config; refusing ambiguous identity selection"
         )
 
-    tmp_dir = Path(
-        tempfile.mkdtemp(prefix=BINDING_DIR_PREFIX, dir=_ensure_binding_artifact_root())
-    )
-    binding_id = uuid.uuid4().hex
-    lock_fd: Optional[int] = None
-    try:
-        # Take the liveness lock before anything else exists in the directory
-        # so a reconciler can never observe valid metadata with a free lock
-        # while this process is alive.
-        lock_fd = os.open(
-            tmp_dir / BINDING_LOCK_NAME,
-            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-        )
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _write_private_file(
-            tmp_dir / BINDING_METADATA_NAME,
-            json.dumps(_binding_metadata(tmp_dir, binding_id, context), indent=2),
-        )
-        state_dir = tmp_dir / "state"
+    def build_config(tmp_dir: Path) -> Dict[str, Any]:
         agent_dir = tmp_dir / "agent"
-        state_dir.mkdir(mode=0o700)
         agent_dir.mkdir(mode=0o700)
         main_agent = next(
             (
@@ -583,8 +563,77 @@ def bind_openclaw_workspace(
             resolved_model_ref=resolved_model_ref,
             context=context,
             agent_dir=agent_dir,
-            state_dir=state_dir,
+            state_dir=tmp_dir / "state",
         )
+        return bound_config
+
+    binding = create_managed_binding(
+        agent_id=agent_id,
+        task_execution_id=getattr(context, "task_execution_id", None),
+        build_config=build_config,
+        persistent_workspace=(
+            legacy_selection.persistent_workspace if legacy_selection else None
+        ),
+    )
+
+    logger.info(
+        "[EXECUTOR_WORKSPACE_BINDING] Bound OpenClaw agent %s workspace "
+        "%s -> %s for task_execution_id=%s (template workspace %s; ephemeral config at %s; "
+        "persistent %s untouched; binding_id=%s)",
+        agent_id,
+        legacy_selection.persistent_workspace if legacy_selection else None,
+        context.runtime_workspace,
+        context.task_execution_id,
+        legacy_selection.persistent_workspace if legacy_selection else None,
+        binding.config_path,
+        real_config_path,
+        binding.binding_id,
+    )
+    return binding
+
+
+def create_managed_binding(
+    *,
+    agent_id: str,
+    task_execution_id: Any,
+    build_config: Callable[[Path], Dict[str, Any]],
+    persistent_workspace: Optional[Path] = None,
+) -> ExecutorWorkspaceBinding:
+    """Create one managed, locked, owner-only invocation config directory.
+
+    Lifecycle only (Phase 37 Pre-B-F2C): every per-invocation OpenClaw config
+    copy shares this ownership contract -- managed root, lock-first flock,
+    ownership metadata, a ``state/`` dir, a 0600 ``openclaw.json``, forced-
+    termination release and reconciler visibility. ``build_config`` receives
+    the directory once the lock and metadata exist, may add entries to it,
+    and returns the config to write. Any failure removes the directory and
+    drops the lock before re-raising, so nothing is left registered.
+    """
+
+    tmp_dir = Path(
+        tempfile.mkdtemp(prefix=BINDING_DIR_PREFIX, dir=_ensure_binding_artifact_root())
+    )
+    binding_id = uuid.uuid4().hex
+    lock_fd: Optional[int] = None
+    try:
+        # Take the liveness lock before anything else exists in the directory
+        # so a reconciler can never observe valid metadata with a free lock
+        # while this process is alive.
+        lock_fd = os.open(
+            tmp_dir / BINDING_LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _write_private_file(
+            tmp_dir / BINDING_METADATA_NAME,
+            json.dumps(
+                _binding_metadata(tmp_dir, binding_id, task_execution_id), indent=2
+            ),
+        )
+        state_dir = tmp_dir / "state"
+        state_dir.mkdir(mode=0o700)
+        bound_config = build_config(tmp_dir)
         config_path = tmp_dir / "openclaw.json"
         # The copy may carry provider settings from the operator config:
         # create it owner-only before writing any content.
@@ -603,32 +652,15 @@ def bind_openclaw_workspace(
             _lock_fd=lock_fd,
         ).release()
         raise
-    environment = {
-        "OPENCLAW_CONFIG_PATH": str(config_path),
-        "OPENCLAW_STATE_DIR": str(state_dir),
-    }
-
-    logger.info(
-        "[EXECUTOR_WORKSPACE_BINDING] Bound OpenClaw agent %s workspace "
-        "%s -> %s for task_execution_id=%s (template workspace %s; ephemeral config at %s; "
-        "persistent %s untouched; binding_id=%s)",
-        agent_id,
-        legacy_selection.persistent_workspace if legacy_selection else None,
-        context.runtime_workspace,
-        context.task_execution_id,
-        legacy_selection.persistent_workspace if legacy_selection else None,
-        config_path,
-        real_config_path,
-        binding_id,
-    )
     binding = ExecutorWorkspaceBinding(
         agent_id=agent_id,
-        persistent_workspace=(
-            legacy_selection.persistent_workspace if legacy_selection else None
-        ),
+        persistent_workspace=persistent_workspace,
         config_path=config_path,
         _tmp_dir=tmp_dir,
-        environment=environment,
+        environment={
+            "OPENCLAW_CONFIG_PATH": str(config_path),
+            "OPENCLAW_STATE_DIR": str(state_dir),
+        },
         binding_id=binding_id,
         _lock_fd=lock_fd,
     )

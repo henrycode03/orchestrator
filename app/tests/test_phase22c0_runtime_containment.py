@@ -278,7 +278,7 @@ def test_explicit_dedicated_planning_agent_binds_without_project_match(
     )
     service = object.__new__(OpenClawSessionService)
     service._openclaw_config_path_override = None
-    service._strict_planning_config_dir = None
+    service._strict_planning_binding = None
     service._last_selected_openclaw_agent_id = None
     service._workspace_binding = None
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))

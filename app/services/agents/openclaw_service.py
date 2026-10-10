@@ -72,6 +72,7 @@ from app.services.orchestration.execution.executor_workspace_binding import (
     ExecutorWorkspaceBinding,
     ExecutorWorkspaceBindingError,
     bind_openclaw_workspace,
+    create_managed_binding,
 )
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
@@ -374,7 +375,7 @@ class OpenClawSessionService:
         self._runtime_executor_context: Optional[Any] = None
         self._runtime_runner_agent_id: Optional[str] = None
         self._runtime_workspace_previous_cwd_override: Optional[str] = None
-        self._strict_planning_config_dir: tempfile.TemporaryDirectory | None = None
+        self._strict_planning_binding: Optional[ExecutorWorkspaceBinding] = None
         self.runtime_configuration = runtime_configuration
         self.backend_role: Optional[str] = (
             runtime_configuration.role.value if runtime_configuration else None
@@ -689,7 +690,7 @@ class OpenClawSessionService:
             _fail(f"Unable to read OpenClaw configuration for runner selection: {exc}")
 
         runtime_context = getattr(self, "_runtime_executor_context", None)
-        strict_binding = getattr(self, "_strict_planning_config_dir", None) is not None
+        strict_binding = getattr(self, "_strict_planning_binding", None) is not None
         if runtime_context is None and not strict_binding:
             _fail(
                 "OpenClaw invocation has no Runtime Workspace binding; refusing "
@@ -868,6 +869,11 @@ class OpenClawSessionService:
         OpenClaw state.
         """
 
+        if getattr(self, "_strict_planning_binding", None) is not None:
+            raise OpenClawAgentSelectionError(
+                "A dedicated Protocol v2 planning binding is already active; "
+                "refusing a second owner"
+            )
         real_config_path = self._openclaw_config_path()
         try:
             config = json.loads(real_config_path.read_text(encoding="utf-8"))
@@ -896,32 +902,42 @@ class OpenClawSessionService:
                 config,
                 runtime_configuration.model_family,
             )
-        config_dir = tempfile.TemporaryDirectory(prefix="protocol-v2-planning-")
-        self._strict_planning_config_dir = config_dir
-        config_path = Path(config_dir.name) / "openclaw.json"
-        state_dir = Path(config_dir.name) / "state"
-        state_dir.mkdir(parents=True, exist_ok=True)
-        selected["workspace"] = str(runtime_workspace)
-        selected["agentDir"] = str(Path(config_dir.name) / "agent")
-        if model_ref is not None:
-            selected["model"] = {"primary": model_ref, "fallbacks": []}
-        defaults = (config.setdefault("agents", {})).setdefault("defaults", {})
-        defaults["workspace"] = str(runtime_workspace)
-        memory_search = defaults.get("memorySearch")
-        if isinstance(memory_search, dict):
-            defaults["memorySearch"] = {**memory_search, "enabled": False}
-        session_config = config.setdefault("session", {})
-        session_config["store"] = str(Path(config_dir.name) / "sessions.json")
-        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        self._openclaw_config_path_override = config_path
+
+        def build_config(binding_dir: Path) -> Dict[str, Any]:
+            selected["workspace"] = str(runtime_workspace)
+            selected["agentDir"] = str(binding_dir / "agent")
+            if model_ref is not None:
+                selected["model"] = {"primary": model_ref, "fallbacks": []}
+            defaults = (config.setdefault("agents", {})).setdefault("defaults", {})
+            defaults["workspace"] = str(runtime_workspace)
+            memory_search = defaults.get("memorySearch")
+            if isinstance(memory_search, dict):
+                defaults["memorySearch"] = {**memory_search, "enabled": False}
+            session_config = config.setdefault("session", {})
+            session_config["store"] = str(binding_dir / "sessions.json")
+            return config
+
+        # Phase 37 Pre-B-F2C: same managed lifecycle as the runtime binding
+        # (managed root, flock, metadata, 0600 config, forced-termination
+        # release, reconciler visibility). No auth profile is copied.
+        try:
+            binding = create_managed_binding(
+                agent_id=agent_id,
+                task_execution_id=getattr(self, "task_execution_id", None),
+                build_config=build_config,
+            )
+        except ExecutorWorkspaceBindingError as exc:
+            raise OpenClawAgentSelectionError(str(exc)) from exc
+        self._strict_planning_binding = binding
+        self._openclaw_config_path_override = binding.config_path
         self._last_selected_openclaw_agent_id = agent_id
 
     def _release_dedicated_strict_planning_agent(self) -> None:
-        config_dir = getattr(self, "_strict_planning_config_dir", None)
-        if config_dir is None:
+        binding = getattr(self, "_strict_planning_binding", None)
+        if binding is None:
             return
-        config_dir.cleanup()
-        self._strict_planning_config_dir = None
+        binding.release()
+        self._strict_planning_binding = None
         if self._workspace_binding is None:
             self._openclaw_config_path_override = None
 
@@ -1032,7 +1048,7 @@ class OpenClawSessionService:
             raise error
         if (
             self._workspace_binding is None
-            and getattr(self, "_strict_planning_config_dir", None) is None
+            and getattr(self, "_strict_planning_binding", None) is None
         ) or not self._openclaw_config_path_override:
             error = OpenClawWorkspaceBindingError(
                 "Sandboxed OpenClaw invocation has no ephemeral workspace binding"
@@ -1096,9 +1112,9 @@ class OpenClawSessionService:
         binding = getattr(self, "_workspace_binding", None)
         if binding is not None:
             bound_paths.add(Path(binding.config_path))
-        planning_dir = getattr(self, "_strict_planning_config_dir", None)
-        if planning_dir is not None:
-            bound_paths.add(Path(planning_dir.name) / "openclaw.json")
+        planning_binding = getattr(self, "_strict_planning_binding", None)
+        if planning_binding is not None:
+            bound_paths.add(Path(planning_binding.config_path))
         config_path = getattr(self, "_openclaw_config_path_override", None)
         if config_path is None or Path(config_path) not in bound_paths:
             raise OpenClawProviderControlError(
@@ -1272,22 +1288,17 @@ class OpenClawSessionService:
         not the real, persistent config.
         """
         binding = getattr(self, "_workspace_binding", None)
+        planning_binding = getattr(self, "_strict_planning_binding", None)
         if binding is not None:
             env.update(binding.environment)
-        elif getattr(self, "_openclaw_config_path_override", None) and getattr(
-            self, "_strict_planning_config_dir", None
+        elif (
+            getattr(self, "_openclaw_config_path_override", None)
+            and planning_binding is not None
         ):
-            # Dedicated Protocol v2 planning uses the same ephemeral config
-            # contract but predates ExecutorWorkspaceBinding. Keep its state
-            # directory invocation-local and explicit as well.
-            env.update(
-                {
-                    "OPENCLAW_CONFIG_PATH": str(self._openclaw_config_path_override),
-                    "OPENCLAW_STATE_DIR": str(
-                        Path(self._strict_planning_config_dir.name) / "state"
-                    ),
-                }
-            )
+            # Dedicated Protocol v2 planning (Phase 37 Pre-B-F2C): a managed
+            # ExecutorWorkspaceBinding whose OPENCLAW_CONFIG_PATH is the same
+            # file as the override and whose state dir is invocation-local.
+            env.update(planning_binding.environment)
         return env
 
     def _workspace_binding_spawn_kwargs(self) -> Dict[str, Any]:
@@ -1297,7 +1308,9 @@ class OpenClawSessionService:
         a SIGKILLed worker; holding the inherited flock keeps its binding
         classified ACTIVE so reconciliation never removes it underneath it.
         """
-        binding = getattr(self, "_workspace_binding", None)
+        binding = getattr(self, "_workspace_binding", None) or getattr(
+            self, "_strict_planning_binding", None
+        )
         pass_fds = binding.subprocess_pass_fds() if binding is not None else ()
         return {"pass_fds": pass_fds} if pass_fds else {}
 
@@ -3651,7 +3664,10 @@ class OpenClawSessionService:
                 # Phase 37 Pre-B-F2B-S2: this block's `finally` releases the
                 # service's binding, so it must never run on a binding owned
                 # by another lifecycle (e.g. a worker dispatch).
-                if self._workspace_binding is not None:
+                if (
+                    self._workspace_binding is not None
+                    or getattr(self, "_strict_planning_binding", None) is not None
+                ):
                     raise OpenClawAgentSelectionError(
                         "Planning invocation requires an unbound OpenClaw "
                         "runtime; refusing to replace or release a workspace "

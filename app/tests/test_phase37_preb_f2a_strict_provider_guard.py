@@ -112,7 +112,7 @@ def _service() -> OpenClawSessionService:
         adaptation_profile="openclaw_default",
     )
     service._workspace_binding = None
-    service._strict_planning_config_dir = None
+    service._strict_planning_binding = None
     service._openclaw_config_path_override = None
     service.execution_cwd_override = None
     service._last_selected_openclaw_agent_id = None
@@ -207,7 +207,7 @@ def test_c_dedicated_planning_binding_writes_only_its_temp_config(
     runtime_workspace = _runtime_context(tmp_path).runtime_workspace
 
     service._bind_dedicated_strict_planning_agent(runtime_workspace, "planning")
-    config_dir = Path(service._strict_planning_config_dir.name)
+    config_dir = Path(service._strict_planning_binding.config_path).parent
     try:
         assert service._last_selected_openclaw_agent_id == "planning"
         assert service._openclaw_config_path_override == config_dir / "openclaw.json"

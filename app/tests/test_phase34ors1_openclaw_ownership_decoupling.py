@@ -197,7 +197,7 @@ def test_service_command_builder_reads_active_ephemeral_config(tmp_path, monkeyp
     service._runtime_executor_context = None
     service._runtime_runner_agent_id = None
     service._runtime_workspace_previous_cwd_override = None
-    service._strict_planning_config_dir = None
+    service._strict_planning_binding = None
     service._last_selected_openclaw_agent_id = None
     service.execution_cwd_override = None
     service._log_entry = lambda *args, **kwargs: None
