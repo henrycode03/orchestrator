@@ -231,6 +231,18 @@ def isolated_runtime_root(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolated_openclaw_binding_root(monkeypatch, tmp_path):
+    """Keep ephemeral OpenClaw binding artifacts out of the real temp dir.
+
+    Phase 37 Pre-B-F2B: most historical /tmp binding leftovers were created by
+    test runs, two of them carrying copied credential files.
+    """
+    binding_root = tmp_path / "openclaw-bindings"
+    monkeypatch.setenv("ORCHESTRATOR_OPENCLAW_BINDING_ROOT", str(binding_root))
+    return binding_root
+
+
+@pytest.fixture(autouse=True)
 def reset_runtime_flags():
     original_force_inline = settings.INLINE_PLANNING
     original_keypair_flag = settings.ALLOW_TEST_KEYPAIR_ENDPOINT

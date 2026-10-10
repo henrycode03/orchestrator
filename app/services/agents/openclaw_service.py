@@ -1290,6 +1290,17 @@ class OpenClawSessionService:
             )
         return env
 
+    def _workspace_binding_spawn_kwargs(self) -> Dict[str, Any]:
+        """Let the OpenClaw child inherit the binding's liveness lock.
+
+        Phase 37 Pre-B-F2B: the child runs in its own session and can outlive
+        a SIGKILLed worker; holding the inherited flock keeps its binding
+        classified ACTIVE so reconciliation never removes it underneath it.
+        """
+        binding = getattr(self, "_workspace_binding", None)
+        pass_fds = binding.subprocess_pass_fds() if binding is not None else ()
+        return {"pass_fds": pass_fds} if pass_fds else {}
+
     @staticmethod
     def _extract_reported_workspace_dir(*texts: str) -> Optional[str]:
         combined = "\n".join(text for text in texts if text)
@@ -1897,6 +1908,7 @@ class OpenClawSessionService:
                 cwd=cwd,
                 env=subprocess_env,
                 start_new_session=True,
+                **self._workspace_binding_spawn_kwargs(),
             )
         except BaseException as exc:
             diagnostics["provider_invocation_started"] = False
@@ -3137,6 +3149,7 @@ class OpenClawSessionService:
                         cwd=execution_cwd,
                         env=subprocess_env,
                         start_new_session=True,
+                        **self._workspace_binding_spawn_kwargs(),
                     )
                     register_process_group(process.pid)
                     subprocess_started_at = time.monotonic()

@@ -273,6 +273,31 @@ def on_worker_ready(sender, **kwargs):
             db.close()
     except Exception as exc:
         logger.error("Worker boot recovery scan failed: %s", exc)
+    report_openclaw_binding_residue_on_boot()
+
+
+def report_openclaw_binding_residue_on_boot() -> Optional[Dict[str, Any]]:
+    """Phase 37 Pre-B-F2B: surface crash residue at boot. Report-only.
+
+    A SIGKILLed worker cannot release its bindings; boot is the first point
+    where the residue is observable. Removal stays an explicit operator
+    action (scripts/maintenance/openclaw_binding_reconcile.py --apply).
+    """
+
+    try:
+        from app.services.orchestration.execution.binding_reconciliation import (
+            reconcile_binding_artifacts,
+        )
+
+        summary = reconcile_binding_artifacts(apply=False).get("summary")
+    except Exception as exc:  # noqa: BLE001 - boot must not fail on residue scan
+        logger.warning("Worker boot OpenClaw binding residue scan failed: %s", exc)
+        return None
+    if summary and summary.get("total"):
+        logger.warning(
+            "Worker boot OpenClaw binding residue (report-only): %s", summary
+        )
+    return summary
 
 
 def reconcile_backend_slots_on_boot(db) -> Optional[Dict[str, Any]]:

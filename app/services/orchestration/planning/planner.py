@@ -376,6 +376,22 @@ class PlannerService:
 
     @staticmethod
     @asynccontextmanager
+    async def _release_runtime_binding_on_exit(runtime: Any):
+        """Release ``runtime``'s workspace binding however the block exits.
+
+        Phase 37 Pre-B-F2B: covers a planning-lock wait timeout/cancellation,
+        which previously skipped the release of an already-bound runtime.
+        """
+        try:
+            yield
+        finally:
+            if runtime is not None and hasattr(
+                runtime, "release_runtime_workspace_binding"
+            ):
+                runtime.release_runtime_workspace_binding()
+
+    @staticmethod
+    @asynccontextmanager
     async def _openclaw_planning_lock_async():
         OPENCLAW_PLANNING_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         handle = OPENCLAW_PLANNING_LOCK_PATH.open("a", encoding="utf-8")
@@ -1989,7 +2005,9 @@ class PlannerService:
             fallback_result["diagnostics"] = diagnostics
             return fallback_result
 
-        async with PlannerService._openclaw_planning_lock_async() as lock_diagnostics:
+        async with PlannerService._release_runtime_binding_on_exit(
+            repair_runtime
+        ), PlannerService._openclaw_planning_lock_async() as lock_diagnostics:
             if lock_diagnostics_out is not None:
                 lock_diagnostics_out.update(lock_diagnostics)
             try:
