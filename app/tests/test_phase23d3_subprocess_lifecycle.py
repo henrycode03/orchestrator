@@ -16,6 +16,7 @@ registration/unregistration contract is idempotent.
 
 import os
 import signal
+import subprocess
 import time
 from unittest.mock import patch
 
@@ -31,6 +32,20 @@ def _reset_module_state():
     sl._reset_for_tests()
 
 
+@pytest.fixture
+def owned_group():
+    """A real test-owned child leading its own group (Phase 37 S1: the
+    kill path refuses unregistered/unowned numbers, so fake pids no longer
+    reach os.killpg). Tests still patch os.killpg; the child is reaped via
+    its own pid only."""
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
 class TestProcessGroupRegistry:
     def test_register_and_unregister_round_trip(self):
         sl.register_process_group(4242)
@@ -41,7 +56,7 @@ class TestProcessGroupRegistry:
     def test_unregister_unknown_pid_is_a_noop(self):
         sl.unregister_process_group(999999)  # never raises
 
-    def test_kill_process_group_sends_term_then_kill(self):
+    def test_kill_process_group_sends_term_then_kill(self, owned_group):
         calls = []
 
         def _fake_killpg(pid, sig):
@@ -50,15 +65,15 @@ class TestProcessGroupRegistry:
                 return
             raise ProcessLookupError()
 
-        sl.register_process_group(123)
+        sl.register_process_group(owned_group)
         with patch.object(sl.os, "killpg", side_effect=_fake_killpg), patch.object(
             sl.time, "sleep"
         ) as mock_sleep:
-            sl.kill_process_group(123)
+            sl.kill_process_group(owned_group)
 
-        assert calls == [(123, signal.SIGTERM), (123, signal.SIGKILL)]
+        assert calls == [(owned_group, signal.SIGTERM), (owned_group, signal.SIGKILL)]
         mock_sleep.assert_called_once()
-        assert 123 not in sl._active_process_groups
+        assert owned_group not in sl._active_process_groups
 
     def test_kill_process_group_already_dead_is_idempotent(self):
         sl.register_process_group(123)
@@ -120,9 +135,9 @@ class TestForcedTerminationCleanupRegistration:
 
 
 class TestForcedTerminationKillsProcessGroupsBeforeCleanup:
-    def test_active_process_groups_killed_before_cleanup_callbacks(self):
+    def test_active_process_groups_killed_before_cleanup_callbacks(self, owned_group):
         order = []
-        sl.register_process_group(555)
+        sl.register_process_group(owned_group)
         sl.register_forced_termination_cleanup(lambda: order.append("cleanup"))
 
         def _fake_killpg(pid, sig):
@@ -136,7 +151,7 @@ class TestForcedTerminationKillsProcessGroupsBeforeCleanup:
         ), patch.object(sl.os, "kill"), patch.object(sl.signal, "signal"):
             sl._handle_forced_termination(signal.SIGTERM, None)
 
-        assert order == ["kill:555", "cleanup"]
+        assert order == [f"kill:{owned_group}", "cleanup"]
 
     def test_registry_cleared_after_forced_termination(self):
         sl.register_process_group(1)
@@ -148,7 +163,7 @@ class TestForcedTerminationKillsProcessGroupsBeforeCleanup:
         ):
             sl._handle_forced_termination(signal.SIGTERM, None)
 
-        assert sl._active_process_groups == set()
+        assert sl._active_process_groups == {}
         assert sl._active_cleanup_callbacks == []
 
 
