@@ -3648,6 +3648,15 @@ class OpenClawSessionService:
                 session_prefix in {"planning", *STRICT_PROVIDER_SESSION_PREFIXES}
                 and self.project_id is not None
             ):
+                # Phase 37 Pre-B-F2B-S2: this block's `finally` releases the
+                # service's binding, so it must never run on a binding owned
+                # by another lifecycle (e.g. a worker dispatch).
+                if self._workspace_binding is not None:
+                    raise OpenClawAgentSelectionError(
+                        "Planning invocation requires an unbound OpenClaw "
+                        "runtime; refusing to replace or release a workspace "
+                        "binding owned by another lifecycle"
+                    )
                 project = (
                     self.db.query(Project).filter(Project.id == self.project_id).first()
                 )
